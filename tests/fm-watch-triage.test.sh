@@ -271,8 +271,15 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  # A read that produced no verdict line is UNKNOWN, not a stopped crew: callers
+  # that act on a lost work signal must be able to tell the two apart, and it is
+  # still never absorbable.
+  FM_FAKE_CREW_STATE='fm-crew-state.sh: timed out resolving the task'
+  [ "$(crew_absorb_class a)" = unreadable ] || fail "a failed state read was collapsed into a stopped-crew verdict"
+  ! crew_is_provably_working a || fail "an unreadable read was treated as provably working"
+  ! crew_is_paused a || fail "an unreadable read was classed paused"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/none/unreadable from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY

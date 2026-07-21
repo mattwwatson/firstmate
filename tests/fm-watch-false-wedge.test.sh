@@ -118,6 +118,79 @@ test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
   pass "a declared pause with a live agent surfaces once, labeled, and stays absorbed across pane repaints"
 }
 
+# One watcher round against a paused crew, with the pane text the caller chose.
+# The status file is left alone, so the caller owns which pause is declared.
+run_paused_round() {  # <dir> <window> <pane-text> <crew-state>
+  local dir=$1 window=$2 text=$3 crew_state=$4 pid
+  printf '%s\n' "$text" > "$dir/pane.txt"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$dir/watch.out" 2>&1 &
+  pid=$!
+  if wait_live "$pid" 40; then reap "$pid"; else wait "$pid" || true; fi
+}
+
+# Declare <line> as <task>'s current pause and hide it from the per-poll signal
+# scan, so the round under test exercises the stale path and nothing else.
+declare_pause() {  # <state> <task> <line>
+  local state=$1 task=$2 line=$3 statusf="$1/$2.status"
+  printf '%s\n' "$line" > "$statusf"
+  backdate "$statusf" 7200
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${task}_status"
+}
+
+# The other half of symptom A's anchor: "already shown" belongs to the PAUSE
+# INSTANCE, not to the window. A crew that declares one pause, is surfaced for
+# it, then declares a genuinely DIFFERENT pause has raised a new external-decision
+# gate - it must get its own single sighting, not inherit the previous pause's
+# suppression and wait out the hour-long recheck cadence before firstmate ever
+# hears about it.
+test_a_different_declared_pause_gets_its_own_sighting() {
+  local dir state window key first second
+  dir=$(make_case paused-second-instance); state="$dir/state"
+  window="test:fm-paused-two"
+  first='paused: rebased on current base, awaiting pipeline go-ahead'
+  second='paused: awaiting the captain answer on the schema choice'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused-two.meta"
+  declare_pause "$state" paused-two "$first"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  : > "$dir/watch.out"
+
+  run_paused_round "$dir" "$window" 'idle grok prompt, waiting' \
+    "state: paused · source: status-log · ${first#paused: }"
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the first declared pause did not surface exactly once: $(cat "$dir/watch.out")"
+  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$first" ] \
+    || fail "the already-surfaced marker was not anchored on the pause that was surfaced"
+
+  # Same pause, repainted pane: still absorbed, as symptom A requires.
+  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 88%)' \
+    "state: paused · source: status-log · ${first#paused: }"
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "a repaint of the SAME pause surfaced again: $(cat "$dir/watch.out")"
+
+  # A different pause: a new gate, and the status file is fresh enough that the
+  # hour-long recheck cadence would not have surfaced it for another hour.
+  declare_pause "$state" paused-two "$second"
+  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 87%)' \
+    "state: paused · source: status-log · ${second#paused: }"
+  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
+    || fail "a genuinely different declared pause was absorbed silently under the previous pause's suppression: $(cat "$dir/watch.out")"
+  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$second" ] \
+    || fail "the already-surfaced marker was not re-anchored on the new pause"
+  [ "$(bare_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a declared pause surfaced as a bare stale with no pause context"
+
+  # And the new pause is now the one that is absorbed, so it too surfaces once.
+  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 86%)' \
+    "state: paused · source: status-log · ${second#paused: }"
+  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
+    || fail "the new pause did not settle onto the bounded cadence after its one sighting"
+  pass "a different declared pause on the same window gets its own single sighting"
+}
+
 # The disconfirming half of symptom A: absorbing must be a property of the PAUSE,
 # not of the pane. A crew that leaves the pause - here by resuming real work - has
 # to lose the pause cadence again on the next reading.
@@ -255,6 +328,73 @@ test_lost_work_signal_escalates_inside_the_backoff_window() {
   pass "a pane that stops looking active escalates at once, inside the backed-off window"
 }
 
+# The evidence probe is only evidence when the read SUCCEEDED. A failed state read
+# (timeout, contention, an unresolvable task id) says nothing about the crew, so it
+# must not advance the ladder, must not shortcut the backed-off window the way a
+# real verdict change does, and must never be reported as a lost work signal.
+test_unreadable_state_read_is_not_a_lost_work_signal() {
+  local dir state window key working
+  dir=$(make_case unreadable-probe); state="$dir/state"
+  window="test:fm-unreadable"
+  working='state: working · source: run-step · validating (running)'
+  prime_working_stale "$dir" "$window" unreadable "no-mistakes axi run: test step"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  run_wedge_round "$dir" "$window" 245 0 "$working"
+  grep -F "escalation 1" "$dir/watch.out" >/dev/null || fail "the first escalation did not land: $(cat "$dir/watch.out")"
+
+  # The reader now fails: its output carries no verdict line at all.
+  run_wedge_round "$dir" "$window" 300 300 'fm-crew-state.sh: timed out resolving the task'
+  [ ! -s "$dir/watch.out" ] \
+    || fail "a failed crew-state read woke firstmate as though the crew had stopped: $(cat "$dir/watch.out")"
+  grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
+    && fail "a failed crew-state read was reported as a confirmed lost work signal"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "an unreadable verdict advanced the escalation ladder"
+  [ "$(cat "$state/.wedge-probe-$key" 2>/dev/null || true)" = working ] \
+    || fail "an unreadable verdict overwrote the last evidence actually observed"
+
+  # ... and it did not leave the next probe looking like a changed verdict, so an
+  # unchanged, still-working crew stays inside its backed-off window.
+  run_wedge_round "$dir" "$window" 360 300 "$working"
+  [ ! -s "$dir/watch.out" ] \
+    || fail "an unreadable read let the next probe bypass the backed-off window: $(cat "$dir/watch.out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "the ladder advanced without new evidence after an unreadable read"
+
+  # Nothing is traded away: once the read recovers AND the verdict really changed,
+  # the escalation lands at the next probe as before.
+  run_wedge_round "$dir" "$window" 400 300 'state: unknown · source: none · no current-state source available'
+  grep -F "escalation 2" "$dir/watch.out" >/dev/null \
+    || fail "a genuine verdict change after an unreadable read did not escalate: $(cat "$dir/watch.out")"
+  pass "a failed crew-state read is unknown evidence: no ladder advance, no backoff bypass, no lost-work-signal claim"
+}
+
+# A crew that declares an external wait between the loop's status read and the
+# probe is not a stopped crew: the probe hands it to the bounded pause cadence
+# rather than escalating it with the lost-work-signal wording.
+test_paused_probe_verdict_goes_to_the_pause_cadence() {
+  local dir state window key
+  dir=$(make_case probe-turns-paused); state="$dir/state"
+  window="test:fm-probe-paused"
+  prime_working_stale "$dir" "$window" probepaused "no-mistakes axi run: test step"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  run_wedge_round "$dir" "$window" 245 0 'state: working · source: run-step · validating (running)'
+  grep -F "escalation 1" "$dir/watch.out" >/dev/null || fail "the first escalation did not land: $(cat "$dir/watch.out")"
+
+  run_wedge_round "$dir" "$window" 300 300 'state: paused · source: status-log · awaiting the upstream release'
+  grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
+    && fail "a declared external wait was reported as a stopped crew"
+  grep -F "possible wedge" "$dir/watch.out" >/dev/null \
+    && fail "a declared external wait was reported as a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "a declared external wait kept climbing the wedge ladder"
+  [ -e "$state/.paused-$key" ] \
+    || fail "a paused probe verdict did not hand the pane to the bounded pause cadence"
+  pass "a paused probe verdict is handed to the pause cadence, not escalated as a stopped crew"
+}
+
 test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
   local dir state window key n quiet
   dir=$(make_case persistent-wedge); state="$dir/state"
@@ -284,7 +424,10 @@ test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
 }
 
 test_declared_pause_with_live_agent_surfaces_once_across_repaints
+test_a_different_declared_pause_gets_its_own_sighting
 test_pause_absorb_releases_when_the_crew_resumes
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
+test_unreadable_state_read_is_not_a_lost_work_signal
+test_paused_probe_verdict_goes_to_the_pause_cadence
 test_demand_deep_inspection_still_reached_for_a_persistent_wedge
