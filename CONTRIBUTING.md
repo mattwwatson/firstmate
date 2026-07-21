@@ -78,6 +78,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+A test that starts a background process must register it with `fm_test_track_pid` so it is reaped on every exit path, including the abort that `fail` performs mid-case.
+A leaked child keeps the suite's inherited output pipe open, which hangs whatever is reading that pipe to EOF, and it keeps holding its temp home's watcher lock; `tests/lib.sh` owns the registry and reaping rules, including why nothing is ever reaped by process-name pattern.
 
 ## Questions
 

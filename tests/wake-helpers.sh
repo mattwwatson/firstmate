@@ -32,13 +32,7 @@ fi
 # that channel, to exercise graceful degradation. Suites that do not source this
 # harness still cannot fire a real notification: the daemon defaults the seam to
 # "discard" whenever it is sourced (its library-mode guard).
-# Create the recorder dir with mktemp directly (not fm_test_tmproot, whose
-# first call installs an EXIT trap that, invoked inside a command-substitution
-# subshell, would delete the dir on subshell exit). Register it for the same
-# cleanup and install the trap in THIS shell if it is the first registration.
-_fm_wedge_rec_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-wedge-rec.XXXXXX")
-if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
-FM_TEST_CLEANUP_DIRS+=("$_fm_wedge_rec_dir")
+_fm_wedge_rec_dir=$(fm_test_tmproot fm-wedge-rec)
 cat > "$_fm_wedge_rec_dir/rec" <<'REC'
 #!/usr/bin/env bash
 printf '%s\t%s\n' "${1:-}" "${2:-}" >> "${FM_WEDGE_ALARM_LOG:-/dev/null}"
@@ -244,6 +238,100 @@ exit 1
 SH
   chmod +x "$fakebin/tmux"
   printf '%s\n' "$dir"
+}
+
+# fm_wake_start_peer <ready-file> [--ignore-term]: start a long-lived stand-in
+# for a peer watcher process and hand its pid back in FM_WAKE_PEER_PID only once
+# the process is genuinely READY. Readiness matters twice, and both used to be
+# raced:
+#   - the stand-in has exec'd its final program, so bin/fm-wake-lib.sh's
+#     fm_pid_identity records the identity the process will keep, not the
+#     pre-exec fork it happened to catch;
+#   - with --ignore-term the SIGTERM ignore disposition is already installed, so
+#     a restart arm's TERM cannot kill the fixture in its startup window and turn
+#     a "peer survives, arm attaches" case into a confusing "did not attach".
+# It is a plain function, not a command substitution, so $! stays a child of the
+# caller's shell and the caller can still wait on it.
+FM_WAKE_PEER_PID=
+fm_wake_start_peer() {
+  local ready=$1 policy=${2:-} i
+  rm -f "$ready"
+  bash -c '
+    [ "$2" = --ignore-term ] && trap "" TERM
+    : > "$1"
+    # Short sleeps, so a fixture that has to be force-killed cannot orphan a
+    # long-lived grandchild.
+    while :; do sleep 1; done
+  ' _ "$ready" "$policy" &
+  FM_WAKE_PEER_PID=$!
+  fm_test_track_pid "$FM_WAKE_PEER_PID"
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "peer fixture never signalled ready"
+  [ "$policy" = --ignore-term ] || return 0
+  # Fixture self-check: prove the ignore disposition really took, so a broken
+  # peer fails here by name instead of downstream as a flaky assertion.
+  kill -TERM "$FM_WAKE_PEER_PID" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 5 ]; do
+    is_live_non_zombie "$FM_WAKE_PEER_PID" || fail "term-resistant peer fixture died on SIGTERM"
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+# fm_wake_temp_watcher_pids <root>: print the pid of every watcher still recorded
+# as the live owner of a temp home's singleton lock under <root>. Scoped two ways
+# so it can never name a sibling firstmate home's real watcher: only locks whose
+# own recorded fm-home lies under <root> are considered, and the pid is confirmed
+# through bin/fm-wake-lib.sh's identity check, so a recycled pid is skipped.
+fm_wake_temp_watcher_pids() {
+  local root=$1 lock state home pid lib="$ROOT/bin/fm-wake-lib.sh"
+  for lock in "$root"/*/state/.watch.lock; do
+    [ -d "$lock" ] || continue
+    state=$(dirname "$lock")
+    pid=$(cat "$lock/pid" 2>/dev/null || true)
+    home=$(cat "$lock/fm-home" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    case "$home" in
+      "$root"/*) ;;
+      *) continue ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || continue
+    FM_STATE_OVERRIDE="$state" bash -c '
+      # shellcheck disable=SC1090,SC1091
+      . "$1"
+      fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"
+    ' _ "$lib" "$state" "$ROOT/bin/fm-watch.sh" "$pid" "$home" || continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# fm_wake_reap_temp_watchers <root>: end the watchers fm_wake_temp_watcher_pids
+# names. These are grandchildren (an arm forks its watcher), so the pid registry
+# in tests/lib.sh cannot reach them; the identity-verified temp-home lock can.
+fm_wake_reap_temp_watchers() {
+  local root=$1 pid i
+  for pid in $(fm_wake_temp_watcher_pids "$root"); do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  i=0
+  while [ "$i" -lt 20 ] && [ -n "$(fm_wake_temp_watcher_pids "$root")" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # Re-derive the list rather than reusing the first one: a pid only stays
+  # eligible for the harder signal while the temp home's lock still identifies it
+  # as that home's watcher.
+  for pid in $(fm_wake_temp_watcher_pids "$root"); do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  return 0
 }
 
 wait_for_exit() {
