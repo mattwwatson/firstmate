@@ -41,8 +41,9 @@
 #
 # Forge-agnostic patch-id proof (no PR head ref exists, as on Bitbucket Cloud). The
 # GitHub PR-head range is unchanged and stays covered by (g), (m), (n) and (k).
-#   (z1) patch replayed on default + conflicting advance        -> ALLOW  (default range)
+#   (z1) patch replayed and still present + conflicting advance -> ALLOW  (default range)
 #   (z2) same shape, patch never replayed                       -> REFUSE (safety)
+#   (z2b) same shape, patch replayed then reverted on default   -> REFUSE (content gone)
 #   (z3) same shape plus one further unpushed commit            -> REFUSE (total containment)
 #   (z4a) same shape, scan limit truncates the landed commit -> REFUSE (bounded scan)
 #   (z4) Bitbucket origin                                       -> no refs/pull fetch
@@ -265,34 +266,50 @@ commit_tree_from_wt_head() {
 }
 
 # Build the shape the forge-agnostic patch-id proof exists for. Leaves:
-#   origin/main = baseline -> replayed <file>=<content> -> conflicting advance
-#   worktree    = baseline -> <file>=<content>  (unpushed, same patch id as replay)
-# The branch's own commit is therefore reachable from no remote, its patch IS on
-# the default branch, and the 3-way merge of origin/main with HEAD conflicts, so
-# content_in_default is inconclusive and only the patch-id proof can answer.
-# Pass landed=no to skip the replay, leaving genuinely unlanded work with the same
-# conflicting advance. Args: case_dir file content [landed]
+#   origin/main      = baseline -> replayed <file>=<content> -> other.txt advance
+#   origin/side-work = baseline -> other.txt=side
+#   worktree         = baseline -> other.txt=side -> <file>=<content>  (last unpushed)
+# The branch's own <file> commit is reachable from no remote and its patch IS on the
+# default branch, still present in its current content. The conflict that makes
+# content_in_default inconclusive comes from other.txt, which both sides changed
+# differently - and that commit is safe to discard because it lives on origin/side-work.
+# So only the patch-id proof can answer, and answering yes loses nothing.
+# landed=no skips the replay, leaving genuinely unlanded work with the same conflict.
+# landed=reverted replays the patch and then undoes it, so the patch id is in the
+# range but the content is NOT in the default branch any more.
+# Args: case_dir file content [landed]
 setup_replayed_patch_with_conflicting_advance() {
   local case_dir=$1 file=$2 content=$3 landed=${4:-yes} tmp
-  # Baseline containing the file, pushed to origin/main so it is not "unpushed".
+  # Baseline containing both files, pushed to origin/main so it is not "unpushed".
   wt_commit_file "$case_dir" "$file" baseline "baseline $file"
+  wt_commit_file "$case_dir" other.txt baseline "baseline other.txt"
   git -C "$case_dir/wt" push -q origin "HEAD:refs/heads/main"
   git -C "$case_dir/project" fetch -q origin main
+  # A commit that conflicts with main's advance but is preserved on a remote, so the
+  # patch-id proof never has to vouch for it.
+  wt_commit_file "$case_dir" other.txt side "side work"
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/heads/side-work"
+  git -C "$case_dir/wt" fetch -q origin
   # The branch's own work: never pushed anywhere.
   wt_commit_file "$case_dir" "$file" "$content" "branch change"
 
   tmp="$case_dir/_advance"
   git clone -q "$case_dir/origin.git" "$tmp"
-  if [ "$landed" = yes ]; then
+  if [ "$landed" != no ]; then
     # Replay the identical diff on main. patch-id hashes the diff only, so this
     # commit carries the same patch id as the branch's own commit.
     printf '%s\n' "$content" > "$tmp/$file"
     git -C "$tmp" add -- "$file"
     git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "replayed change"
   fi
-  # Advance main further in a way that conflicts with the branch's version.
-  printf '%s\n' "advanced past the branch" > "$tmp/$file"
-  git -C "$tmp" add -- "$file"
+  if [ "$landed" = reverted ]; then
+    printf '%s\n' baseline > "$tmp/$file"
+    git -C "$tmp" add -- "$file"
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "revert replayed change"
+  fi
+  # Advance main in a way that conflicts with the branch's remote-preserved commit.
+  printf '%s\n' "advanced past the branch" > "$tmp/other.txt"
+  git -C "$tmp" add -- other.txt
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "advance main"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
@@ -1475,6 +1492,27 @@ test_patch_id_default_range_still_refuses_genuinely_unlanded_work() {
   pass "default-branch patch-id proof still refuses work that never landed (regression guard)"
 }
 
+test_patch_id_default_range_refuses_a_reverted_patch() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-reverted)
+  write_meta "$case_dir" no-mistakes ship
+  # The default branch applied the branch's exact diff and then REVERTED it, so its
+  # patch id is in the scanned range while the content is gone. The only surviving
+  # copy is the unpushed local commit: a patch-id match alone must not authorize
+  # hard-resetting it away.
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change reverted
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-reverted: teardown must refuse a landed-then-reverted patch"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-reverted: no REFUSED line in stderr"
+  pass "default-branch patch-id proof refuses a patch the default branch has since reverted"
+}
+
 test_patch_id_default_range_refuses_when_only_some_commits_landed() {
   local case_dir rc
   case_dir=$(make_case patch-id-default-range-partial)
@@ -1594,6 +1632,7 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_patch_id_proof_uses_default_branch_when_no_pr_head_exists
 test_patch_id_default_range_still_refuses_genuinely_unlanded_work
+test_patch_id_default_range_refuses_a_reverted_patch
 test_patch_id_default_range_refuses_when_only_some_commits_landed
 test_patch_id_default_range_scan_limit_errs_toward_refusing
 test_bitbucket_origin_skips_github_pr_head_fetch

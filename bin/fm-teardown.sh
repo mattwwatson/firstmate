@@ -11,7 +11,8 @@
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch, or every commit on no remote is
-# present by patch id in the up-to-date default branch. This recognizes the common
+# present by patch id in - and still present in the current content of - the
+# up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # The three proofs are independent and additive, and each refuses when inconclusive:
@@ -19,9 +20,13 @@
 #   - content_in_default  pure git, survives squash, inconclusive on a merge conflict
 #   - patches_in_default  pure git, forge-agnostic, rescues the conflicting-advance
 #                         case above; the only patch-id proof available on Bitbucket
-#                         Cloud, which publishes no PR head ref to fetch;
-#                         FM_LANDED_PATCH_SCAN_LIMIT (default 1000) bounds how far
-#                         back the default branch is scanned
+#                         Cloud, which publishes no PR head ref to fetch. A patch id
+#                         match is not enough on a whole branch - each match must
+#                         also still be reverse-appliable against the default
+#                         branch's current tree, so a landed-then-reverted change
+#                         refuses. FM_LANDED_PATCH_SCAN_LIMIT (default 1000; 0 or a
+#                         non-numeric value means unbounded) bounds how far back the
+#                         default branch is scanned
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -150,8 +155,9 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 # How many of the default branch's most recent commits the patch-id landed-work
 # proof will hash. Bounds teardown's cost on a long-lived branch off a busy default
 # branch; see unpushed_patches_are_in_ref for why truncation is a safe direction.
-# A non-numeric override is ignored, leaving the range unbounded rather than
-# silently narrowed to something arbitrary.
+# A non-numeric override, and 0, both mean "unbounded": they are the two natural
+# spellings of "no limit" and must not behave oppositely (0 as a real limit would
+# empty the range and silently disable the proof).
 LANDED_PATCH_SCAN_LIMIT=${FM_LANDED_PATCH_SCAN_LIMIT:-1000}
 
 default_branch() {
@@ -344,7 +350,50 @@ patch_id_for_commit() {
   local commit=$1
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
+    | awk 'NR == 1 && $1 ~ /^[0-9a-f]+$/ && $1 !~ /^0+$/ { print $1 }'
+}
+
+# Every patch id in <base>..<ref>, hashed in ONE pass: `git log -p` streams the
+# whole range into a single `git patch-id`, which emits one line per commit that
+# has a diff. Commits with no diff of their own (merges, empty commits) emit
+# nothing and so contribute no id - they can never make an unpushed commit match.
+# <limit>, when non-empty, caps how many of the range's most recent commits are read.
+patch_ids_in_range() {
+  local base=$1 ref=$2 limit=$3
+  if [ -n "$limit" ]; then
+    git -C "$WT" log -p --no-ext-diff --format='commit %H' --max-count="$limit" "$base..$ref" -- 2>/dev/null
+  else
+    git -C "$WT" log -p --no-ext-diff --format='commit %H' "$base..$ref" -- 2>/dev/null
+  fi \
+    | git patch-id --stable 2>/dev/null \
+    | awk '$1 ~ /^[0-9a-f]+$/ && $1 !~ /^0+$/ { print $1 }' \
+    | sort -u
+}
+
+# Is <commit>'s own change still present in <ref>'s CURRENT content? A patch id
+# match only proves an identical diff was applied to <ref> at some point; it says
+# nothing about whether a later commit reverted or replaced it. This reverse-applies
+# the commit's diff against <ref>'s tree: it can only succeed while that exact change
+# is still there. The check is per-commit and per-file, so it stays far narrower than
+# content_in_default's whole-branch 3-way merge - it still answers when that merge is
+# inconclusive for unrelated reasons.
+# Nothing in the real worktree or its index is touched: the tree is read into a
+# throwaway index and `git apply --check --cached` never writes. Any error - an
+# unreadable diff, an empty diff, a failed read-tree - returns non-zero, so
+# inconclusive still means refuse.
+commit_content_present_in_ref() {
+  local commit=$1 ref=$2 patch index rc=0
+  patch=$(git -C "$WT" show --no-ext-diff --binary --format=%n "$commit" 2>/dev/null) || return 1
+  [ -n "$patch" ] || return 1
+  index=$(mktemp "${TMPDIR:-/tmp}/fm-teardown-index.XXXXXX") || return 1
+  rm -f -- "$index"
+  GIT_INDEX_FILE="$index" git -C "$WT" read-tree "$ref^{tree}" >/dev/null 2>&1 || rc=1
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$patch" \
+      | GIT_INDEX_FILE="$index" git -C "$WT" apply --check --cached --reverse - >/dev/null 2>&1 || rc=1
+  fi
+  rm -f -- "$index"
+  return "$rc"
 }
 
 # Forge-agnostic core of the patch-id proof: is every commit the worktree holds
@@ -356,31 +405,24 @@ patch_id_for_commit() {
 # Every inconclusive outcome returns non-zero so the caller refuses: no HEAD, no
 # merge-base, an empty comparison range, an unreadable patch id, or any single
 # unpushed commit whose patch id is absent from the range.
-# <limit>, when given, caps how many of the range's most recent commits are hashed.
-# A PR head range is naturally small and passes no limit; a default-branch range is
-# not, and computing a patch id per commit is not free. Truncation can only lose a
-# match, never invent one, so the bound errs toward refusing.
+# <limit>, when non-empty and greater than zero, caps how many of the range's most
+# recent commits are hashed. A PR head range is naturally small and passes no limit;
+# a default-branch range is not. Truncation can only lose a match, never invent one,
+# so the bound errs toward refusing.
+# <require_present>, when "yes", additionally requires each matching unpushed commit's
+# change to still be present in <landed_ref>'s current content (see
+# commit_content_present_in_ref). A patch id alone proves only that the diff was once
+# applied; on a whole default branch that is not enough, because the change may since
+# have been reverted, and hard-resetting the worktree would then destroy the only copy.
 unpushed_patches_are_in_ref() {
-  local landed_ref=$1 limit=${2:-} current base range_commits landed_patch_ids commit patch_id unpushed
+  local landed_ref=$1 limit=${2:-} require_present=${3:-no} current base landed_patch_ids commit patch_id unpushed
   case "$limit" in
     ''|*[!0-9]*) limit= ;;
+    *) [ "$limit" -gt 0 ] || limit= ;;
   esac
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$landed_ref" 2>/dev/null) || return 1
-  if [ -n "$limit" ]; then
-    range_commits=$(git -C "$WT" log --format=%H --max-count="$limit" "$base..$landed_ref" -- 2>/dev/null) || return 1
-  else
-    range_commits=$(git -C "$WT" log --format=%H "$base..$landed_ref" -- 2>/dev/null) || return 1
-  fi
-  landed_patch_ids=$(
-    printf '%s\n' "$range_commits" \
-      | while IFS= read -r commit; do
-          [ -n "$commit" ] || continue
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
+  landed_patch_ids=$(patch_ids_in_range "$base" "$landed_ref" "$limit") || return 1
   [ -n "$landed_patch_ids" ] || return 1
   unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
@@ -389,6 +431,9 @@ unpushed_patches_are_in_ref() {
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$landed_patch_ids" | grep -qxF "$patch_id" || return 1
+    if [ "$require_present" = yes ]; then
+      commit_content_present_in_ref "$commit" "$landed_ref" || return 1
+    fi
   done <<EOF
 $unpushed
 EOF
@@ -463,12 +508,16 @@ content_in_default() {
 # It rescues the case content_in_default cannot decide: the branch's commits were
 # replayed onto the default branch, but the default branch has since advanced in a
 # way that conflicts with the branch, making the 3-way merge inconclusive.
+# Unlike the PR-head range - which is only ever the commits being merged - a whole
+# default branch also contains the commits that UNDID things, so a patch id match on
+# its own would accept work that landed and was then reverted. Each match must
+# therefore also still be present in the default branch's current content.
 # Returns non-zero whenever the default branch cannot be resolved or any unpushed
 # commit is missing from it, so an inconclusive result still refuses.
 patches_in_default() {
   local ref
   ref=$(default_ref_up_to_date) || return 1
-  unpushed_patches_are_in_ref "$ref" "$LANDED_PATCH_SCAN_LIMIT"
+  unpushed_patches_are_in_ref "$ref" "$LANDED_PATCH_SCAN_LIMIT" yes
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
