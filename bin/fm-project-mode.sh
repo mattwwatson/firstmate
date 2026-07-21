@@ -48,11 +48,15 @@ REG="$DATA/projects.md"
 
 NAME=
 QUERY=
+# Whether --grant was supplied at all, tracked apart from its value: an empty
+# grant name is a caller mistake and must be refused, not read as "no query".
+QUERY_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --grant)
       [ $# -ge 2 ] || { echo "usage: fm-project-mode.sh <project-name> [--grant <name>]" >&2; exit 2; }
       QUERY=$2
+      QUERY_SET=1
       shift 2
       ;;
     -*) echo "error: unknown option \"$1\"" >&2; exit 2 ;;
@@ -67,7 +71,7 @@ done
 
 # An unknown grant name is a caller mistake, not a denial: refuse it loudly with
 # its own exit code so it can never be mistaken for a resolved "not granted".
-if [ -n "$QUERY" ]; then
+if [ "$QUERY_SET" = 1 ]; then
   case "$QUERY" in
     findings|merge|local-merge) ;;
     *) echo "error: unknown grant \"$QUERY\"; expected findings, merge, or local-merge" >&2; exit 2 ;;
@@ -96,7 +100,7 @@ emit() {
   if [ "$G_LOCAL_MERGE" = on ]; then grants="${grants:+$grants,}local-merge"; fi
   [ -n "$grants" ] || grants=none
 
-  if [ -n "$QUERY" ]; then
+  if [ "$QUERY_SET" = 1 ]; then
     case "$QUERY" in
       findings) [ "$G_FINDINGS" = on ] || exit 1 ;;
       merge) [ "$G_MERGE" = on ] || exit 1 ;;

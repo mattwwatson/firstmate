@@ -178,6 +178,19 @@ test_grant_query_rejects_an_unknown_grant_name() {
   pass "an unknown grant name is refused, never answered as granted"
 }
 
+test_grant_query_rejects_an_empty_grant_name() {
+  local home status out
+  # An empty or unset grant name must be refused exactly like an unknown one.
+  # The project below holds every grant, so falling through to the plain resolve
+  # path would print "<mode> <grants>" and exit 0 - a silent grant of merge.
+  home=$(registry '- app [no-mistakes +yolo] - x (added 2026-07-21)')
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --grant '' 2>/dev/null) && status=0 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "querying an empty grant name must not report success on a fully-granted project"
+  [ -z "$out" ] || fail "an empty grant query must print nothing on stdout, got \"$out\""
+  pass "an empty grant name is refused, never answered as granted"
+}
+
 # --- caller contract --------------------------------------------------------
 
 test_second_field_can_never_be_read_as_the_old_boolean() {
@@ -240,6 +253,7 @@ test_unknown_grant_token_grants_nothing_and_reports
 test_unknown_grant_does_not_poison_valid_siblings
 test_malformed_and_absent_input_resolves_to_least_permission
 test_grant_query_rejects_an_unknown_grant_name
+test_grant_query_rejects_an_empty_grant_name
 test_second_field_can_never_be_read_as_the_old_boolean
 test_every_caller_reads_the_field_it_intends
 test_spawn_records_grants_in_task_metadata
