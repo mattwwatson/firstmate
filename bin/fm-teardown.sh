@@ -454,7 +454,10 @@ unpushed_patches_are_in_ref() {
   base=$(git -C "$WT" merge-base "$current" "$landed_ref" 2>/dev/null) || return 1
   landed_patch_ids=$(patch_ids_in_range "$base" "$landed_ref" "$limit") || return 1
   [ -n "$landed_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  # --topo-order, not git log's commit-date default: the rollback walk below needs a
+  # child undone before its parent, and committer dates can be skewed (rebase
+  # --committer-date-is-author-date, git am, clock drift across worktrees).
+  unpushed=$(git -C "$WT" log --topo-order --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   if [ "$require_present" = yes ]; then
     index=$(rollback_index_for_ref "$landed_ref") || return 1
