@@ -894,22 +894,26 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
 }
 
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern enter_pattern literal_line disarm_line enter_line
+  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
   # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
   # shellcheck disable=SC2016
   literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
   # shellcheck disable=SC2016
-  disarm_pattern='[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0'
+  disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
+  release_pattern='spawn_herdr_presentation_order_lock_release'
   # shellcheck disable=SC2016
   enter_pattern='spawn_send_key "$T" Enter'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$enter_line" ] \
+  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
     || fail "could not locate the projected launch cleanup boundary"
-  [ "$literal_line" -lt "$disarm_line" ] && [ "$disarm_line" -lt "$enter_line" ] \
-    || fail "projected spawn cleanup must be disarmed after launch text and before ambiguous Enter submission"
-  pass "fm-spawn: projected cleanup is disarmed before ambiguous launch submission"
+  [ "$literal_line" -lt "$disarm_line" ] \
+    && [ "$disarm_line" -lt "$release_line" ] \
+    && [ "$release_line" -lt "$enter_line" ] \
+    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
+  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
 }
 
 test_projected_abort_cleanup_holds_presentation_lock() {

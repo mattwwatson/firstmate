@@ -25,6 +25,8 @@ HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
+ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
+POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
@@ -32,6 +34,7 @@ mkdir -p "$FAKEBIN"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -93,13 +96,49 @@ focus_snapshot() {
   printf '%s/%s' "$workspace" "$tab"
 }
 
+arg_value() {
+  local want=$1 previous= arg
+  shift
+  for arg in "$@"; do
+    if [ "$previous" = "$want" ]; then
+      printf '%s' "$arg"
+      return 0
+    fi
+    previous=$arg
+  done
+  return 1
+}
+
+label=$(arg_value --label "$@" || true)
+if [ "${1:-} ${2:-}" = "workspace list" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ]; then
+  stage=$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)
+  if [ "$stage" = task-created ]; then
+    printf '%s\n' post-task-snapshot > "$ACTIVE_SEEDED_CONTROL/stage"
+  elif [ "$stage" = post-task-snapshot ]; then
+    seeded_tab=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
+    inject_before=$(focus_snapshot || printf ambiguous/ambiguous)
+    env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab focus "$seeded_tab" >/dev/null
+    inject_after=$(focus_snapshot || printf ambiguous/ambiguous)
+    printf 'active-seeded-inject\t%s\t%s\t%s\n' "$inject_before" "$inject_after" "$seeded_tab" >> "$FOCUS_AUDIT_LOG"
+    printf '%s\n' injected > "$ACTIVE_SEEDED_CONTROL/stage"
+  fi
+fi
+
 mutation=
+mutation_target=${3:-}
 case "${1:-} ${2:-}" in
-  "workspace create") mutation=workspace-create ;;
-  "tab create") mutation=tab-create ;;
+  "workspace create") mutation=workspace-create; mutation_target=$label ;;
+  "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
 esac
+refusal_probe=0
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
+   && [ "$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)" = injected ] \
+   && [ "${3:-}" = "$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane" 2>/dev/null || true)" ]; then
+  refusal_probe=1
+  refusal_before=$(focus_snapshot || printf ambiguous/ambiguous)
+fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
 if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
@@ -107,9 +146,49 @@ if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SES
 else
   status=$?
 fi
+if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
+  case "$label" in
+    firstmate/active-seeded\ ·\ p:*)
+      mkdir -p "$ACTIVE_SEEDED_CONTROL"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$ACTIVE_SEEDED_CONTROL/workspace"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
+      ;;
+    firstmate/abort-a\ ·\ p:*|firstmate/abort-b\ ·\ p:*)
+      task=${label#firstmate/}; task=${task%% *}
+      mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
+      ;;
+  esac
+fi
+if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
+  case "$label" in
+    fm-active-seeded)
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
+      printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
+      ;;
+    fm-abort-a|fm-abort-b)
+      task=${label#fm-}
+      mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      ;;
+  esac
+fi
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    break
+  done
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
-  printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+  printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
+fi
+if [ "$refusal_probe" -eq 1 ]; then
+  refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
+  printf 'seeded-prune-refusal\t%s\t%s\t%s\n' "$refusal_before" "$refusal_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
 fi
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
@@ -127,6 +206,9 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
+if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  exit 0
+fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
 
@@ -257,6 +339,25 @@ assert_cleanup_focus_steal_was_restored() {  # <line-count> <pane-id> <expected-
   ' || fail "projected task-pane close did not demonstrate and immediately restore the exact focus-steal regression"
 }
 
+assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
+  local start=$1 pane_id=$2 expected=$3
+  sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
+    $1 == "pane-close" && $4 == pane && $2 == expected {
+      saw_close = 1
+      if ($3 == expected) {
+        preserved = 1
+      } else {
+        drift = $3
+      }
+      next
+    }
+    saw_close && drift != "" && $1 == "tab-focus" && $2 == drift && $3 == expected {
+      preserved = 1
+    }
+    END { exit(saw_close && preserved ? 0 : 1) }
+  ' || fail "projected pane close did not preserve or restore the exact active workspace and tab"
+}
+
 remember_meta_worktree() {  # <meta>
   local wt
   wt=$(grep '^worktree=' "$1" | cut -d= -f2-)
@@ -334,6 +435,7 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
   "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/restart1"
+mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b"
 touch "$HOME_DIR/state/.last-watcher-beat"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
@@ -341,6 +443,9 @@ printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
 printf 'Projection ordering fixture B.\n' > "$HOME_DIR/data/order-b/brief.md"
 printf 'Projection ordering failure fixture.\n' > "$HOME_DIR/data/order-fail/brief.md"
 printf 'Projection restart fixture.\n' > "$HOME_DIR/data/restart1/brief.md"
+printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/brief.md"
+printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
+printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 make_project "$PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
@@ -390,7 +495,6 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 
 : > "$TREEHOUSE_CALL_LOG"
 : > "$HOME_DIR/config/herdr-presentation-spaces"
-PROJECTION_ORDER_START=$(log_line_count)
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
@@ -429,6 +533,52 @@ SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondm
   || fail "projected create or workspace.move stole focus from the captain's current space"
 pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
 
+mkdir -p "$ACTIVE_SEEDED_CONTROL"
+printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
+ACTIVE_SEEDED_START=$(log_line_count)
+ACTIVE_SEEDED_FOCUS_START=$(focus_audit_line_count)
+if spawn_task active-seeded "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/active-seeded.out" 2> "$TMP_ROOT/active-seeded.err"; then
+  fail "active seeded-tab projection should refuse the prune"
+fi
+grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1 \
+  || fail "active seeded-tab projection did not report its exact refusal"
+ACTIVE_SEEDED_WSID=$(cat "$ACTIVE_SEEDED_CONTROL/workspace")
+ACTIVE_SEEDED_TAB=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
+ACTIVE_SEEDED_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")
+ACTIVE_SEEDED_TASK_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/task-pane")
+ACTIVE_SEEDED_FOCUS="$ACTIVE_SEEDED_WSID/$ACTIVE_SEEDED_TAB"
+assert_focus_is "$ACTIVE_SEEDED_FOCUS" "active seeded-tab prune refusal"
+assert_raw_presentation_mutations_preserved_since "$ACTIVE_SEEDED_FOCUS_START" "active seeded-tab prune refusal"
+lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
+  || fail "active seeded-tab refusal removed the exact seeded pane"
+if lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1; then
+  fail "active seeded-tab failure did not abort-clean the non-active task pane"
+fi
+sed -n "$((ACTIVE_SEEDED_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v focus="$ACTIVE_SEEDED_FOCUS" -v pane="$ACTIVE_SEEDED_PANE" '
+  $1 == "seeded-prune-refusal" && $2 == focus && $3 == focus && $4 == pane { found = 1 }
+  END { exit(found ? 0 : 1) }
+' || fail "guarded lab did not observe exact focus across the active seeded-tab refusal"
+if sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
+  fail "active seeded-tab refusal closed the exact active pane"
+fi
+lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after the active seeded-tab fixture"
+assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture restoration"
+rm -rf "$ACTIVE_SEEDED_CONTROL"
+ACTIVE_SEEDED_CLEANUP_FOCUS_START=$(focus_audit_line_count)
+PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" bash -c '
+  . "$0/bin/fm-wake-lib.sh"
+  . "$0/bin/backends/herdr.sh"
+  lock="$1/state/.herdr-presentation-order.lock"
+  fm_lock_acquire_wait "$lock"
+  fm_backend_herdr_projection_cleanup_exact "$2" "$3" "$4"
+  fm_lock_release "$lock"
+' "$ROOT" "$HOME_DIR" "$HERDR_LAB_SESSION" "$ACTIVE_SEEDED_TASK_PANE" "$ACTIVE_SEEDED_PANE"
+assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture cleanup"
+assert_cleanup_focus_preserved "$ACTIVE_SEEDED_CLEANUP_FOCUS_START" "$ACTIVE_SEEDED_PANE" "$CAPTAIN_FOCUS"
+rm -f "$HOME_DIR/state/active-seeded.herdr-presentation"
+pass "real Herdr lab: active seeded-tab pruning refuses the exact pane and preserves exact focus"
+PROJECTION_ORDER_START=$(log_line_count)
+
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
 normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
@@ -454,7 +604,7 @@ remember_meta_worktree "$ORDER_B_META" >/dev/null
 
 ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
 CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
-EXPECTED_LABELS=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$CREATED_LABELS")
+EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
 ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
 [ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
 PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("firstmate/")) | .workspace_id')
@@ -506,6 +656,51 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
   || fail "move-failure spawn closed its exact task pane"
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
+
+mkdir -p "$POST_CREATE_ABORT_CONTROL"
+ABORT_START=$(log_line_count)
+ABORT_FOCUS_START=$(focus_audit_line_count)
+spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
+ABORT_A_PID=$!
+spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
+ABORT_B_PID=$!
+if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
+if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
+grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed validation failure"
+grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed validation failure"
+ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
+ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
+ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+  $1 == "workspace-create" && $4 ~ /^firstmate\/abort-a · p:/ { print "create-a" }
+  $1 == "workspace-create" && $4 ~ /^firstmate\/abort-b · p:/ { print "create-b" }
+  $1 == "pane-close" && $4 == a { print "close-a" }
+  $1 == "pane-close" && $4 == b { print "close-b" }
+')
+case "$ABORT_SEQUENCE" in
+  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
+  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+esac
+ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+  ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
+')
+[ -z "$ABORT_UNRESTORED" ] \
+  || fail "post-create abort create, prune, or move changed exact focus: $ABORT_UNRESTORED"
+assert_focus_is "$CAPTAIN_FOCUS" "concurrent post-create abort cleanup"
+assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS"
+assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS"
+assert_no_ordering_lifecycle_calls_since "$ABORT_START" "concurrent post-create abort cleanup"
+for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
+  if lab pane get "$ABORT_PANE" >/dev/null 2>&1; then
+    fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
+  fi
+done
+[ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
+  || fail "post-create abort fixtures published task metadata before launch"
+rm -rf "$POST_CREATE_ABORT_CONTROL"
+rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
+pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
