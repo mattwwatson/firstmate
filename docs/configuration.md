@@ -297,6 +297,22 @@ That check costs at most one bounded request per session start, because the cred
 The whole reason it runs at startup is that a stale credential used to be invisible until a pull-request step failed roughly an hour into finished work.
 No diagnostic anywhere in this path prints a credential value; each one names the failing requirement instead.
 
+Two of that check's reporting choices are deliberate, and both follow from the same rule: a startup line the captain cannot act on trains them to skim past startup lines.
+
+A machine with no credential store at all - today anything other than macOS, since the store is the login keychain - gets the line **once per home**, then silence.
+The line says the forge's merge and build checks are unavailable here rather than implying a fault the captain can fix by retrying, and `state/forge-credential-no-store.<forge>` records that it has been said.
+That record is per home and per forge, and it holds no content of any kind, least of all a credential value.
+Deleting it makes the next session start say it again.
+Silence instead of the first line was rejected for the same reason the check exists at all: the captain would otherwise discover the gap at a failed pull-request step.
+
+A repository the credential cannot see is reported only when **no** tracked repository on that forge is readable.
+The credential is account-wide, so any single unreadable clone proves nothing about it, and reporting the first one would let directory order decide which repository owns the diagnostic forever.
+
+Both waits on this path are bounded, because a startup check that can hang session start is worse than the late failure it replaces.
+`FM_FORGE_CREDENTIAL_TIMEOUT` bounds the forge request and `FM_FORGE_KEYCHAIN_TIMEOUT` bounds the store read; a blank, non-numeric, or zero value falls back to the default, since zero means "no limit" to curl rather than "do not wait".
+The store read needs its own bound because `security` has no timeout flag and blocks indefinitely when the stored item's access control makes the read raise a confirmation dialog that an unattended session can never answer.
+That stall is reported every time it happens, distinctly from every other outcome, because it is actionable: re-cache the item so an unattended read is allowed.
+
 Verified 21/07/2026 against the live Bitbucket Cloud API with `bin/fm-forge-credential.sh check bitbucket <workspace>/<repo>`: a valid read-only credential on a private repository returns HTTP 200 and exit 0, the same request with an invalid token returns HTTP 401 and exit 5, and an unknown repository returns HTTP 404 and exit 8.
 The account-wide listing endpoints that would otherwise make a workspace-agnostic probe possible - `/2.0/repositories`, `/2.0/workspaces`, `/2.0/user/permissions/repositories` - all answer HTTP 410 with `CHANGE-2770 - Functionality has been deprecated`, authenticated or not, which is why the verification probe reads one named repository instead.
 
@@ -387,7 +403,8 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/security   # credential-store reader used by fm-forge-credential.sh, mainly for tests
-FM_FORGE_CREDENTIAL_TIMEOUT=10   # seconds allowed for one forge API request; a blank or non-numeric value uses 10
+FM_FORGE_CREDENTIAL_TIMEOUT=10   # seconds allowed for one forge API request; a blank, non-numeric, or zero value uses 10
+FM_FORGE_KEYCHAIN_TIMEOUT=5      # seconds allowed for one credential-store read; a blank, non-numeric, or zero value uses 5
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state

@@ -40,6 +40,18 @@
 #   8  the credential works but the requested repository or resource is not
 #      visible to it
 #   9  unexpected forge response
+#  10  the credential store did not answer within the allowed wait
+#
+# BOUNDED WAITS. Neither step of the path may stall a session start. The request
+# is bounded by FM_FORGE_CREDENTIAL_TIMEOUT (default 10 seconds) and the store
+# read by FM_FORGE_KEYCHAIN_TIMEOUT (default 5 seconds); a blank, non-numeric, or
+# zero value falls back to the default, because zero means "no limit" to curl
+# rather than "do not wait". The store read needs a watchdog of its own because
+# `security` has no timeout flag: it blocks indefinitely when the stored item's
+# access control makes the read raise a confirmation dialog, which an unattended
+# session can never answer. That stall is its own outcome (exit 10) rather than
+# a silent pass, and its remedy is to re-cache the item so an unattended read is
+# allowed.
 #
 # WHY IT READS THE KEYCHAIN DIRECTLY. The credential must resolve identically
 # whether firstmate was started from a warm interactive terminal, re-armed by a
@@ -58,8 +70,11 @@
 # gh CLI owns it.
 #
 # SECRET HANDLING. The resolved pair never reaches stdout, stderr, a log, argv,
-# or a file. It is handed to curl through a config on stdin (curl --config -),
-# so it stays out of ps and shell history. Diagnostics name the failing
+# or a file. It leaves the store through a private FIFO, which carries it in
+# memory and stores nothing on disk, and it is handed to curl through a config
+# on stdin (curl --config -), so it stays out of ps and shell history. Every
+# curl diagnostic is discarded, so no reason line can come from anywhere but
+# this script itself. Diagnostics name the failing
 # REQUIREMENT - which entry, which HTTP status - and never the value. A
 # half-resolved pair is never published: both halves must validate before
 # either becomes usable.
@@ -77,12 +92,26 @@ EX_NO_STORE=6
 EX_INCONCLUSIVE=7
 EX_NOT_FOUND=8
 EX_UNEXPECTED=9
+EX_STORE_TIMEOUT=10
 
 KEYCHAIN_TOOL="${FM_FORGE_KEYCHAIN_TOOL_OVERRIDE:-/usr/bin/security}"
-REQUEST_TIMEOUT="${FM_FORGE_CREDENTIAL_TIMEOUT:-10}"
-case "$REQUEST_TIMEOUT" in
-  ''|*[!0-9]*) REQUEST_TIMEOUT=10 ;;
-esac
+
+# A bound of zero is not "do not wait": curl reads --max-time 0 as no limit at
+# all, so zero is refused alongside blank and non-numeric rather than silently
+# removing the bound both this header and docs/configuration.md promise.
+positive_seconds() {  # <value> <default>
+  case "$1" in
+    ''|*[!0-9]*) printf '%s' "$2"; return 0 ;;
+  esac
+  if [ "$1" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+REQUEST_TIMEOUT=$(positive_seconds "${FM_FORGE_CREDENTIAL_TIMEOUT:-}" 10)
+STORE_TIMEOUT=$(positive_seconds "${FM_FORGE_KEYCHAIN_TIMEOUT:-}" 5)
 
 NL='
 '
@@ -97,6 +126,12 @@ REASON=
 # Out-parameter for read_keychain_half, so its diagnostics survive: a command
 # substitution would run the reader in a subshell and lose REASON with it.
 KEYCHAIN_VALUE=
+# Out-parameters for read_store_value, for the same reason: the first line the
+# store returned, whether anything followed it, and the store command's own exit
+# status.
+STORE_LINE=
+STORE_TRAILING=0
+STORE_STATUS=0
 
 usage() {
   cat <<'EOF'
@@ -174,18 +209,91 @@ forge_supported() {
 
 # --- credential resolution ---------------------------------------------------
 
+# Run the store command under a watchdog and report what it said, bounded by
+# STORE_TIMEOUT. The value travels through a private FIFO rather than a
+# temporary file, so it is never written to disk; the reader stops waiting at
+# the bound and kills the store command, so an item whose access control raises
+# a confirmation dialog cannot hold a session start open forever.
+# The first line lands in STORE_LINE and anything after it sets STORE_TRAILING,
+# because a value carrying a line break must still be detectable as one.
+read_store_value() {  # <service>
+  local service=$1 dir fifo expired store_pid watchdog_pid backstop trailing
+  STORE_LINE=
+  STORE_TRAILING=0
+  STORE_STATUS=0
+  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-forge-store.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a private channel to read keychain entry $service"
+    return "$EX_INCONCLUSIVE"
+  }
+  fifo="$dir/pipe"
+  expired="$dir/expired"
+  if ! mkfifo "$fifo" 2>/dev/null; then
+    rm -rf -- "$dir"
+    REASON="could not create a private channel to read keychain entry $service"
+    return "$EX_INCONCLUSIVE"
+  fi
+  "$KEYCHAIN_TOOL" find-generic-password -s "$service" -w >"$fifo" 2>/dev/null &
+  store_pid=$!
+  # The watchdog is what bounds this read, and the marker it leaves behind is
+  # what identifies the outcome: stock macOS bash 3.2 reports a `read` timeout
+  # with the same status as end of input, so the status alone cannot tell "never
+  # answered" from "answered nothing". Killing the store command also ends the
+  # read, because that closes the last writer on the pipe.
+  # Every inherited stream is closed first: the watchdog outlives the read by
+  # design, and a caller reading this script through a command substitution
+  # would otherwise wait for the watchdog's own sleep to end before seeing the
+  # answer - reintroducing the stall from the other side.
+  ( sleep "$STORE_TIMEOUT"; kill "$store_pid" 2>/dev/null; : > "$expired" ) \
+    </dev/null >/dev/null 2>&1 &
+  watchdog_pid=$!
+  # A backstop for the case where something other than the store command still
+  # holds the pipe open after it is gone; the watchdog remains the real bound.
+  backstop=$((STORE_TIMEOUT + 2))
+  exec 3<"$fifo"
+  IFS= read -r -t "$backstop" -u 3 STORE_LINE
+  # Anything after the first line only has to be detected, never kept: a value
+  # carrying a line break is refused rather than repaired.
+  # shellcheck disable=SC2034 # `trailing` is a sink; its arrival is the signal.
+  IFS= read -r -t "$backstop" -u 3 trailing && STORE_TRAILING=1
+  exec 3<&-
+  # Always before the watchdog is stood down, so this wait is bounded by it.
+  wait "$store_pid" 2>/dev/null
+  STORE_STATUS=$?
+  kill "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
+  if [ -e "$expired" ]; then
+    rm -rf -- "$dir"
+    STORE_LINE=
+    STORE_TRAILING=0
+    STORE_STATUS=0
+    REASON="keychain entry $service did not answer within ${STORE_TIMEOUT}s: the stored item is prompting instead of answering, so re-cache it to allow an unattended read"
+    return "$EX_STORE_TIMEOUT"
+  fi
+  rm -rf -- "$dir"
+  return "$EX_OK"
+}
+
 # Read one half of the pair into KEYCHAIN_VALUE, or set REASON and return the
 # classifying code. No failure path ever reveals the value.
 read_keychain_half() {  # <forge> <user|secret>
-  local forge=$1 half=$2 service value
+  local forge=$1 half=$2 service value status
   KEYCHAIN_VALUE=
   service=$(forge_keychain_service "$forge" "$half") || {
     REASON="no keychain entry is defined for $forge"
     return "$EX_USAGE"
   }
-  if ! value=$("$KEYCHAIN_TOOL" find-generic-password -s "$service" -w 2>/dev/null); then
+  read_store_value "$service" || { status=$?; STORE_LINE=; return "$status"; }
+  value=$STORE_LINE
+  STORE_LINE=
+  if [ "$STORE_STATUS" -ne 0 ]; then
     REASON="keychain entry $service is absent from the login keychain"
     return "$EX_ABSENT"
+  fi
+  if [ "$STORE_TRAILING" -ne 0 ]; then
+    # A line break would end the curl config line and let the remainder act as
+    # further curl directives.
+    REASON="keychain entry $service contains a line break and cannot be used safely"
+    return "$EX_INCOMPLETE"
   fi
   if [ -z "$value" ]; then
     REASON="keychain entry $service is present but empty"
@@ -193,8 +301,8 @@ read_keychain_half() {  # <forge> <user|secret>
   fi
   case "$value" in
     *"$NL"*|*"$CR"*)
-      # A line break would end the curl config line and let the remainder act
-      # as further curl directives.
+      # A bare carriage return ends the curl config line just as a newline does,
+      # and never reaches the trailing-data check above.
       REASON="keychain entry $service contains a line break and cannot be used safely"
       return "$EX_INCOMPLETE"
       ;;
@@ -276,7 +384,7 @@ forge_get() {  # <forge> <api-path>
     return "$EX_INCONCLUSIVE"
   }
   http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
-    | curl --silent --show-error --config - \
+    | curl --silent --config - \
         --request GET \
         --header 'Accept: application/json' \
         --max-time "$REQUEST_TIMEOUT" \
