@@ -257,8 +257,14 @@ HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
+LOCK_CONTENTION_OWNER_PID=
 cleanup_all() {
   local wt
+  if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
+    kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
+    wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
+    LOCK_CONTENTION_OWNER_PID=
+  fi
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
@@ -435,7 +441,8 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
   "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/restart1"
-mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b"
+mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
+  "$HOME_DIR/data/lock-contended"
 touch "$HOME_DIR/state/.last-watcher-beat"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
@@ -446,6 +453,7 @@ printf 'Projection restart fixture.\n' > "$HOME_DIR/data/restart1/brief.md"
 printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/brief.md"
 printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
+printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 make_project "$PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
@@ -577,6 +585,54 @@ assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture cleanup"
 assert_cleanup_focus_preserved "$ACTIVE_SEEDED_CLEANUP_FOCUS_START" "$ACTIVE_SEEDED_PANE" "$CAPTAIN_FOCUS"
 rm -f "$HOME_DIR/state/active-seeded.herdr-presentation"
 pass "real Herdr lab: active seeded-tab pruning refuses the exact pane and preserves exact focus"
+
+LOCK_CONTENTION_READY="$TMP_ROOT/lock-contention-ready"
+LOCK_CONTENTION_RELEASE="$TMP_ROOT/lock-contention-release"
+ROOT="$ROOT" HOME_DIR="$HOME_DIR" READY="$LOCK_CONTENTION_READY" RELEASE="$LOCK_CONTENTION_RELEASE" bash -c '
+  . "$ROOT/bin/fm-wake-lib.sh"
+  lock="$HOME_DIR/state/.herdr-presentation-order.lock"
+  fm_lock_try_acquire "$lock" || exit 1
+  : > "$READY"
+  while [ ! -e "$RELEASE" ]; do sleep 0.05; done
+  fm_lock_release "$lock"
+' &
+LOCK_CONTENTION_OWNER_PID=$!
+while [ ! -e "$LOCK_CONTENTION_READY" ] && kill -0 "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$LOCK_CONTENTION_READY" ] || fail "could not hold the guarded lab presentation lock"
+LOCK_CONTENTION_START=$(log_line_count)
+LOCK_CONTENTION_FOCUS_START=$(focus_audit_line_count)
+LOCK_CONTENTION_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
+if spawn_task lock-contended "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/lock-contended.out" 2> "$TMP_ROOT/lock-contended.err"; then
+  LOCK_CONTENTION_STATUS=0
+else
+  LOCK_CONTENTION_STATUS=$?
+fi
+: > "$LOCK_CONTENTION_RELEASE"
+wait "$LOCK_CONTENTION_OWNER_PID" || fail "guarded lab presentation lock owner failed"
+LOCK_CONTENTION_OWNER_PID=
+[ "$LOCK_CONTENTION_STATUS" -eq 0 ] \
+  || fail "bounded presentation lock contention did not fall back to a successful flat spawn: $(cat "$TMP_ROOT/lock-contended.err")"
+grep -F "presentation focus lock stayed busy; using the ordinary flat layout without projection" "$TMP_ROOT/lock-contended.err" >/dev/null 2>&1 \
+  || fail "bounded presentation lock contention did not warn about flat fallback"
+LOCK_CONTENTION_META="$HOME_DIR/state/lock-contended.meta"
+remember_meta_worktree "$LOCK_CONTENTION_META" >/dev/null
+LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut -d= -f2-)
+[ "$LOCK_CONTENTION_WSID" = "$FIRSTMATE_WSID" ] \
+  || fail "bounded lock contention did not use the ordinary flat firstmate workspace"
+[ ! -e "$HOME_DIR/state/lock-contended.herdr-presentation" ] \
+  || fail "bounded lock contention published a projection journal"
+LOCK_CONTENTION_CALLS=$(sed -n "$((LOCK_CONTENTION_START + 1)),\$p" "$HERDR_CALL_LOG")
+if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|pane\tclose|api\tschema|session\tlist)' >/dev/null 2>&1; then
+  fail "bounded lock contention performed an unlocked projection mutation or ordering capability call"
+fi
+[ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] \
+  || fail "bounded lock contention invoked workspace.move"
+assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback"
+assert_raw_presentation_mutations_preserved_since "$LOCK_CONTENTION_FOCUS_START" "bounded presentation lock flat fallback"
+teardown_task lock-contended "$HOME_DIR" > "$TMP_ROOT/lock-contended-teardown.out" 2> "$TMP_ROOT/lock-contended-teardown.err" \
+  || fail "flat lock-contention fixture teardown failed"
+assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback teardown"
+pass "real Herdr lab: bounded lock contention warns and falls back flat without projection or focus drift"
 PROJECTION_ORDER_START=$(log_line_count)
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"

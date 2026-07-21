@@ -35,11 +35,13 @@
 #   or recovered state is never adopted, reused, closed, or deleted through that
 #   presentation path; a flat launch is allowed only after duplicate-agent risk
 #   is independently absent. Treehouse allocation and task metadata are unchanged.
-#   Primary-home projected creates make one bounded best-effort attempt to hold a
-#   shared presentation-order lock across create and workspace.move. The exact
-#   response-derived new workspace is appended to the stable primary-worker block
-#   immediately after firstmate. Ordering never authorizes lifecycle cleanup, and
-#   any unavailable, ambiguous, or failed move warns while the spawn continues.
+#   A clean projected create makes one bounded attempt to hold the shared
+#   presentation-order lock through launch handoff. Lock contention warns and
+#   falls back to the ordinary flat layout before any projection mutation. A
+#   primary home's exact response-derived new workspace is appended to the stable
+#   primary-worker block immediately after firstmate. Ordering never authorizes
+#   lifecycle cleanup, and any unavailable, ambiguous, or failed move warns while
+#   the spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -855,38 +857,38 @@ case "$BACKEND" in
           "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
         HERDR_PRESENTATION_ORDERING=0
-        if [ "$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)" = firstmate ]; then
-          if spawn_herdr_presentation_order_lock_acquire; then
+        if spawn_herdr_presentation_order_lock_acquire; then
+          if [ "$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)" = firstmate ]; then
             HERDR_PRESENTATION_ORDERING=1
-          else
-            echo "warning: herdr presentation ordering lock stayed busy; creating the worker in Herdr's default order" >&2
           fi
-        fi
-        HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-        HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
-          fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
-        if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-          "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
-          if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
-            HERDR_PROJECTION_ABORT_CLEANUP=1
-            HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-            HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+          HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
+            fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+          if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
+            "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+            if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+              HERDR_PROJECTION_ABORT_CLEANUP=1
+              HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+              HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+              HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            fi
+            exit 1
           fi
-          exit 1
-        fi
-        HERDR_PROJECTED=1
-        HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-        HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-        HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-        HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-        HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-        HERDR_PROJECTION_ABORT_CLEANUP=1
-        HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-        HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-        HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-        if [ "$HERDR_PRESENTATION_ORDERING" = 1 ]; then
-          fm_backend_herdr_projection_order_best_effort "$HERDR_SES" "$HERDR_WORKSPACE_ID"
+          HERDR_PROJECTED=1
+          HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+          HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+          HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+          HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+          HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+          HERDR_PROJECTION_ABORT_CLEANUP=1
+          HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+          HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+          HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          if [ "$HERDR_PRESENTATION_ORDERING" = 1 ]; then
+            fm_backend_herdr_projection_order_best_effort "$HERDR_SES" "$HERDR_WORKSPACE_ID"
+          fi
+        else
+          echo "warning: herdr presentation focus lock stayed busy; using the ordinary flat layout without projection" >&2
         fi
       fi
     fi
