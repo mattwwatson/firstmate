@@ -186,7 +186,8 @@ Herdr 0.7.4 has a focus bug in that last-pane path: closing a non-focused projec
 The exact reproduction moved focus from `2ndmate-bravo`'s active tab to `2ndmate-alpha` at `herdr pane close <projected-task-pane>`; workspace create, task-tab create, seeded-pane prune, and `workspace.move` all preserved both ids.
 Projected cleanup therefore runs under the same shared presentation lock, captures the exact active workspace and tab immediately before close, and uses one exact `tab focus <captured-tab-id>` to restore both after Herdr moves them.
 If the projection pane belongs to the active tab, cleanup refuses the close because deleting that tab cannot preserve it exactly.
-If the lock, snapshot, exact pane verification, or restoration is ambiguous, cleanup warns, leaves the journal quarantined, and performs no workspace cleanup.
+If the lock, snapshot, or exact pane verification is ambiguous, cleanup warns, leaves the journal quarantined, and refuses the close.
+If exact-tab restoration fails after the pane close has already succeeded, cleanup warns, and the ordinary exact-pane confirmation still decides whether to retire the journal.
 The journal is retired only when one exact token-bearing workspace correlates with the recorded endpoint before close and the exact pane is confirmed gone afterward.
 An unconfirmed close, renamed label, duplicate token, flat fallback, or unreadable state retains the journal and attempts no workspace cleanup.
 
@@ -230,8 +231,11 @@ Exact result:
 ```text
 ok - real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls
 ok - real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab
+ok - real Herdr lab: active seeded-tab pruning refuses the exact pane and preserves exact focus
+ok - real Herdr lab: bounded lock contention warns and falls back flat without projection or focus drift
 ok - real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift
 ok - real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup
+ok - real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration
 ok - real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs
 ok - real Herdr lab: exact task-pane close restores the exact captain workspace/tab after Herdr's raw focus steal
 ok - real Herdr lab: concurrent projected cleanup is serialized and leaves active workspace/tab unchanged
