@@ -270,7 +270,8 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
-  [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  [ "$(crew_absorb_class "")" = unreadable ] || fail "an unresolvable id was classed as a confirmed stop"
+  ! crew_is_provably_working "" || fail "empty id treated as provably working"
   # A read that produced no verdict line is UNKNOWN, not a stopped crew: callers
   # that act on a lost work signal must be able to tell the two apart, and it is
   # still never absorbable.

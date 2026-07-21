@@ -326,10 +326,10 @@ signal_reason_is_actionable() {  # <file> ...
 #   none    - the read SUCCEEDED and reported neither, so the wake must surface (a
 #             stopped/finished/parked/failed/torn-down/unknown crew);
 #   unreadable - no verdict at all: the reader failed or printed nothing usable (a
-#             timeout, contention, an unresolvable task id). This is NOT evidence
-#             the crew stopped, and callers that act on a lost work signal must
-#             treat it as "no new information" rather than folding it into none.
-#             It is never absorbable, so it never counts as provably working.
+#             timeout, contention, an unresolvable or empty task id). This is NOT
+#             evidence the crew stopped, and callers that act on a lost work signal
+#             must treat it as "no new information" rather than folding it into
+#             none. It is never absorbable, so it never counts as provably working.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
@@ -341,7 +341,7 @@ signal_reason_is_actionable() {  # <file> ...
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+  [ -n "$id" ] || { printf 'unreadable'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'unreadable'; return ;; esac
   state=${line#state: }; state=${state%% *}

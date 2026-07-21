@@ -53,6 +53,46 @@ wait_live() {
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# How many absorb decisions the watcher has recorded for <window>. Every stale
+# triage path that decides NOT to wake logs one naming the window, so a round can
+# wait on the watcher having actually classified the pane.
+decisions() {  # <state> <window>
+  local n
+  n=$(grep -c -F -- "$2" "$1/.watch-triage.log" 2>/dev/null) || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+# Stop <pid> as soon as it has classified <window> this round - it either exited,
+# having queued an actionable wake, or logged a fresh absorb decision. Every round
+# in this file must wait on that observable outcome rather than on a fixed number
+# of seconds: a round that asserts while the watcher is still starting up reads
+# the previous round's state, and one that keeps polling after its decision gives
+# later polls a chance to churn the markers under the assertions. A round that
+# produces neither outcome inside the bound is a failure, never a silent no-op.
+settle_round() {  # <state> <window> <pid> <decisions-before> <what>
+  local state=$1 window=$2 pid=$3 before=$4 what=$5 i=0
+  while [ "$i" -lt 400 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+    [ "$(decisions "$state" "$window")" -gt "$before" ] && { reap "$pid"; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  fail "$what: the watcher neither woke nor recorded a triage decision for $window within 40s"
+}
+
+state_dump() {  # <state> <window>
+  local state=$1 window=$2 key m out=""
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  for m in count stale-since wedge-escalations wedge-probe wedge-unreadable paused paused-resurfaced; do
+    [ -e "$state/.$m-$key" ] || continue
+    out="$out $m=$(tr -d '\n' < "$state/.$m-$key" 2>/dev/null)"
+  done
+  printf 'markers:%s | triage: %s' "$out" \
+    "$(grep -F -- "$window" "$state/.watch-triage.log" 2>/dev/null | tail -4 | tr '\n' '|')"
+}
+
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
@@ -83,7 +123,7 @@ bare_stale_wakes() {  # <state> <window>
 # whole classification.
 
 test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
-  local dir state fakebin out capture statusf window key round pid wakes bare
+  local dir state fakebin out capture statusf window key round pid wakes bare before
   dir=$(make_case paused-live-repaint); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture="$dir/pane.txt"; statusf="$state/paused-live.status"
   window="test:fm-paused-live"
@@ -96,6 +136,7 @@ test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
   round=1
   while [ "$round" -le 6 ]; do
     printf 'idle grok prompt, waiting\ncontext left: %s%%\n' "$((90 - round))" > "$capture"
+    before=$(decisions "$state" "$window")
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
       FM_FAKE_TMUX_CURRENT_COMMAND=grok \
       FM_FAKE_CREW_STATE='state: paused · source: status-log · rebased on current base, awaiting pipeline go-ahead' \
@@ -103,7 +144,7 @@ test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
       FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
     pid=$!
-    if wait_live "$pid" 40; then reap "$pid"; else wait "$pid" || fail "paused-live watcher round $round failed: $(cat "$out")"; fi
+    settle_round "$state" "$window" "$pid" "$before" "paused-live round $round"
     round=$((round + 1))
   done
 
@@ -120,16 +161,17 @@ test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
 
 # One watcher round against a paused crew, with the pane text the caller chose.
 # The status file is left alone, so the caller owns which pause is declared.
-run_paused_round() {  # <dir> <window> <pane-text> <crew-state>
-  local dir=$1 window=$2 text=$3 crew_state=$4 pid
+run_paused_round() {  # <dir> <window> <pane-text> <crew-state> <what>
+  local dir=$1 window=$2 text=$3 crew_state=$4 what=$5 pid before
   printf '%s\n' "$text" > "$dir/pane.txt"
+  before=$(decisions "$dir/state" "$window")
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$dir/watch.out" 2>&1 &
   pid=$!
-  if wait_live "$pid" 40; then reap "$pid"; else wait "$pid" || true; fi
+  settle_round "$dir/state" "$window" "$pid" "$before" "$what"
 }
 
 # Declare <line> as <task>'s current pause and hide it from the per-poll signal
@@ -159,7 +201,7 @@ test_a_different_declared_pause_gets_its_own_sighting() {
   : > "$dir/watch.out"
 
   run_paused_round "$dir" "$window" 'idle grok prompt, waiting' \
-    "state: paused · source: status-log · ${first#paused: }"
+    "state: paused · source: status-log · ${first#paused: }" 'first pause, first sighting'
   [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
     || fail "the first declared pause did not surface exactly once: $(cat "$dir/watch.out")"
   [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$first" ] \
@@ -167,7 +209,7 @@ test_a_different_declared_pause_gets_its_own_sighting() {
 
   # Same pause, repainted pane: still absorbed, as symptom A requires.
   run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 88%)' \
-    "state: paused · source: status-log · ${first#paused: }"
+    "state: paused · source: status-log · ${first#paused: }" 'first pause, repainted'
   [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
     || fail "a repaint of the SAME pause surfaced again: $(cat "$dir/watch.out")"
 
@@ -175,7 +217,7 @@ test_a_different_declared_pause_gets_its_own_sighting() {
   # hour-long recheck cadence would not have surfaced it for another hour.
   declare_pause "$state" paused-two "$second"
   run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 87%)' \
-    "state: paused · source: status-log · ${second#paused: }"
+    "state: paused · source: status-log · ${second#paused: }" 'second pause, first sighting'
   [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
     || fail "a genuinely different declared pause was absorbed silently under the previous pause's suppression: $(cat "$dir/watch.out")"
   [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$second" ] \
@@ -185,7 +227,7 @@ test_a_different_declared_pause_gets_its_own_sighting() {
 
   # And the new pause is now the one that is absorbed, so it too surfaces once.
   run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 86%)' \
-    "state: paused · source: status-log · ${second#paused: }"
+    "state: paused · source: status-log · ${second#paused: }" 'second pause, repainted'
   [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
     || fail "the new pause did not settle onto the bounded cadence after its one sighting"
   pass "a different declared pause on the same window gets its own single sighting"
@@ -219,10 +261,10 @@ test_pause_absorb_releases_when_the_crew_resumes() {
     FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
   pid=$!
-  wait_live "$pid" 40 || { reap "$pid"; fail "an active run behind a declared pause woke firstmate: $(cat "$out")"; }
-  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "an active run behind a declared pause kept the pause cadence"; }
-  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "an active run behind a declared pause did not resume wedge tracking"; }
-  reap "$pid"
+  settle_round "$state" "$window" "$pid" 0 "resumed crew behind a declared pause"
+  [ ! -s "$out" ] || fail "an active run behind a declared pause woke firstmate: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "an active run behind a declared pause kept the pause cadence: $(state_dump "$state" "$window")"
+  [ -s "$state/.stale-since-$key" ] || fail "an active run behind a declared pause did not resume wedge tracking: $(state_dump "$state" "$window")"
   pass "an authoritative active run still releases a declared pause back to wedge tracking"
 }
 
@@ -236,42 +278,44 @@ test_pause_absorb_releases_when_the_crew_resumes() {
 # Priming round: first sighting of a stale hash classifies and absorbs it,
 # recording the idle clock without going through the escalation path at all.
 prime_working_stale() {  # <dir> <window> <task> <pane-text>
-  local dir=$1 window=$2 task=$3 text=$4 state="$1/state" fakebin="$1/fakebin" pid
+  local dir=$1 window=$2 task=$3 text=$4 state="$1/state" fakebin="$1/fakebin" pid before
   printf '%s' "$text" > "$dir/pane.txt"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
   printf 'working: running the suite\n' > "$state/$task.status"
   printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
   printf '%s' "$(hash_text "$text")" > "$state/.hash-$(printf '%s' "$window" | tr ':/.' '___')"
   printf '1\n' > "$state/.count-$(printf '%s' "$window" | tr ':/.' '___')"
+  before=$(decisions "$state" "$window")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/prime.out" 2>&1 &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "priming round woke firstmate instead of absorbing: $(cat "$dir/prime.out")"
-  fi
-  reap "$pid"
+  settle_round "$state" "$window" "$pid" "$before" "priming round for $window"
+  [ ! -s "$dir/prime.out" ] || fail "priming round woke firstmate instead of absorbing: $(cat "$dir/prime.out")"
+  [ -s "$state/.stale-since-$(printf '%s' "$window" | tr ':/.' '___')" ] \
+    || fail "priming round did not record the idle clock: $(state_dump "$state" "$window")"
 }
 
 # One watcher round against a crew that is quiet but provably working. <quiet> is
 # how long the pane has been idle, <probe-age> how long since the last evidence
 # read. Prints nothing; the caller inspects $dir/watch.out and the queue.
-run_wedge_round() {  # <dir> <window> <quiet-secs> <probe-age-secs> <crew-state>
-  local dir=$1 window=$2 quiet=$3 probe_age=$4 crew_state=$5
-  local state="$dir/state" fakebin="$dir/fakebin" key pid
+run_wedge_round() {  # <dir> <window> <quiet-secs> <probe-age-secs> <crew-state> <what>
+  local dir=$1 window=$2 quiet=$3 probe_age=$4 crew_state=$5 what=$6
+  local state="$dir/state" fakebin="$dir/fakebin" key pid before
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s\n' $(( $(date +%s) - quiet )) > "$state/.stale-since-$key"
   [ ! -e "$state/.wedge-probe-$key" ] || backdate "$state/.wedge-probe-$key" "$probe_age"
   : > "$dir/watch.out"
+  before=$(decisions "$state" "$window")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE="$crew_state" \
     FM_STALE_ESCALATE_SECS=240 FM_WEDGE_ESCALATE_MAX_SECS=900 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
   pid=$!
-  if wait_live "$pid" 40; then reap "$pid"; else wait "$pid" || true; fi
+  settle_round "$state" "$window" "$pid" "$before" "$what"
 }
 
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence() {
@@ -284,14 +328,14 @@ test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence() {
 
   # The first escalation is the one that decides how fast a real wedge is caught:
   # it must still land the moment the pane has been quiet for the threshold.
-  run_wedge_round "$dir" "$window" 245 0 "$working"
+  run_wedge_round "$dir" "$window" 245 0 "$working" 'first escalation'
   grep -F "escalation 1" "$dir/watch.out" >/dev/null \
     || fail "the first escalation did not land at the unchanged threshold: $(cat "$dir/watch.out")"
   grep -F "possible wedge" "$dir/watch.out" >/dev/null || fail "the first escalation was not reported as a possible wedge"
 
   # Four minutes later the suite is still running the same single command and the
   # evidence is identical. This is the false alarm: it must not re-escalate.
-  run_wedge_round "$dir" "$window" 300 300 "$working"
+  run_wedge_round "$dir" "$window" 300 300 "$working" 'unchanged repeat inside the window'
   [ ! -s "$dir/watch.out" ] \
     || fail "an unchanged, still-working quiet pane re-escalated on the old fixed cadence: $(cat "$dir/watch.out")"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
@@ -299,7 +343,7 @@ test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence() {
 
   # Past the backed-off window it does escalate again, so the ladder is spaced,
   # never abandoned.
-  run_wedge_round "$dir" "$window" 500 300 "$working"
+  run_wedge_round "$dir" "$window" 500 300 "$working" 'repeat past the backed-off window'
   grep -F "escalation 2" "$dir/watch.out" >/dev/null \
     || fail "the ladder did not escalate past its backed-off window: $(cat "$dir/watch.out")"
   pass "a long quiet step escalates once at the threshold, then only past the backed-off window"
@@ -315,12 +359,12 @@ test_lost_work_signal_escalates_inside_the_backoff_window() {
   prime_working_stale "$dir" "$window" lost "no-mistakes axi run: test step"
   key=$(printf '%s' "$window" | tr ':/.' '___')
 
-  run_wedge_round "$dir" "$window" 245 0 'state: working · source: run-step · validating (running)'
+  run_wedge_round "$dir" "$window" 245 0 'state: working · source: run-step · validating (running)' 'first escalation'
   grep -F "escalation 1" "$dir/watch.out" >/dev/null || fail "the first escalation did not land: $(cat "$dir/watch.out")"
 
   # 300s of quiet is inside the backed-off window (480s), so an unchanged verdict
   # would stay absorbed - but the run is gone now.
-  run_wedge_round "$dir" "$window" 300 300 'state: unknown · source: none · no current-state source available'
+  run_wedge_round "$dir" "$window" 300 300 'state: unknown · source: none · no current-state source available' 'lost work signal'
   grep -F "escalation 2" "$dir/watch.out" >/dev/null \
     || fail "a crew whose work signal disappeared was held back by the backoff window: $(cat "$dir/watch.out")"
   grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
@@ -340,11 +384,11 @@ test_unreadable_state_read_is_not_a_lost_work_signal() {
   prime_working_stale "$dir" "$window" unreadable "no-mistakes axi run: test step"
   key=$(printf '%s' "$window" | tr ':/.' '___')
 
-  run_wedge_round "$dir" "$window" 245 0 "$working"
+  run_wedge_round "$dir" "$window" 245 0 "$working" 'first escalation'
   grep -F "escalation 1" "$dir/watch.out" >/dev/null || fail "the first escalation did not land: $(cat "$dir/watch.out")"
 
   # The reader now fails: its output carries no verdict line at all.
-  run_wedge_round "$dir" "$window" 300 300 'fm-crew-state.sh: timed out resolving the task'
+  run_wedge_round "$dir" "$window" 300 300 'fm-crew-state.sh: timed out resolving the task' 'unreadable probe 1'
   [ ! -s "$dir/watch.out" ] \
     || fail "a failed crew-state read woke firstmate as though the crew had stopped: $(cat "$dir/watch.out")"
   grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
@@ -353,21 +397,70 @@ test_unreadable_state_read_is_not_a_lost_work_signal() {
     || fail "an unreadable verdict advanced the escalation ladder"
   [ "$(cat "$state/.wedge-probe-$key" 2>/dev/null || true)" = working ] \
     || fail "an unreadable verdict overwrote the last evidence actually observed"
+  [ "$(cat "$state/.wedge-unreadable-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "the consecutive-unreadable count was not recorded: $(state_dump "$state" "$window")"
 
   # ... and it did not leave the next probe looking like a changed verdict, so an
   # unchanged, still-working crew stays inside its backed-off window.
-  run_wedge_round "$dir" "$window" 360 300 "$working"
+  run_wedge_round "$dir" "$window" 360 300 "$working" 'probe after an unreadable read'
   [ ! -s "$dir/watch.out" ] \
     || fail "an unreadable read let the next probe bypass the backed-off window: $(cat "$dir/watch.out")"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
     || fail "the ladder advanced without new evidence after an unreadable read"
+  [ ! -e "$state/.wedge-unreadable-$key" ] \
+    || fail "a readable verdict did not drop the consecutive-unreadable count: $(state_dump "$state" "$window")"
 
   # Nothing is traded away: once the read recovers AND the verdict really changed,
   # the escalation lands at the next probe as before.
-  run_wedge_round "$dir" "$window" 400 300 'state: unknown · source: none · no current-state source available'
+  run_wedge_round "$dir" "$window" 400 300 'state: unknown · source: none · no current-state source available' 'verdict change after an unreadable read'
   grep -F "escalation 2" "$dir/watch.out" >/dev/null \
     || fail "a genuine verdict change after an unreadable read did not escalate: $(cat "$dir/watch.out")"
   pass "a failed crew-state read is unknown evidence: no ladder advance, no backoff bypass, no lost-work-signal claim"
+}
+
+# The other direction of the same rule: "no evidence" must not become "no alarm,
+# ever". A reader that is permanently broken would otherwise leave this window's
+# wedge detector silent forever - a missed real wedge traded for the false ones
+# this branch removes - so the failure itself surfaces on a bounded cadence, on
+# its own terms: it names the reader and claims neither a wedge nor a stop.
+test_permanently_failing_reader_still_surfaces_on_a_bounded_cadence() {
+  local dir state window key broken
+  dir=$(make_case unreadable-forever); state="$dir/state"
+  window="test:fm-noreader"
+  broken='fm-crew-state.sh: cannot resolve the task'
+  prime_working_stale "$dir" "$window" noreader "no-mistakes axi run: test step"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  run_wedge_round "$dir" "$window" 245 0 "$broken" 'unreadable probe 1'
+  [ ! -s "$dir/watch.out" ] || fail "the first unreadable probe woke firstmate: $(cat "$dir/watch.out")"
+  run_wedge_round "$dir" "$window" 300 300 "$broken" 'unreadable probe 2'
+  [ ! -s "$dir/watch.out" ] || fail "the second unreadable probe woke firstmate: $(cat "$dir/watch.out")"
+
+  run_wedge_round "$dir" "$window" 360 300 "$broken" 'unreadable probe 3'
+  grep -F "UNREADABLE" "$dir/watch.out" >/dev/null \
+    || fail "a permanently failing reader never surfaced: $(cat "$dir/watch.out") $(state_dump "$state" "$window")"
+  grep -F "crew-state reader" "$dir/watch.out" >/dev/null \
+    || fail "the wake did not name the reader failure: $(cat "$dir/watch.out")"
+  grep -F "possible wedge" "$dir/watch.out" >/dev/null \
+    && fail "an unreadable reader was reported as a confirmed wedge: $(cat "$dir/watch.out")"
+  grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
+    && fail "an unreadable reader was reported as a confirmed stop: $(cat "$dir/watch.out")"
+  grep -F "demand-deep-inspection" "$dir/watch.out" >/dev/null \
+    && fail "an unreadable reader climbed the wedge ladder to demand-deep-inspection"
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] || fail "the bounded unreadable surfacing did not queue exactly one wake"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unreadable reader advanced the wedge escalation ladder: $(state_dump "$state" "$window")"
+
+  # It neither spams nor falls silent again: the next two probes stay quiet and
+  # the one after that surfaces the still-broken reader once more.
+  run_wedge_round "$dir" "$window" 420 300 "$broken" 'unreadable probe 4'
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] || fail "the unreadable surfacing repeated on every probe"
+  run_wedge_round "$dir" "$window" 480 300 "$broken" 'unreadable probe 5'
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] || fail "the unreadable surfacing repeated on every probe"
+  run_wedge_round "$dir" "$window" 540 300 "$broken" 'unreadable probe 6'
+  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
+    || fail "a reader that stayed broken fell silent instead of re-surfacing: $(state_dump "$state" "$window")"
+  pass "a permanently failing crew-state reader surfaces on a bounded cadence, never as a wedge or a stop"
 }
 
 # A crew that declares an external wait between the loop's status read and the
@@ -380,10 +473,10 @@ test_paused_probe_verdict_goes_to_the_pause_cadence() {
   prime_working_stale "$dir" "$window" probepaused "no-mistakes axi run: test step"
   key=$(printf '%s' "$window" | tr ':/.' '___')
 
-  run_wedge_round "$dir" "$window" 245 0 'state: working · source: run-step · validating (running)'
+  run_wedge_round "$dir" "$window" 245 0 'state: working · source: run-step · validating (running)' 'first escalation'
   grep -F "escalation 1" "$dir/watch.out" >/dev/null || fail "the first escalation did not land: $(cat "$dir/watch.out")"
 
-  run_wedge_round "$dir" "$window" 300 300 'state: paused · source: status-log · awaiting the upstream release'
+  run_wedge_round "$dir" "$window" 300 300 'state: paused · source: status-log · awaiting the upstream release' 'probe reading back paused'
   grep -F "work signal is gone" "$dir/watch.out" >/dev/null \
     && fail "a declared external wait was reported as a stopped crew"
   grep -F "possible wedge" "$dir/watch.out" >/dev/null \
@@ -406,7 +499,7 @@ test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
   # 900s cap. The ladder must still reach demand-deep-inspection.
   n=1
   for quiet in 245 485 905; do
-    run_wedge_round "$dir" "$window" "$quiet" 905 'state: working · source: run-step · validating (running)'
+    run_wedge_round "$dir" "$window" "$quiet" 905 'state: working · source: run-step · validating (running)' "backed-off round $n"
     grep -F "escalation $n" "$dir/watch.out" >/dev/null \
       || fail "round $n did not escalate after waiting out its window: $(cat "$dir/watch.out")"
     if [ "$n" -lt 3 ]; then
@@ -429,5 +522,6 @@ test_pause_absorb_releases_when_the_crew_resumes
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
 test_unreadable_state_read_is_not_a_lost_work_signal
+test_permanently_failing_reader_still_surfaces_on_a_bounded_cadence
 test_paused_probe_verdict_goes_to_the_pause_cadence
 test_demand_deep_inspection_still_reached_for_a_persistent_wedge
