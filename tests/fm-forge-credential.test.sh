@@ -639,7 +639,7 @@ test_bootstrap_reports_an_unseen_repository_once_per_home() {
   dir=$(new_bootstrap_case 'hexbattle=git@bitbucket.org:mattw_watson/hexbattle.git')
   home="$dir/home"
   fakebin="$dir/bin"
-  marker="$home/state/forge-credential-not-visible.bitbucket"
+  marker="$home/state/forge-credential-not-visible.mattw_watson%hexbattle.bitbucket"
   no_store_marker="$home/state/forge-credential-no-store.bitbucket"
 
   # A lock-refused session reports the news but must not consume it.
@@ -705,6 +705,61 @@ test_bootstrap_reports_an_unseen_repository_once_per_home() {
   assert_contains "$out" "cannot see bitbucket repository" \
     "an already-reported no-store must not suppress the unseen-repository news"
   pass "a repository the credential cannot see is reported once per home, then silently"
+}
+
+test_two_unseen_repositories_report_independently() {
+  local dir home fakebin out marker_alpha marker_beta
+  # The not-visible line names one repository, so its record is keyed on that
+  # repository: a later 404 on a DIFFERENT repository is fresh news, not a repeat
+  # of the first. The probe target is the first tracked clone in glob order, so
+  # moving origin between runs changes which repository is probed.
+  dir=$(new_bootstrap_case 'only=git@bitbucket.org:mattw_watson/alpha.git')
+  home="$dir/home"
+  fakebin="$dir/bin"
+  marker_alpha="$home/state/forge-credential-not-visible.mattw_watson%alpha.bitbucket"
+  marker_beta="$home/state/forge-credential-not-visible.mattw_watson%beta.bitbucket"
+
+  # alpha is unseen: reported once and recorded, then silent.
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/' \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "cannot see bitbucket repository mattw_watson/alpha" \
+    "the first unseen repository must be reported"
+  assert_present "$marker_alpha" "the first unseen repository must be recorded"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/' \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out" "FORGE_CREDENTIAL" "a recorded unseen repository stays silent"
+
+  # Move the probe target to beta: a different repository is genuinely new news
+  # and must report despite alpha already being on record.
+  git -C "$home/projects/only" remote set-url origin 'git@bitbucket.org:mattw_watson/beta.git'
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/' \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "cannot see bitbucket repository mattw_watson/beta" \
+    "a different unseen repository must report even after another was recorded"
+  assert_present "$marker_beta" "the second unseen repository gets its own record"
+  assert_present "$marker_alpha" "recording the second must not disturb the first"
+
+  # beta is now on record too, so it falls silent while alpha's record stands.
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/' \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out" "FORGE_CREDENTIAL" "a recorded second repository stays silent too"
+  pass "two different unseen repositories each report once and independently"
 }
 
 test_a_lock_refused_session_reports_the_news_without_consuming_it() {
@@ -823,6 +878,7 @@ test_bootstrap_reports_a_broken_credential_at_session_start
 test_bootstrap_reports_no_store_once_per_home
 test_bootstrap_probes_one_repository_per_forge
 test_bootstrap_reports_an_unseen_repository_once_per_home
+test_two_unseen_repositories_report_independently
 test_a_lock_refused_session_reports_the_news_without_consuming_it
 test_bootstrap_reports_a_stalled_store_every_time
 test_a_tool_two_checks_need_is_reported_once

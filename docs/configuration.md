@@ -306,7 +306,8 @@ The first two are credential-level verdicts true of whichever repository was pro
 
 Two of that check's reporting choices are deliberate, and both follow from the same rule: a startup line the captain cannot act on trains them to skim past startup lines, but a line withheld entirely puts the discovery back at the failed pull-request step this check exists to pre-empt.
 Each is therefore reported **once per home**, then silence, recorded in `state/forge-credential-<outcome>.<forge>`.
-That record is keyed per home, per forge, and per outcome, so neither outcome can suppress the other, and it holds no content of any kind, least of all a credential value.
+That record is keyed per home and per forge, so the two outcomes cannot suppress each other, and it holds no content of any kind, least of all a credential value.
+The not-visible record additionally keys on the probed repository, so each distinct unseen repository is worth one report and a later 404 on a different repository is not silenced by an earlier one; the no-store record names no repository and stays keyed per forge.
 Deleting it makes the next session start say it again.
 A session that did not get the fleet lock reports the news but does not write the record, so the session that can actually act on it is the one that consumes it.
 

@@ -37,8 +37,9 @@
 #   5  credential rejected by the forge - invalid, revoked, expired, or under-scoped
 #   6  no credential store available on this machine
 #   7  inconclusive - the forge could not be reached, so nothing was proved
-#   8  the credential works but the requested repository or resource is not
-#      visible to it
+#   8  the credential authenticated but the requested repository or resource is
+#      not visible to it; a 404 alone does not settle whether the account or
+#      scopes are wrong or the repository moved
 #   9  unexpected forge response
 #  10  the credential store did not answer within the allowed wait
 #

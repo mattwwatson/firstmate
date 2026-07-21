@@ -32,6 +32,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Check those in that order: confirm which account the keychain entry belongs to, then confirm the captain still has access to the named repository, then confirm the repository still lives at the path the clone's origin remote gives.
   "no credential store on this platform" is news, not a fault: this machine has no login keychain to read, that forge's merge and build checks are simply unavailable here, and there is nothing for the captain to retry.
   Both of those two are reported once per home and then stay silent, so report each plainly and move on, and do not treat a later silence as the problem having been fixed.
+  The not-visible record is kept per probed repository, so a line naming a different repository later is fresh news reported in its own right rather than a repeat, while the no-store record is per forge because it names no repository.
   A lock-refused session reports them without recording them, so the same line arriving again in the session that holds the lock is the expected handover, not a regression.
   `bin/fm-forge-credential.sh`'s header owns the entry names, the required scopes, and the exit-code contract - read it before advising the captain, and tell them the consequence and the action rather than the diagnostic label.
   Firstmate cannot create or store the credential itself, so this always ends in a captain action; work that does not touch that forge continues normally.

@@ -55,8 +55,10 @@
 #          each is news the first time and unactionable noise every session
 #          after: a machine with no credential store at all, and a repository
 #          the credential authenticated against but cannot see. The record is
-#          state/forge-credential-<outcome>.<forge>, keyed per home, per forge,
-#          and per outcome so neither can suppress the other.
+#          state/forge-credential-<outcome>.<forge>, keyed per home and per forge
+#          so the two outcomes cannot suppress each other; the not-visible record
+#          also keys on the probed repository, so each distinct unseen repository
+#          is worth one report, while the no-store record stays per forge.
 #          Under FM_BOOTSTRAP_DETECT_ONLY those records are NOT written: a
 #          lock-refused session reports the news without consuming it.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -468,9 +470,12 @@ secondmate_liveness_sweep() {
 # Two outcomes are reported once per home and then stay silent, because each is
 # news the first time and unactionable wallpaper every time after: a machine
 # with no credential store at all, and a repository the credential cannot see.
-# state/forge-credential-<outcome>.<forge> is that record. It is keyed per home,
-# per forge, AND per outcome, so neither outcome can suppress the other, and it
-# holds no credential value.
+# state/forge-credential-<outcome>.<forge> is that record, keyed per home and
+# per forge so the two outcomes cannot suppress each other. The not-visible
+# outcome additionally keys on the probed repository, because its line names a
+# repository and a later 404 on a different one is fresh news; the no-store
+# outcome names no repository and stays keyed per forge. No record holds a
+# credential value.
 
 # Returns 0 when this home has already been told this piece of news, 1 when it
 # has not - and marks it told in the same step, so the line is printed exactly
@@ -487,8 +492,8 @@ forge_news_already_reported() {  # <forge> <outcome>
   return 1
 }
 
-forge_credential_report() {  # <forge> <status> <reason>
-  local forge=$1 status=$2 reason=$3
+forge_credential_report() {  # <forge> <status> <reason> [<repository>]
+  local forge=$1 status=$2 reason=$3 repo=${4:-} repo_key
   case "$status" in
     0|7) return 0 ;;
     6)
@@ -497,7 +502,12 @@ forge_credential_report() {  # <forge> <status> <reason>
       return 0
       ;;
     8)
-      forge_news_already_reported "$forge" not-visible && return 0
+      # The line names one repository, so the record must too: a later 404 on a
+      # DIFFERENT repository is genuinely new news. The identifier is validated
+      # to [A-Za-z0-9._/-] with a single slash, so mapping '/' to '%' (a char
+      # the identifier cannot contain) is a collision-free, filesystem-safe key.
+      repo_key=${repo//\//%}
+      forge_news_already_reported "$forge" "not-visible.$repo_key" && return 0
       ;;
   esac
   reason=$(first_line "${reason#error: }")
@@ -538,7 +548,7 @@ forge_credential_check() {
     fi
     out=$("$resolver" check "$probe_forge" "$probe_repo" 2>&1 >/dev/null)
     status=$?
-    forge_credential_report "$probe_forge" "$status" "$out"
+    forge_credential_report "$probe_forge" "$status" "$out" "$probe_repo"
     return 0
   fi
   # Every tracked clone on that forge has an unusable remote: fall back to the
