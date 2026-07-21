@@ -10,9 +10,18 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date default branch, or every commit on no remote is
+# present by patch id in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# The three proofs are independent and additive, and each refuses when inconclusive:
+#   - pr_is_merged        forge API, GitHub only today
+#   - content_in_default  pure git, survives squash, inconclusive on a merge conflict
+#   - patches_in_default  pure git, forge-agnostic, rescues the conflicting-advance
+#                         case above; the only patch-id proof available on Bitbucket
+#                         Cloud, which publishes no PR head ref to fetch;
+#                         FM_LANDED_PATCH_SCAN_LIMIT (default 1000) bounds how far
+#                         back the default branch is scanned
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -137,6 +146,13 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# How many of the default branch's most recent commits the patch-id landed-work
+# proof will hash. Bounds teardown's cost on a long-lived branch off a busy default
+# branch; see unpushed_patches_are_in_ref for why truncation is a safe direction.
+# A non-numeric override is ignored, leaving the range unbounded rather than
+# silently narrowed to something arbitrary.
+LANDED_PATCH_SCAN_LIMIT=${FM_LANDED_PATCH_SCAN_LIMIT:-1000}
 
 default_branch() {
   local ref branch
@@ -275,10 +291,18 @@ pr_number_from_branch() {
   printf '%s' "$n"
 }
 
+# Extract a PR number from a recorded pr= target. Accepts a bare number and both
+# forge URL grammars: GitHub's /pull/<n> and Bitbucket's /pull-requests/<n>.
+# /pull/ is NOT a substring of /pull-requests/, so a single GitHub-shaped match
+# silently failed on every Bitbucket URL.
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
     '' ) return 1 ;;
+    *"/pull-requests/"*)
+      n=${target##*/pull-requests/}
+      n=${n%%[!0-9]*}
+      ;;
     *"/pull/"*)
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
@@ -292,11 +316,26 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# True only when origin is a forge PROVEN to publish no refs/pull/<n>/head - today
+# just Bitbucket Cloud, which has no PR ref namespace at all (refs/pull-requests/
+# is a Bitbucket Server feature). Deliberately a deny-list, not a github.com
+# allow-list: an unrecognized host (GitHub Enterprise, a mirror) keeps attempting
+# the fetch, so this change only ever removes a fetch that could not have worked.
+origin_publishes_no_github_pr_refs() {
+  local url
+  url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    *bitbucket.org[:/]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_commit_object() {
   local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  origin_publishes_no_github_pr_refs && return 1
   git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
@@ -308,26 +347,48 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
+# Forge-agnostic core of the patch-id proof: is every commit the worktree holds
+# that lives on no remote also present, by patch id, in <landed_ref>'s history
+# since its merge-base with HEAD? <landed_ref> is any ref that provably holds
+# landed work - a fetched GitHub PR head, or the up-to-date default branch on any
+# forge. The default-branch source is what makes this usable on Bitbucket Cloud,
+# which publishes no PR head ref to fetch.
+# Every inconclusive outcome returns non-zero so the caller refuses: no HEAD, no
+# merge-base, an empty comparison range, an unreadable patch id, or any single
+# unpushed commit whose patch id is absent from the range.
+# <limit>, when given, caps how many of the range's most recent commits are hashed.
+# A PR head range is naturally small and passes no limit; a default-branch range is
+# not, and computing a patch id per commit is not free. Truncation can only lose a
+# match, never invent one, so the bound errs toward refusing.
+unpushed_patches_are_in_ref() {
+  local landed_ref=$1 limit=${2:-} current base range_commits landed_patch_ids commit patch_id unpushed
+  case "$limit" in
+    ''|*[!0-9]*) limit= ;;
+  esac
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+  base=$(git -C "$WT" merge-base "$current" "$landed_ref" 2>/dev/null) || return 1
+  if [ -n "$limit" ]; then
+    range_commits=$(git -C "$WT" log --format=%H --max-count="$limit" "$base..$landed_ref" -- 2>/dev/null) || return 1
+  else
+    range_commits=$(git -C "$WT" log --format=%H "$base..$landed_ref" -- 2>/dev/null) || return 1
+  fi
+  landed_patch_ids=$(
+    printf '%s\n' "$range_commits" \
       | while IFS= read -r commit; do
+          [ -n "$commit" ] || continue
           patch_id_for_commit "$commit"
         done \
       | sed '/^$/d' \
       | sort -u
   ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
+  [ -n "$landed_patch_ids" ] || return 1
   unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
+    printf '%s\n' "$landed_patch_ids" | grep -qxF "$patch_id" || return 1
   done <<EOF
 $unpushed
 EOF
@@ -358,7 +419,24 @@ pr_is_merged() {
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  unpushed_patches_are_in_ref "$head"
+}
+
+# Resolve an up-to-date ref for the project's default branch, fetching from origin
+# when there is one so a stale remote-tracking ref cannot decide the outcome.
+# Echoes the ref name; returns non-zero when it cannot be resolved, so every
+# caller treats an unresolvable default branch as inconclusive.
+default_ref_up_to_date() {
+  local name
+  name=$(default_branch) || return 1
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    printf '%s\n' "refs/remotes/origin/$name"
+  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    printf '%s\n' "refs/heads/$name"
+  else
+    return 1
+  fi
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -369,16 +447,8 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
-  else
-    return 1
-  fi
+  local ref default_tree merged_tree
+  ref=$(default_ref_up_to_date) || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -386,15 +456,33 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# The patch-id proof, taking its comparison range from the up-to-date default
+# branch instead of a PR head ref. Needs no forge API and no PR ref namespace, so
+# it is the only patch-id proof available on Bitbucket Cloud, and it is also the
+# one that still works on GitHub when no PR is recorded or `gh` is unavailable.
+# It rescues the case content_in_default cannot decide: the branch's commits were
+# replayed onto the default branch, but the default branch has since advanced in a
+# way that conflicts with the branch, making the 3-way merge inconclusive.
+# Returns non-zero whenever the default branch cannot be resolved or any unpushed
+# commit is missing from it, so an inconclusive result still refuses.
+patches_in_default() {
+  local ref
+  ref=$(default_ref_up_to_date) || return 1
+  unpushed_patches_are_in_ref "$ref" "$LANDED_PATCH_SCAN_LIMIT"
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# default branch (fallback, which also covers the no-PR and gh-error paths), OR
+# every unpushed commit is present by patch id in the default branch. False only
+# for genuinely unlanded work. Each proof is independent and additive: order only
+# decides which one answers first, never whether unlanded work can pass.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  patches_in_default
 }
 
 backlog_refresh_reminder() {
