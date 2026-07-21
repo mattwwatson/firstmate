@@ -349,25 +349,61 @@ wedge_escalate_interval() {  # <escalations-so-far>
 # become "no alarm, ever": a reader that stays broken (missing binary, fork
 # failure, a permanent timeout) would otherwise blind the wedge detector for that
 # window forever, trading a false alarm for a missed real one. So consecutive
-# unreadable probes are counted in .wedge-unreadable-<key>, and every
-# WEDGE_UNREADABLE_SURFACE_COUNT of them surfaces the window on its OWN terms -
-# the reason says the state could not be READ and names the reader, and asserts
-# neither a wedge nor a stop, because neither has been established. The count is
-# dropped the moment any readable verdict arrives. A `paused` verdict is not a
+# unreadable probes are counted in .wedge-unreadable-<key>, and once
+# WEDGE_UNREADABLE_SURFACE_COUNT of them pile up the window surfaces on its OWN
+# terms - the reason says the state could not be READ and names the reader, and
+# asserts neither a wedge nor a stop, because neither has been established.
+# Repeats of that surfacing carry the same evidence as the first, so they are
+# spaced by the SAME backoff the escalation ladder uses (wedge_escalate_interval,
+# capped by WEDGE_ESCALATE_MAX_SECS), counted in .wedge-unreadable-surfaced-<key>
+# whose mtime is the anchor: a reader that stays broken keeps waking the
+# supervisor at a widening interval rather than nagging on a fixed one. Both
+# counts are dropped the moment any readable verdict arrives. A `paused` verdict is not a
 # stopped crew either - the crew declared an external wait, so the pane is handed
 # to the bounded pause cadence (handle_paused_stale) instead of escalated.
 # Nothing is suppressed: every escalation still fires, the escalation ladder and
 # its demand-deep-inspection marker are unchanged, and a crew that stops looking
 # like it is working is surfaced at the next probe rather than at the backed-off
 # window.
+# The unreadable half of a probe, kept whole so the caller's only job is to hand
+# the verdict over and stop: nothing after the wake belongs to this path, and
+# nothing here may fall through into the readable bookkeeping (which would record
+# `unreadable` as if it were evidence). Counts this failed read, and either
+# absorbs it as no new information or surfaces the reader failure once its
+# backed-off window has passed.
+wedge_unreadable_probe() {  # <window> <key> <triage-label> <quiet-secs>
+  local win=$1 key=$2 label=$3 age=$4 unreadable_file surfaced_file u s interval reason
+  unreadable_file="$STATE/.wedge-unreadable-$key"
+  surfaced_file="$STATE/.wedge-unreadable-surfaced-$key"
+  u=$(cat "$unreadable_file" 2>/dev/null || echo 0)
+  case "$u" in ''|*[!0-9]*) u=0 ;; esac
+  u=$((u + 1))
+  echo "$u" > "$unreadable_file"
+  if [ "$u" -lt "$WEDGE_UNREADABLE_SURFACE_COUNT" ]; then
+    triage_log "absorbed $label (crew state unreadable $u time(s) in a row - no new evidence, quiet ${age}s): $win"
+    return 0
+  fi
+  s=$(cat "$surfaced_file" 2>/dev/null || echo 0)
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  interval=$(wedge_escalate_interval "$s")
+  if [ "$(age_of "$surfaced_file")" -lt "$interval" ]; then
+    triage_log "absorbed $label (crew state unreadable $u time(s) in a row, already surfaced $s time(s), next window ${interval}s): $win"
+    return 0
+  fi
+  echo "$((s + 1))" > "$surfaced_file"
+  reason="stale: $win (quiet ${age}s, crew state UNREADABLE on $u consecutive reads - $FM_CREW_STATE_BIN returned no verdict, so this is neither a confirmed wedge nor a confirmed stop; check the crew-state reader, then the crew)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  wake "$reason"
+}
+
 wedge_timer_check() {  # <window> <hash> <triage-label>
   local win=$1 h=$2 label=$3 \
-    key since_file escalation_file probe_file unreadable_file since age n interval reason prev_class class task u
+    key since_file escalation_file probe_file \
+    since age n interval reason prev_class class task
   key=$(state_key "$win")
   since_file="$STATE/.stale-since-$key"
   escalation_file="$STATE/.wedge-escalations-$key"
   probe_file="$STATE/.wedge-probe-$key"
-  unreadable_file="$STATE/.wedge-unreadable-$key"
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -387,19 +423,10 @@ wedge_timer_check() {  # <window> <hash> <triage-label>
     # read is not evidence of anything, so the NEXT successful probe still gets
     # to compare against the last verdict actually observed.
     if [ -e "$probe_file" ]; then touch "$probe_file"; else : > "$probe_file"; fi
-    u=$(cat "$unreadable_file" 2>/dev/null || echo 0)
-    case "$u" in ''|*[!0-9]*) u=0 ;; esac
-    u=$((u + 1))
-    echo "$u" > "$unreadable_file"
-    if [ "$(( u % WEDGE_UNREADABLE_SURFACE_COUNT ))" -ne 0 ]; then
-      triage_log "absorbed $label (crew state unreadable $u time(s) in a row - no new evidence, quiet ${age}s): $win"
-      return 0
-    fi
-    reason="stale: $win (quiet ${age}s, crew state UNREADABLE on $u consecutive reads - $FM_CREW_STATE_BIN returned no verdict, so this is neither a confirmed wedge nor a confirmed stop; check the crew-state reader, then the crew)"
-    fm_wake_append stale "$win" "$reason" || exit 1
-    wake "$reason"
+    wedge_unreadable_probe "$win" "$key" "$label" "$age"
+    return 0
   fi
-  rm -f "$unreadable_file"
+  rm -f "$STATE/.wedge-unreadable-$key" "$STATE/.wedge-unreadable-surfaced-$key"
   printf '%s' "$class" > "$probe_file"
   if [ "$class" = paused ]; then
     handle_paused_stale "$win" "$task" "$h"
@@ -478,7 +505,7 @@ clear_wedge_tracking() {  # <window>
   local win=$1 key
   key=$(state_key "$win")
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-probe-$key" \
-    "$STATE/.wedge-unreadable-$key"
+    "$STATE/.wedge-unreadable-$key" "$STATE/.wedge-unreadable-surfaced-$key"
 }
 
 clear_pause_tracking() {  # <window>

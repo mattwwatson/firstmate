@@ -85,7 +85,8 @@ settle_round() {  # <state> <window> <pid> <decisions-before> <what>
 state_dump() {  # <state> <window>
   local state=$1 window=$2 key m out=""
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  for m in count stale-since wedge-escalations wedge-probe wedge-unreadable paused paused-resurfaced; do
+  for m in count stale-since wedge-escalations wedge-probe wedge-unreadable \
+    wedge-unreadable-surfaced paused paused-resurfaced; do
     [ -e "$state/.$m-$key" ] || continue
     out="$out $m=$(tr -d '\n' < "$state/.$m-$key" 2>/dev/null)"
   done
@@ -451,16 +452,41 @@ test_permanently_failing_reader_still_surfaces_on_a_bounded_cadence() {
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unreadable reader advanced the wedge escalation ladder: $(state_dump "$state" "$window")"
 
-  # It neither spams nor falls silent again: the next two probes stay quiet and
-  # the one after that surfaces the still-broken reader once more.
-  run_wedge_round "$dir" "$window" 420 300 "$broken" 'unreadable probe 4'
-  [ "$(stale_wakes "$state" "$window")" -eq 1 ] || fail "the unreadable surfacing repeated on every probe"
-  run_wedge_round "$dir" "$window" 480 300 "$broken" 'unreadable probe 5'
-  [ "$(stale_wakes "$state" "$window")" -eq 1 ] || fail "the unreadable surfacing repeated on every probe"
-  run_wedge_round "$dir" "$window" 540 300 "$broken" 'unreadable probe 6'
+  [ "$(cat "$state/.wedge-unreadable-surfaced-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "the unreadable surfacing was not counted: $(state_dump "$state" "$window")"
+
+  # It neither spams nor falls silent again, and the repeats are SPACED by the
+  # same doubling window the escalation ladder uses - not repeated every N probes.
+  # Each round below backdates the last-surfacing marker to place the watcher at a
+  # chosen point of that window, so the two cadences are told apart rather than
+  # both being satisfied by "a wake happened eventually".
+  backdate "$state/.wedge-unreadable-surfaced-$key" 300
+  run_wedge_round "$dir" "$window" 420 300 "$broken" 'unreadable probe inside the 480s window'
+  [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the second unreadable surfacing fired inside its backed-off window: $(cat "$dir/watch.out")"
+
+  backdate "$state/.wedge-unreadable-surfaced-$key" 500
+  run_wedge_round "$dir" "$window" 480 300 "$broken" 'unreadable probe past the 480s window'
   [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
     || fail "a reader that stayed broken fell silent instead of re-surfacing: $(state_dump "$state" "$window")"
-  pass "a permanently failing crew-state reader surfaces on a bounded cadence, never as a wedge or a stop"
+
+  # ... and the window widened again, so what was long enough last time is not now.
+  backdate "$state/.wedge-unreadable-surfaced-$key" 500
+  run_wedge_round "$dir" "$window" 540 300 "$broken" 'unreadable probe inside the widened window'
+  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
+    || fail "the repeat interval did not widen after the second surfacing: $(state_dump "$state" "$window")"
+  backdate "$state/.wedge-unreadable-surfaced-$key" 905
+  run_wedge_round "$dir" "$window" 600 300 "$broken" 'unreadable probe past the widened window'
+  [ "$(stale_wakes "$state" "$window")" -eq 3 ] \
+    || fail "the backed-off repeat never arrived: $(state_dump "$state" "$window")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "repeat unreadable surfacings advanced the wedge escalation ladder: $(state_dump "$state" "$window")"
+
+  # Any readable verdict drops both counts, so a recovered reader starts clean.
+  run_wedge_round "$dir" "$window" 660 300 'state: working · source: run-step · validating (running)' 'reader recovers'
+  [ ! -e "$state/.wedge-unreadable-$key" ] && [ ! -e "$state/.wedge-unreadable-surfaced-$key" ] \
+    || fail "a readable verdict left the unreadable bookkeeping behind: $(state_dump "$state" "$window")"
+  pass "a permanently failing crew-state reader surfaces, then backs off, never as a wedge or a stop"
 }
 
 # A crew that declares an external wait between the loop's status read and the
