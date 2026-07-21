@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Isolated real-Herdr E2E coverage for the default-off disposable single-task
-# presentation projection.
+# presentation projection and its best-effort primary-worker ordering.
 # The test drives the real spawn and teardown scripts, a real Treehouse pool,
 # and the guarded named-session lab helper.
 set -u
@@ -23,10 +23,13 @@ TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XX
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
+MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
-export REAL_HERDR REAL_TREEHOUSE HERDR_CALL_LOG TREEHOUSE_CALL_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+: > "$MOVE_CALL_LOG"
+REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -83,8 +86,17 @@ set -u
 } >> "$TREEHOUSE_CALL_LOG"
 exec "$REAL_TREEHOUSE" "$@"
 SH
+
+cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$MOVE_CALL_LOG"
+exec "$REAL_MOVER" "$@"
+SH
 chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
+chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
+export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
 HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)
@@ -160,6 +172,27 @@ normalize_meta() {  # <meta>
 
 log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
 
+projection_labels_from_log() {  # <start-line>
+  local start=$1
+  sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '
+    $1 == "workspace" && $2 == "create" {
+      for (i = 1; i < NF; i += 1) {
+        if ($i == "--label" && $(i + 1) ~ /^firstmate\//) {
+          print $(i + 1)
+        }
+      }
+    }
+  '
+}
+
+assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
+  local start=$1 name=$2 calls
+  calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "$name introduced a workspace/tab/session lifecycle or label mutation call"
+  fi
+}
+
 assert_no_projection_mutation_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
@@ -170,37 +203,71 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
 
 HOME_DIR="$TMP_ROOT/home"
 PROJECT_DIR="$TMP_ROOT/project"
-mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/data/shape" "$HOME_DIR/data/restart1"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
+  "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
+  "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
+  "$HOME_DIR/data/order-fail" "$HOME_DIR/data/restart1"
 touch "$HOME_DIR/state/.last-watcher-beat"
+printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
+printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
+printf 'Projection ordering fixture B.\n' > "$HOME_DIR/data/order-b/brief.md"
+printf 'Projection ordering failure fixture.\n' > "$HOME_DIR/data/order-fail/brief.md"
 printf 'Projection restart fixture.\n' > "$HOME_DIR/data/restart1/brief.md"
 make_project "$PROJECT_DIR"
 
-NEIGHBOR_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label neighbor --focus) \
-  || fail "could not create the focused neighboring workspace"
-NEIGHBOR_WSID=$(printf '%s' "$NEIGHBOR_OUT" | jq -r '.result.workspace.workspace_id // empty')
-NEIGHBOR_PANE=$(printf '%s' "$NEIGHBOR_OUT" | jq -r '.result.root_pane.pane_id // empty')
-[ -n "$NEIGHBOR_WSID" ] && [ -n "$NEIGHBOR_PANE" ] || fail "neighbor create returned incomplete IDs"
+# Keep one ordinary primary task live so the durable firstmate workspace is
+# first and remains present while disposable workers are projected around it.
+spawn_task anchor "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/anchor.out" 2> "$TMP_ROOT/anchor.err" \
+  || fail "flag-off anchor spawn failed: $(cat "$TMP_ROOT/anchor.err")"
+ANCHOR_META="$HOME_DIR/state/anchor.meta"
+remember_meta_worktree "$ANCHOR_META" >/dev/null
+FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
+[ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
 
 # The same task id and project run once with the flag absent and once with it
 # present, so Treehouse commands and metadata can be compared directly.
 : > "$TREEHOUSE_CALL_LOG"
+OFF_HERDR_START=$(log_line_count)
+OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/off.err" \
   || fail "flag-off spawn failed: $(cat "$TMP_ROOT/off.err")"
+OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
 OFF_WT=$(remember_meta_worktree "$OFF_META")
+cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
+[ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
+  || fail "flag-off spawn invoked the presentation-only workspace mover"
+OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CALL_LOG")
+if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^(api\tschema|session\tlist)' >/dev/null 2>&1; then
+  fail "flag-off spawn added presentation-ordering capability or socket calls"
+fi
+pass "real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "flag-off teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
-cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
+
+SECOND_ONE_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label 2ndmate-alpha --no-focus) \
+  || fail "could not create the first secondmate presentation fixture"
+SECOND_TWO_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label 2ndmate-bravo --focus) \
+  || fail "could not create the focused secondmate presentation fixture"
+SECOND_ONE_WSID=$(printf '%s' "$SECOND_ONE_OUT" | jq -r '.result.workspace.workspace_id // empty')
+SECOND_TWO_WSID=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.workspace.workspace_id // empty')
+SECOND_TWO_PANE=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$SECOND_ONE_WSID" ] && [ -n "$SECOND_TWO_WSID" ] && [ -n "$SECOND_TWO_PANE" ] \
+  || fail "secondmate presentation fixtures returned incomplete IDs"
+SECOND_ORDER_BEFORE=$(printf '%s\n%s\n' "$SECOND_ONE_WSID" "$SECOND_TWO_WSID")
 
 : > "$TREEHOUSE_CALL_LOG"
 : > "$HOME_DIR/config/herdr-presentation-spaces"
+PROJECTION_ORDER_START=$(log_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
+cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
+  || fail "Treehouse command sequence changed between flag-off and projected spawns"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
@@ -224,9 +291,9 @@ printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
   '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
   || fail "projected workspace's only pane was not the exact recorded task pane"
-NEIGHBOR_INFO=$(lab workspace get "$NEIGHBOR_WSID") || fail "neighbor disappeared during projected create"
-[ "$(printf '%s' "$NEIGHBOR_INFO" | jq -r '.result.workspace.focused')" = true ] \
-  || fail "projected --no-focus create stole focus from the neighboring workspace"
+SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
+[ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
+  || fail "projected create or workspace.move stole focus from the captain's current space"
 pass "real Herdr lab: projected create leaves one normal task pane, no placeholder, and does not steal focus"
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
@@ -235,18 +302,89 @@ normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between flag-off and projected paths"
 
+# Two real concurrent primary spawns share the bounded presentation-order lock.
+# Their final relative order must match Herdr's actual serialized create order,
+# rather than a task-name or priority guess.
+spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
+ORDER_A_PID=$!
+spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
+ORDER_B_PID=$!
+wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
+wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+ORDER_A_META="$HOME_DIR/state/order-a.meta"
+ORDER_B_META="$HOME_DIR/state/order-b.meta"
+remember_meta_worktree "$ORDER_A_META" >/dev/null
+remember_meta_worktree "$ORDER_B_META" >/dev/null
+
+ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
+CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
+EXPECTED_LABELS=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$CREATED_LABELS")
+ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
+[ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
+PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("firstmate/")) | .workspace_id')
+MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
+[ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
+  || fail "workspace.move targeted something other than each exact current projected-create id"
+MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
+[ "$MOVE_INDEXES" = $'1\n2\n3' ] \
+  || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
+SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
+[ "$SECOND_ORDER_AFTER" = "$SECOND_ORDER_BEFORE" ] \
+  || fail "primary workspace ordering changed secondmate relative order"
+[ "$(lab workspace get "$SECOND_TWO_WSID" | jq -r '.result.workspace.focused')" = true ] \
+  || fail "concurrent primary workspace ordering stole focus"
+assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering"
+pass "real Herdr lab: concurrent primary workers form one stable contiguous block after firstmate and before unchanged secondmates"
+
+# Force only the raw move transport to fail after a safe projected create.
+# The spawn must remain successful in Herdr's default appended order, with its
+# exact task pane alive and no ordering-triggered cleanup.
+FAIL_MOVER="$TMP_ROOT/fail-workspace-mover"
+cat > "$FAIL_MOVER" <<'SH'
+#!/usr/bin/env bash
+exit 9
+SH
+chmod +x "$FAIL_MOVER"
+FAIL_START=$(log_line_count)
+FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
+  spawn_task order-fail "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
+  || fail "move-failure projected spawn should still succeed: $(cat "$TMP_ROOT/order-fail.err")"
+grep -F "workspace move failed or had an ambiguous response" "$TMP_ROOT/order-fail.err" >/dev/null 2>&1 \
+  || fail "forced workspace.move failure did not report only the best-effort warning"
+ORDER_FAIL_META="$HOME_DIR/state/order-fail.meta"
+remember_meta_worktree "$ORDER_FAIL_META" >/dev/null
+ORDER_FAIL_WSID=$(grep '^herdr_workspace_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
+ORDER_FAIL_PANE=$(grep '^herdr_pane_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
+FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fallback"
+[ "$(printf '%s' "$FAIL_LIST" | jq -r '.result.workspaces[-1].workspace_id')" = "$ORDER_FAIL_WSID" ] \
+  || fail "workspace.move failure did not leave the safe worker in Herdr's default appended order"
+lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
+  || fail "workspace.move failure cleaned up the safely-created task pane"
+FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "pane" && $2 == "close" { print $3 }')
+[ "$(printf '%s\n' "$FAIL_CLOSED_PANES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
+  || fail "move-failure spawn performed a pane close beyond the normal seeded-pane prune"
+[ "$FAIL_CLOSED_PANES" != "$ORDER_FAIL_PANE" ] \
+  || fail "move-failure spawn closed its exact task pane"
+assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
+pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
+
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
-cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
-  || fail "Treehouse command sequence changed between flag-off and projected paths"
 pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi
-lab pane get "$NEIGHBOR_PANE" >/dev/null 2>&1 \
-  || fail "projected teardown affected the neighboring workspace"
+lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
+  || fail "projected teardown affected the focused secondmate workspace"
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
 pass "real Herdr lab: exact task-pane close removes only the last-tab projection workspace and leaves its neighbor untouched"
+
+teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" \
+  || fail "projected ordering fixture A teardown failed"
+teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" \
+  || fail "projected ordering fixture B teardown failed"
+teardown_task order-fail "$HOME_DIR" > "$TMP_ROOT/order-fail-teardown.out" 2> "$TMP_ROOT/order-fail-teardown.err" \
+  || fail "projected ordering failure fixture teardown failed"
 
 # A restart preserves the label and structural pane but removes the registered
 # agent.

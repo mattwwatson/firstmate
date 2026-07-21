@@ -78,6 +78,11 @@ FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # (14): the adapter's spawn/capture/send primitives work on 14, only the push
 # subscriber needs 16.
 FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
+# workspace.move first appears in the protocol-16 schema.
+# The installed CLI does not expose it as a workspace subcommand, so the
+# presentation path uses one narrowly whitelisted raw-socket request after
+# verifying the exact method and parameter schema.
+FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
 # Per-pane escalation dedupe marker prefix, under the state dir. One marker per
 # window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
 # is enqueued, cleared on any working edge, so exactly one wake fires per
@@ -260,6 +265,131 @@ fm_backend_herdr_projection_journal_token() {  # <journal> <task-id>
 
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '%s/%s · p:%s' "$(fm_backend_herdr_workspace_label)" "$1" "$2"
+}
+
+# fm_backend_herdr_projection_order_best_effort: place the exact workspace id
+# returned by THIS projected create after the existing contiguous primary
+# worker prefix and before every other workspace.
+#
+# This is presentation-only and always returns success.
+# Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
+# warning and leaves the safely-created worker running in Herdr's current
+# order.
+# It never looks up a task endpoint, adopts or reuses a workspace, retries an
+# ambiguous move, restores focus, or calls any close/delete primitive.
+# Existing worker and secondmate workspace ids are read only to validate stable
+# relative order; the sole move target is <created-workspace-id>, captured
+# directly from the current workspace-create response.
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id>
+  local session=$1 created=$2 list analysis current desired protocol schema sessions socket mover response
+  local before_focus before_secondmates before_workers after_focus after_secondmates after_workers
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" '
+    def primary_worker:
+      (.label | type) == "string"
+      and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$"));
+    (.result.workspaces // null) as $spaces
+    | select(($spaces | type) == "array" and ($spaces | length) > 0)
+    | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
+    | select(($matches | length) == 1)
+    | ($matches[0]) as $current
+    | select($current == (($spaces | length) - 1))
+    | select($spaces[0].label == "firstmate")
+    | ($spaces[1:$current]) as $before
+    | ([range(0; $before | length) | select(($before[.] | primary_worker) | not)] | first // ($before | length)) as $prefix
+    | select(([$before[$prefix:][]? | select(primary_worker)] | length) == 0)
+    | {
+        current: $current,
+        desired: (1 + $prefix),
+        focus: [$spaces[] | select(.focused == true) | .workspace_id],
+        secondmates: [$spaces[] | select((.label | type) == "string" and (.label | startswith("2ndmate-"))) | .workspace_id],
+        workers: [$spaces[] | select(primary_worker and .workspace_id != $created) | .workspace_id]
+      }
+  ' 2>/dev/null) || analysis=
+  [ -n "$analysis" ] || {
+    echo "warning: herdr presentation ordering found an ambiguous workspace layout; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+  current=$(printf '%s' "$analysis" | jq -r '.current // empty' 2>/dev/null)
+  desired=$(printf '%s' "$analysis" | jq -r '.desired // empty' 2>/dev/null)
+  case "$current:$desired" in
+    *[!0-9:]*)
+      echo "warning: herdr presentation ordering could not parse the target position; leaving worker in Herdr's current order" >&2
+      return 0
+      ;;
+  esac
+  [ "$current" != "$desired" ] || return 0
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "warning: herdr presentation ordering requires python3; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+  protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  case "$protocol" in
+    ''|*[!0-9]*)
+      echo "warning: herdr presentation ordering could not verify the client protocol; leaving worker in Herdr's current order" >&2
+      return 0
+      ;;
+  esac
+  if [ "$protocol" -lt "$FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL" ]; then
+    echo "warning: herdr presentation ordering needs protocol $FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL or newer; leaving worker in Herdr's current order" >&2
+    return 0
+  fi
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || {
+    echo "warning: herdr presentation ordering could not read the API schema; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+  if ! printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "workspace.move")
+    and .schemas.request["$defs"].WorkspaceMoveParams.required == ["workspace_id", "insert_index"]
+    and .schemas.request["$defs"].WorkspaceMoveParams.properties.insert_index.type == "integer"
+  ' >/dev/null 2>&1; then
+    echo "warning: herdr presentation ordering API support is unavailable or ambiguous; leaving worker in Herdr's current order" >&2
+    return 0
+  fi
+  sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || {
+    echo "warning: herdr presentation ordering could not resolve the named session socket; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+  socket=$(printf '%s' "$sessions" | jq -r --arg want "$session" '
+    [.sessions[]? | select(.name == $want and .running == true) | .socket_path]
+    | if length == 1 then .[0] else empty end
+  ' 2>/dev/null)
+  [ -n "$socket" ] || {
+    echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
+    return 0
+  }
+
+  mover=${FM_BACKEND_HERDR_WORKSPACE_MOVER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
+  response=$("$mover" "$socket" "$created" "$desired" 2>/dev/null) || {
+    echo "warning: herdr presentation workspace move failed or had an ambiguous response; leaving worker running without cleanup" >&2
+    return 0
+  }
+  if ! printf '%s' "$response" | jq -e --arg created "$created" --argjson desired "$desired" '
+    .result.type == "workspace_list"
+    and (.result.workspaces | type) == "array"
+    and .result.workspaces[$desired].workspace_id == $created
+    and .result.workspaces[0].label == "firstmate"
+  ' >/dev/null 2>&1; then
+    echo "warning: herdr presentation workspace move returned an unverifiable order; leaving worker running without cleanup" >&2
+    return 0
+  fi
+
+  before_focus=$(printf '%s' "$analysis" | jq -c '.focus' 2>/dev/null)
+  before_secondmates=$(printf '%s' "$analysis" | jq -c '.secondmates' 2>/dev/null)
+  before_workers=$(printf '%s' "$analysis" | jq -c '.workers' 2>/dev/null)
+  after_focus=$(printf '%s' "$response" | jq -c '[.result.workspaces[] | select(.focused == true) | .workspace_id]' 2>/dev/null)
+  after_secondmates=$(printf '%s' "$response" | jq -c '[.result.workspaces[] | select((.label | type) == "string" and (.label | startswith("2ndmate-"))) | .workspace_id]' 2>/dev/null)
+  after_workers=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select((.label | type) == "string" and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$")) and .workspace_id != $created) | .workspace_id]' 2>/dev/null)
+  if [ "$after_focus" != "$before_focus" ] \
+     || [ "$after_secondmates" != "$before_secondmates" ] \
+     || [ "$after_workers" != "$before_workers" ]; then
+    echo "warning: herdr presentation workspace move did not preserve focus or relative order; leaving worker running without cleanup" >&2
+  fi
+  return 0
 }
 
 # fm_backend_herdr_server_ensure: start the herdr server for <session>

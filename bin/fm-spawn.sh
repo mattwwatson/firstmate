@@ -35,6 +35,11 @@
 #   or recovered state is never adopted, reused, closed, or deleted through that
 #   presentation path; a flat launch is allowed only after duplicate-agent risk
 #   is independently absent. Treehouse allocation and task metadata are unchanged.
+#   Primary-home projected creates make one bounded best-effort attempt to hold a
+#   shared presentation-order lock across create and workspace.move. The exact
+#   response-derived new workspace is appended to the stable primary-worker block
+#   immediately after firstmate. Ordering never authorizes lifecycle cleanup, and
+#   any unavailable, ambiguous, or failed move warns while the spawn continues.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
@@ -209,6 +214,8 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PRESENTATION_ORDER_LOCK=
+HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 
@@ -231,6 +238,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
     fm_backend_herdr_projection_cleanup_exact \
@@ -273,6 +284,27 @@ spawn_abort_cleanup() {
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
+
+spawn_herdr_presentation_order_lock_acquire() {
+  local attempt
+  HERDR_PRESENTATION_ORDER_LOCK="$STATE/.herdr-presentation-order.lock"
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+spawn_herdr_presentation_order_lock_release() {
+  [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
+  HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+  fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -810,6 +842,14 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        HERDR_PRESENTATION_ORDERING=0
+        if [ "$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)" = firstmate ]; then
+          if spawn_herdr_presentation_order_lock_acquire; then
+            HERDR_PRESENTATION_ORDERING=1
+          else
+            echo "warning: herdr presentation ordering lock stayed busy; creating the worker in Herdr's default order" >&2
+          fi
+        fi
         HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
         HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
           fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
@@ -833,6 +873,10 @@ case "$BACKEND" in
         HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
         HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
         HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+        if [ "$HERDR_PRESENTATION_ORDERING" = 1 ]; then
+          fm_backend_herdr_projection_order_best_effort "$HERDR_SES" "$HERDR_WORKSPACE_ID"
+        fi
+        spawn_herdr_presentation_order_lock_release
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then

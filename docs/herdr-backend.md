@@ -35,6 +35,8 @@ You do not need to attach for routine supervision: from an active firstmate sess
 
 An optional local `config/herdr-presentation-spaces` presence flag gives a clean new task a disposable one-task workspace instead.
 The flag is absent by default, and the feature is presentation-only and best-effort rather than durable grouping.
+Primary-home projected workspaces are placed in a stable contiguous block immediately after `firstmate` when Herdr protocol 16 `workspace.move` and `python3` are available.
+Unavailable or failed ordering warns and leaves the successfully created worker running in Herdr's current order.
 See "Optional disposable single-task presentation spaces" below before enabling it.
 
 Verify it works by spawning a trivial task with `--backend herdr` and confirming the task's meta records `backend=herdr` plus `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`; the selected Herdr workspace should show the new `fm-<id>` tab.
@@ -150,6 +152,23 @@ The normal `fm-<id>` tab is created in that exact workspace, and only the exact 
 The projected create refuses success unless the workspace converges to exactly one tab and one pane, both matching the new task response.
 There is no log or placeholder tab because retaining one would keep the workspace alive after the task pane closes.
 
+For a primary-home projected create, Firstmate makes one presentation-only ordering attempt after that exact workspace has converged.
+A bounded shared lock serializes primary projected creates across workspace creation and ordering, so the workers retain Herdr's actual create order even when Firstmate starts them concurrently.
+The new response-derived workspace id is appended to the existing contiguous `firstmate/... · p:<token>` prefix immediately after `firstmate`.
+This puts the complete primary-worker block before every `2ndmate-*` workspace while leaving every existing workspace, including all secondmate workspaces, in its previous relative order.
+Only the exact workspace id returned by the current projected create is ever a move target.
+Labels are used only to validate the presentation shape and calculate an insert index, never as task authority or as a destructive target selector.
+
+Herdr 0.7.4 protocol 16 exposes `workspace.move` in `herdr api schema`, with exact parameters `workspace_id` and zero-based `insert_index`, but does not expose it as a CLI subcommand.
+`bin/backends/herdr-workspace-move.py` therefore sends that one whitelisted method over the exact named session's Unix socket and accepts only its matching `workspace_list` response.
+The returned order is checked against the pre-move focused workspace, primary-worker relative order, and secondmate relative order.
+The move does not focus its target, and Firstmate never changes focus to repair or retry an ordering result.
+
+Ordering is best-effort and never becomes task or lifecycle authority.
+An unavailable protocol, missing method schema, missing `python3`, ambiguous socket or workspace layout, busy shared lock, explicit move error, lost response, or failed verification prints a warning and does not fail the spawn.
+Firstmate performs no ordering retry, adoption, reuse, close, delete, rename, or cleanup in response.
+If a move response is lost after Herdr applied it, the current order may already have changed, but the worker remains safely running and no ambiguous response grants additional authority.
+
 After creation, the ordinary task metadata remains the sole operational endpoint record.
 Its `window=`, `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=` fields have exactly the same shape as the flag-off path.
 No projection ownership flag is added.
@@ -174,14 +193,15 @@ Any live or unknown pane in those matches refuses the duplicate launch.
 The user-visible compromises are intentional:
 
 - Grouping is best-effort during a clean Herdr server lifetime, not durable or guaranteed.
+- Clean primary-home projected creates form one stable contiguous worker block immediately after `firstmate`; existing ambiguous or manually interleaved layouts degrade with a warning instead of being rewritten.
 - A Herdr restart restores the token-bearing layout as an agent-free husk, and the task respawns flat while that old space is left untouched.
 - Crashes, response loss, failed exact-pane close, or human renames can leave stale empty-looking spaces that Firstmate never auto-deletes.
-- Spaces have no automatic contiguity or cross-home cleanup.
+- Spaces have no cross-home cleanup.
 - Manual cleanup happens in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping or retiring the flat task, manually verifying the stale projection is harmless, clearing its quarantined journal, and starting a genuinely fresh task.
 - The visible 22-character token is the cost of restart-stable correlation without claiming that a mutable label is authority.
 
-This Stage 1 feature makes no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, no cross-home cleanup path, and no contiguity engine.
+The projection and its ordering follow-up make no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, and no cross-home cleanup path.
 It is intentionally separate from any future Treehouse hardening work.
 
 ### Isolated E2E evidence (2026-07-20)
@@ -199,7 +219,10 @@ HERDR_LAB_HELPER=/Users/kunchen/.treehouse/firstmate-b8697d/3/firstmate/bin/fm-h
 Exact result:
 
 ```text
+ok - real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls
 ok - real Herdr lab: projected create leaves one normal task pane, no placeholder, and does not steal focus
+ok - real Herdr lab: concurrent primary workers form one stable contiguous block after firstmate and before unchanged secondmates
+ok - real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup
 ok - real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs
 ok - real Herdr lab: exact task-pane close removes only the last-tab projection workspace and leaves its neighbor untouched
 ok - real Herdr lab: restart preserves the token label as an agent-free husk that is left untouched while the task respawns flat
@@ -270,6 +293,7 @@ Herdr tasks additionally record:
 | Busy state | `herdr agent get <pane>` -> `.result.agent.agent_status` | Verified live against an interactive `claude` session: reports `working` while generating, `done` once idle. Mapped: `working` -> busy; `idle`/`done` -> idle; `blocked` -> idle (surfaced like a stale pane, not suppressed as busy - a blocked agent is stuck waiting on the human, not grinding); anything else -> unknown (the cue for the shared tail-regex fallback). |
 | Kill | `herdr pane close <pane>` | Closing a tab's only (root) pane also closes the tab - no separate tab-close call needed for this adapter's one-pane-per-tab shape. Best-effort: closing an already-closed pane exits non-zero, matching tmux's `kill-window \|\| true` contract. Teardown itself only ever closes the task's own pane/tab, never the workspace - but closing a workspace's LAST tab (verified real-herdr behavior) deletes the workspace as a side effect, so a home's own workspace persists only while at least one task tab remains; see "Default workspace lifecycle" above. |
 | Default-tab prune (create_task, first task in a fresh workspace only) | `herdr workspace create`'s own response (`.result.tab.tab_id`) identifies the seeded tab; `herdr tab list` + `herdr agent get <pane>` re-verify it; `herdr pane close <pane>` closes exactly that tab id | `herdr workspace create` seeds the new workspace with one auto-created default tab (label `1`, id captured straight from the create response) firstmate never uses. `fm_backend_herdr_create_task` closes EXACTLY that captured tab id right after creating the first real task tab in a freshly created workspace - never right after `workspace create` itself (see Kill row), and never re-derived from a tab's label or the workspace's tab count at create_task time (see "Default-tab prune" above for the created-vs-adopted safety gate and the 2026-07-02 incident it fixes). Best-effort; an ADOPTED workspace (not freshly created by this same call) is never a prune candidate at all. |
+| Presentation workspace ordering | Raw protocol-16 `workspace.move` with `{workspace_id, insert_index}` over the exact named session socket | Herdr 0.7.4 exposes the method and zero-based `WorkspaceMoveParams.insert_index` in `herdr api schema` but has no `herdr workspace move` CLI subcommand, while moving the exact newly created workspace returns the full `workspace_list`, preserves focus and every other workspace's relative order, and is never used for recovery, ownership, adoption, or cleanup. |
 | Recovery / list-live | `herdr tab list --workspace <id>`, filter labels starting with `fm-` | Label-based, never trusts a stored id blindly - see "ID stability" below. `<id>` is always THIS home's own workspace (`fm_backend_herdr_workspace_find`), so recovery never sees a sibling home's tabs. |
 | Workspace create / tab create (focus) | `herdr workspace create --no-focus`, `herdr tab create --no-focus` | Verified: neither focuses by default once a workspace already exists in the session, matching pre-P3 (flagless) behavior; `--no-focus` is passed anyway for defense in depth, since the very first workspace ever created in a brand-new session focuses regardless of the flag. `--focus` was separately verified to reliably focus, confirming the flag has real effect. |
 | Session targeting for DESTRUCTIVE calls | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json`; never `herdr server stop` | Owned by `bin/fm-herdr-lab.sh` (which `tests/herdr-test-safety.sh` sources), re-querying `herdr session list --json` before every destructive call. See "Session targeting" below - `HERDR_SESSION` alone is not reliably honored once another herdr server is already running on the machine. |
