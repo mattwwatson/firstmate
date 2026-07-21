@@ -21,9 +21,9 @@
 #   - patches_in_default  pure git, forge-agnostic, rescues the conflicting-advance
 #                         case above; the only patch-id proof available on Bitbucket
 #                         Cloud, which publishes no PR head ref to fetch. A patch id
-#                         match is not enough on a whole branch - each match must
-#                         also still be reverse-appliable against the default
-#                         branch's current tree, so a landed-then-reverted change
+#                         match is not enough on a whole branch - the unpushed stack
+#                         must also roll back out of the default branch's tree,
+#                         newest commit first, so a landed-then-reverted change
 #                         refuses. FM_LANDED_PATCH_SCAN_LIMIT (default 1000; 0 or a
 #                         non-numeric value means unbounded) bounds how far back the
 #                         default branch is scanned
@@ -370,30 +370,57 @@ patch_ids_in_range() {
     | sort -u
 }
 
-# Is <commit>'s own change still present in <ref>'s CURRENT content? A patch id
-# match only proves an identical diff was applied to <ref> at some point; it says
-# nothing about whether a later commit reverted or replaced it. This reverse-applies
-# the commit's diff against <ref>'s tree: it can only succeed while that exact change
-# is still there. The check is per-commit and per-file, so it stays far narrower than
-# content_in_default's whole-branch 3-way merge - it still answers when that merge is
-# inconclusive for unrelated reasons.
-# Nothing in the real worktree or its index is touched: the tree is read into a
-# throwaway index and `git apply --check --cached` never writes. Any error - an
-# unreadable diff, an empty diff, a failed read-tree - returns non-zero, so
-# inconclusive still means refuse.
-commit_content_present_in_ref() {
-  local commit=$1 ref=$2 patch index rc=0
-  patch=$(git -C "$WT" show --no-ext-diff --binary --format=%n "$commit" 2>/dev/null) || return 1
-  [ -n "$patch" ] || return 1
+# A throwaway index holding <ref>'s tree, for the rollback walk below. Echoes its
+# path; the caller removes it. Never touches the real worktree or its index - every
+# git call that reads or writes it is pointed at it through GIT_INDEX_FILE.
+rollback_index_for_ref() {
+  local ref=$1 index
   index=$(mktemp "${TMPDIR:-/tmp}/fm-teardown-index.XXXXXX") || return 1
   rm -f -- "$index"
-  GIT_INDEX_FILE="$index" git -C "$WT" read-tree "$ref^{tree}" >/dev/null 2>&1 || rc=1
-  if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$patch" \
-      | GIT_INDEX_FILE="$index" git -C "$WT" apply --check --cached --reverse - >/dev/null 2>&1 || rc=1
+  if ! GIT_INDEX_FILE="$index" git -C "$WT" read-tree "$ref^{tree}" >/dev/null 2>&1; then
+    rm -f -- "$index"
+    return 1
   fi
-  rm -f -- "$index"
-  return "$rc"
+  printf '%s\n' "$index"
+}
+
+# Roll <commit> back out of <index>, which starts at the landed ref's tree and is
+# walked newest-first, so by the time this is reached the commit's own descendants
+# have already been undone and the index holds exactly the intermediate state that
+# commit produced. Reverse-applying therefore succeeds only while that commit's change
+# is genuinely still present in the landed ref - a change that was applied and later
+# reverted cannot roll back. Persisting each application (no --check) is what makes a
+# replayed multi-commit stack verifiable: each commit is tested against its own
+# predecessor state, not the ref's final tree.
+# The diff is streamed straight into git apply; round-tripping it through a shell
+# variable would strip the trailing newlines that binary payloads and blank final
+# hunk lines depend on. An empty diff (a merge, an empty commit) is no valid patch,
+# so git apply fails and the caller refuses.
+# The check stays per-commit and per-file, far narrower than content_in_default's
+# whole-branch 3-way merge, so it still answers when that merge is inconclusive.
+rollback_commit_from_index() {
+  local commit=$1 index=$2
+  git -C "$WT" show --no-ext-diff --binary --format=%n "$commit" 2>/dev/null \
+    | GIT_INDEX_FILE="$index" git -C "$WT" apply --cached --reverse - >/dev/null 2>&1
+}
+
+# The unpushed-commit walk: newest-first, each commit's patch id must be in
+# <landed_patch_ids>, and - when <index> is non-empty - its change must also still
+# roll back out of that index. Returns non-zero on the FIRST failure of either test,
+# so a partly-landed stack never gets further evaluation.
+unpushed_commits_are_accounted_for() {
+  local landed_patch_ids=$1 unpushed=$2 index=$3 commit patch_id
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    patch_id=$(patch_id_for_commit "$commit") || return 1
+    [ -n "$patch_id" ] || return 1
+    printf '%s\n' "$landed_patch_ids" | grep -qxF "$patch_id" || return 1
+    if [ -n "$index" ]; then
+      rollback_commit_from_index "$commit" "$index" || return 1
+    fi
+  done <<EOF
+$unpushed
+EOF
 }
 
 # Forge-agnostic core of the patch-id proof: is every commit the worktree holds
@@ -410,12 +437,15 @@ commit_content_present_in_ref() {
 # a default-branch range is not. Truncation can only lose a match, never invent one,
 # so the bound errs toward refusing.
 # <require_present>, when "yes", additionally requires each matching unpushed commit's
-# change to still be present in <landed_ref>'s current content (see
-# commit_content_present_in_ref). A patch id alone proves only that the diff was once
-# applied; on a whole default branch that is not enough, because the change may since
-# have been reverted, and hard-resetting the worktree would then destroy the only copy.
+# change to still be present in <landed_ref>'s current content, proved by rolling the
+# whole unpushed stack back out of one shared throwaway index seeded from that ref's
+# tree (see rollback_commit_from_index). A patch id alone proves only that the diff was
+# once applied; on a whole default branch that is not enough, because the change may
+# since have been reverted, and hard-resetting the worktree would then destroy the only
+# copy. A rollback that cannot be completed for any reason - an unbuildable index, a
+# conflict, a corrupt or empty patch, a failed git call - is a refusal, never a pass.
 unpushed_patches_are_in_ref() {
-  local landed_ref=$1 limit=${2:-} require_present=${3:-no} current base landed_patch_ids commit patch_id unpushed
+  local landed_ref=$1 limit=${2:-} require_present=${3:-no} current base landed_patch_ids unpushed index='' rc=0
   case "$limit" in
     ''|*[!0-9]*) limit= ;;
     *) [ "$limit" -gt 0 ] || limit= ;;
@@ -426,17 +456,14 @@ unpushed_patches_are_in_ref() {
   [ -n "$landed_patch_ids" ] || return 1
   unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$landed_patch_ids" | grep -qxF "$patch_id" || return 1
-    if [ "$require_present" = yes ]; then
-      commit_content_present_in_ref "$commit" "$landed_ref" || return 1
-    fi
-  done <<EOF
-$unpushed
-EOF
+  if [ "$require_present" = yes ]; then
+    index=$(rollback_index_for_ref "$landed_ref") || return 1
+  fi
+  unpushed_commits_are_accounted_for "$landed_patch_ids" "$unpushed" "$index" || rc=1
+  if [ -n "$index" ]; then
+    rm -f -- "$index"
+  fi
+  return "$rc"
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
