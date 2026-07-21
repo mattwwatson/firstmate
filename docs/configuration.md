@@ -292,8 +292,9 @@ Firstmate must never read it. Keeping an unattended reader write-incapable is th
 **It is read from the keychain directly, never from the environment.** The resolver reads the store itself, so it behaves identically whether firstmate was started from a warm interactive terminal, re-armed by a background repair path, or resumed after a reboot.
 Inheriting an exported token from a shell profile is what leaves a restarted daemon silently tokenless, and firstmate does not reproduce it.
 
-Session start verifies the credential when, and only when, this home tracks a repository on such a forge, and reports `FORGE_CREDENTIAL: <forge>: <reason>` when it is missing, empty, unusable, refused, or valid-but-blind to the tracked repository.
-That check costs at most one bounded request per session start, because the credential is account-wide rather than per repository, and it stays silent when the forge cannot be reached: being offline is not a credential fault.
+Session start verifies the credential when, and only when, this home tracks a repository on such a forge, and reports `FORGE_CREDENTIAL: <forge>: <reason>` when it is missing, empty, unusable, or refused.
+That check probes exactly one deterministically chosen tracked repository per forge, so it costs at most one bounded request per session start however many clones on that forge the home tracks.
+It stays silent when the forge cannot be reached: being offline is not a credential fault.
 The whole reason it runs at startup is that a stale credential used to be invisible until a pull-request step failed roughly an hour into finished work.
 No diagnostic anywhere in this path prints a credential value; each one names the failing requirement instead.
 
@@ -303,10 +304,13 @@ A machine with no credential store at all - today anything other than macOS, sin
 The line says the forge's merge and build checks are unavailable here rather than implying a fault the captain can fix by retrying, and `state/forge-credential-no-store.<forge>` records that it has been said.
 That record is per home and per forge, and it holds no content of any kind, least of all a credential value.
 Deleting it makes the next session start say it again.
+A session that did not get the fleet lock reports the news but does not write the record, so the session that can actually act on it is the one that consumes it.
 Silence instead of the first line was rejected for the same reason the check exists at all: the captain would otherwise discover the gap at a failed pull-request step.
 
-A repository the credential cannot see is reported only when **no** tracked repository on that forge is readable.
-The credential is account-wide, so any single unreadable clone proves nothing about it, and reporting the first one would let directory order decide which repository owns the diagnostic forever.
+A repository the probe cannot see is **not** reported, because it says nothing about the credential.
+Bitbucket authenticates before it resolves the resource, verified live on 21/07/2026: an invalid credential against a real private repository answers HTTP 401, while a valid credential against a nonexistent repository answers HTTP 404.
+The resolver never sends a request without a fully resolved pair, so that 404 proves the credential was accepted and only that one repository is out of its reach, which is a repository-visibility fact rather than a credential fault.
+It is also why one probe settles the credential for the whole forge, and why which clone gets probed cannot change what is reported.
 
 Both waits on this path are bounded, because a startup check that can hang session start is worse than the late failure it replaces.
 `FM_FORGE_CREDENTIAL_TIMEOUT` bounds the forge request and `FM_FORGE_KEYCHAIN_TIMEOUT` bounds the store read; a blank, non-numeric, or zero value falls back to the default, since zero means "no limit" to curl rather than "do not wait".

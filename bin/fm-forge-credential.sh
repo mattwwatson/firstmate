@@ -239,11 +239,16 @@ read_store_value() {  # <service>
   # with the same status as end of input, so the status alone cannot tell "never
   # answered" from "answered nothing". Killing the store command also ends the
   # read, because that closes the last writer on the pipe.
+  # The marker is written BEFORE the kill, never after: the kill is what releases
+  # the main shell's wait, so writing the marker second would race it, and losing
+  # that race would leave a stalled read wearing the killed command's exit status
+  # and be classified as an absent entry - the exact conflation this outcome
+  # exists to prevent.
   # Every inherited stream is closed first: the watchdog outlives the read by
   # design, and a caller reading this script through a command substitution
   # would otherwise wait for the watchdog's own sleep to end before seeing the
   # answer - reintroducing the stall from the other side.
-  ( sleep "$STORE_TIMEOUT"; kill "$store_pid" 2>/dev/null; : > "$expired" ) \
+  ( sleep "$STORE_TIMEOUT"; : > "$expired"; kill "$store_pid" 2>/dev/null ) \
     </dev/null >/dev/null 2>&1 &
   watchdog_pid=$!
   # A backstop for the case where something other than the store command still

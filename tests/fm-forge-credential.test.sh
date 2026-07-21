@@ -196,6 +196,20 @@ test_a_stalling_store_times_out_instead_of_hanging() {
   assert_not_contains "$err" "absent" "a stalled store must not read as an absent entry"
   assert_absent "$dir/curl-argv" "a stalled store must never reach a request"
   assert_no_credential_leak "$err" "the store-timeout refusal"
+
+  # The watchdog records the timeout before it kills the store command, so the
+  # verdict cannot depend on which of the two the main shell observes first.
+  # Repeating the case exercises that interleaving rather than assuming the
+  # losing order is rare enough to ignore: a lost race would surface here as
+  # exit 3, the absent-entry verdict this outcome exists to stay distinct from.
+  local attempt status
+  for attempt in 1 2 3; do
+    dir=$(new_case)
+    record=$(FAKE_KEYCHAIN_SECRET=stall FM_FORGE_KEYCHAIN_TIMEOUT=1 \
+      run_resolver "$dir" check bitbucket mattw_watson/hexbattle)
+    status=$(field "$record" 1)
+    expect_code 10 "$status" "a stalled store on attempt $attempt"
+  done
   pass "a store that never answers is its own outcome, not a hang and not a pass"
 }
 
@@ -547,10 +561,13 @@ test_bootstrap_reports_no_store_once_per_home() {
   home="$dir/home"
   fakebin="$dir/bin"
 
+  # The recording half belongs to the session holding the fleet lock, so these
+  # runs are not detect-only; the lock-refused path has its own case below.
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FORGE_CREDENTIAL: bitbucket: no credential store on this platform" \
     "the first session start on a machine with no credential store must say so"
   assert_contains "$out" "unavailable here" \
@@ -560,9 +577,10 @@ test_bootstrap_reports_no_store_once_per_home() {
   [ ! -s "$marker" ] || fail "the marker must record only that the line was said, never any value"
 
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FORGE_CREDENTIAL" \
     "a home that has already been told about the missing store must stay silent"
 
@@ -579,49 +597,90 @@ test_bootstrap_reports_no_store_once_per_home() {
   pass "a machine with no credential store is reported once per home, then silently"
 }
 
-test_bootstrap_reports_an_invisible_repository_only_when_none_is_readable() {
-  local dir home fakebin out
-  # Directory order must not decide which repository owns the diagnostic: the
-  # credential is account-wide, so one unreadable clone proves nothing about it.
+test_bootstrap_probes_one_repository_per_forge() {
+  local dir home fakebin out requests
+  # The captain must not pay one request per clone at session start, so the
+  # number of tracked Bitbucket clones must not reach the request count.
   dir=$(new_bootstrap_case \
     'a-invisible=git@bitbucket.org:mattw_watson/invisible.git' \
-    'z-readable=git@bitbucket.org:mattw_watson/readable.git')
+    'm-second=git@bitbucket.org:mattw_watson/second.git' \
+    'z-readable=git@bitbucket.org:mattw_watson/readable.git' \
+    'gh-only=https://github.com/owner/repo.git')
   home="$dir/home"
   fakebin="$dir/bin"
 
+  # The chosen clone answers "not visible to this credential". Because the forge
+  # authenticates BEFORE it resolves the resource, that answer proves the
+  # credential was accepted, so startup stays silent and no other clone is
+  # probed to chase it.
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
     FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
     FAKE_CURL_404_MATCH='mattw_watson/invisible' \
+    FAKE_CURL_ARGV_LOG="$dir/probe-argv" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "FORGE_CREDENTIAL" \
-    "a readable clone must suppress an earlier clone's not-visible result"
+    "a repository the credential cannot see must not be reported as a credential fault"
+  requests=$(grep -c . "$dir/probe-argv")
+  [ "$requests" -eq 1 ] || fail "four tracked clones must cost exactly one request, made $requests"
 
-  # A credential-level verdict is true whichever repository was probed, so it is
-  # reported straight from the first clone rather than waiting for the scan.
+  # A credential-level verdict is true whichever repository was probed, so the
+  # single probe still reports it.
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
     FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
-    FAKE_KEYCHAIN_SECRET=absent \
+    FAKE_CURL_STATUS=401 FAKE_CURL_ARGV_LOG="$dir/rejected-argv" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "firstmate-bitbucket-token" \
-    "a credential-level verdict must be reported from the first clone that produced it"
-  assert_not_contains "$out" "sees none of the tracked" \
-    "a credential-level verdict must not be reported as a repository-access problem"
+  assert_contains "$out" "FORGE_CREDENTIAL: bitbucket:" \
+    "a rejected credential must still be reported from the single probe"
+  assert_contains "$out" "401" "the line must carry the forge's verdict"
+  requests=$(grep -c . "$dir/rejected-argv")
+  [ "$requests" -eq 1 ] || fail "a rejected credential must cost one request, made $requests"
+  pass "session start probes one repository per forge however many clones are tracked"
+}
 
-  # No tracked repository on the forge is readable: now it is worth saying, and
-  # the wording must point at access rather than at the credential.
-  dir=$(new_bootstrap_case 'a-invisible=git@bitbucket.org:mattw_watson/invisible.git')
+test_a_lock_refused_session_reports_the_news_without_consuming_it() {
+  local dir home fakebin out marker
+  # A session that did not get the fleet lock stays strictly read-only. Writing
+  # the marker here would also spend the one report on the session least able to
+  # act on it, leaving the locked session silent.
+  dir=$(new_bootstrap_case 'hexbattle=git@bitbucket.org:mattw_watson/hexbattle.git')
   home="$dir/home"
   fakebin="$dir/bin"
+  marker="$home/state/forge-credential-no-store.bitbucket"
+
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
-    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
-    FAKE_CURL_404_MATCH='mattw_watson/invisible' \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "FORGE_CREDENTIAL: bitbucket: the credential authenticates but sees none of the tracked" \
-    "a forge with no readable tracked repository must be reported as an access problem"
-  pass "a not-visible repository is reported only when no tracked clone on that forge is readable"
+  assert_contains "$out" "no credential store on this platform" \
+    "a lock-refused session must still report the news"
+  assert_absent "$marker" "a lock-refused session must not write the record"
+
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "no credential store on this platform" \
+    "the news must survive for the session that can act on it"
+
+  # The session holding the lock records it, and only then does it go quiet.
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "no credential store on this platform" \
+    "the session holding the lock must be the one that hears and records it"
+  assert_present "$marker" "the session holding the lock must write the record"
+
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "FORGE_CREDENTIAL" \
+    "once recorded, every later session start stays silent"
+  pass "a lock-refused session reports the no-store news without consuming it"
 }
 
 test_bootstrap_reports_a_stalled_store_every_time() {
@@ -694,7 +753,8 @@ test_a_stalling_store_times_out_instead_of_hanging
 test_a_zero_bound_falls_back_to_the_default
 test_bootstrap_reports_a_broken_credential_at_session_start
 test_bootstrap_reports_no_store_once_per_home
-test_bootstrap_reports_an_invisible_repository_only_when_none_is_readable
+test_bootstrap_probes_one_repository_per_forge
+test_a_lock_refused_session_reports_the_news_without_consuming_it
 test_bootstrap_reports_a_stalled_store_every_time
 test_a_tool_two_checks_need_is_reported_once
 test_bootstrap_diagnostic_has_one_owner_and_one_trigger

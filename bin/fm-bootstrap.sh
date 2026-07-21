@@ -44,17 +44,21 @@
 #          A FORGE_CREDENTIAL line means this home tracks a repository on a forge
 #          whose credential firstmate holds itself (today only Bitbucket), and
 #          that credential is missing, unusable, or refused - so merge and build
-#          checks for it cannot work. It is detect-only, costs at most one bounded
-#          request, and stays silent both when no such repository is tracked and
-#          when the forge could not be reached. bin/fm-forge-credential.sh owns
-#          the resolution, the reason wording, and the exit-code contract.
+#          checks for it cannot work. It is detect-only and probes exactly ONE
+#          deterministically chosen tracked repository per forge, so it costs at
+#          most one bounded request per session start however many clones on that
+#          forge the home tracks. It stays silent when no such repository is
+#          tracked, when the forge could not be reached, and when the probed
+#          repository is simply not visible to the credential - the last because
+#          the forge authenticates before it resolves the resource, so that
+#          answer proves the credential was ACCEPTED.
+#          bin/fm-forge-credential.sh owns the resolution, the reason wording,
+#          and the exit-code contract.
 #          A machine with no credential store at all is reported ONCE per home
 #          and recorded in state/forge-credential-no-store.<forge>, because it
 #          is news the first time and unactionable noise every session after.
-#          "not visible to this credential" is reported only when NO tracked
-#          repository on that forge is readable, so glob order never decides
-#          which repository owns the diagnostic; every other verdict is true of
-#          the credential itself and is reported from the first clone.
+#          Under FM_BOOTSTRAP_DETECT_ONLY that record is NOT written: a
+#          lock-refused session reports the news without consuming it.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -442,11 +446,21 @@ secondmate_liveness_sweep() {
 # that discovery to session start. It runs ONLY when this home actually tracks a
 # repository on a forge whose credential firstmate holds itself, so a
 # GitHub-only home never sees a line (gh owns that credential, per
-# bin/fm-forge-credential.sh). One tracked repository is enough to prove or
-# disprove the credential, because it is account-wide rather than per
-# repository, so this costs at most one bounded request per session start.
-# A forge that could not be reached is deliberately silent: being offline is not
-# a credential fault, and nothing was disproved.
+# bin/fm-forge-credential.sh). Exactly ONE tracked repository is probed per
+# forge per session start, so this costs at most one bounded request however
+# many clones on that forge the home tracks.
+# One probe is enough because Bitbucket authenticates BEFORE it resolves the
+# resource, verified live on 21/07/2026 against api.bitbucket.org: an invalid
+# credential against a real private repository answers HTTP 401, while a valid
+# credential against a nonexistent repository answers HTTP 404. The resolver
+# never sends a request without a fully resolved pair, so 401 and 403 are
+# credential-level verdicts true of whichever repository was probed, and 404
+# proves the opposite - the credential was ACCEPTED and only that repository is
+# out of its reach. Which clone is probed therefore cannot change what is
+# reported, and it is chosen deterministically anyway.
+# A repository the credential cannot see is deliberately silent for the same
+# reason a forge that could not be reached is: nothing about the credential was
+# disproved, and neither is a credential fault.
 # A machine with no credential store at all is reported once per home and then
 # stays silent, because it is news the first time and unactionable wallpaper
 # every time after; state/forge-credential-no-store.<forge> is that record, and
@@ -458,6 +472,10 @@ secondmate_liveness_sweep() {
 forge_no_store_already_reported() {  # <forge>
   local marker="$STATE/forge-credential-no-store.$1"
   [ -e "$marker" ] && return 0
+  # A session that did not get the fleet lock stays strictly read-only, so it
+  # reports the news without recording it: recording here would consume the one
+  # report and leave the session that CAN act about it silent.
+  [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && return 1
   mkdir -p "$STATE" 2>/dev/null || return 1
   : > "$marker" 2>/dev/null || return 1
   return 1
@@ -466,7 +484,7 @@ forge_no_store_already_reported() {  # <forge>
 forge_credential_report() {  # <forge> <status> <reason>
   local forge=$1 status=$2 reason=$3
   case "$status" in
-    0|7) return 0 ;;
+    0|7|8) return 0 ;;
     6)
       forge_no_store_already_reported "$forge" && return 0
       echo "FORGE_CREDENTIAL: $forge: no credential store on this platform, so $forge merge and build checks are unavailable here"
@@ -479,47 +497,44 @@ forge_credential_report() {  # <forge> <status> <reason>
 }
 
 forge_credential_check() {
-  local resolver proj url forge repo out status unnamed invisible
+  local resolver proj url forge repo out status unnamed probe_forge probe_repo
   resolver="$SCRIPT_DIR/fm-forge-credential.sh"
   [ -x "$resolver" ] || return 0
   [ -d "$PROJECTS" ] || return 0
   unnamed=
-  invisible=
+  probe_forge=
+  probe_repo=
+  # Choose the probe target first and probe once, rather than probing as the
+  # scan goes: the scan must never turn a home's clone count into a session-start
+  # request count.
   for proj in "$PROJECTS"/*; do
     [ -d "$proj" ] || continue
     url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
     forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
     [ "$forge" = bitbucket ] || continue
+    # Prefer a clone whose remote names a repository, because only a repository
+    # read proves the credential is still accepted.
+    if ! repo=$("$resolver" repo-of "$url" 2>/dev/null); then
+      [ -n "$unnamed" ] || unnamed=$forge
+      continue
+    fi
+    probe_forge=$forge
+    probe_repo=$repo
+    break
+  done
+  if [ -n "$probe_forge" ]; then
     if ! command -v curl >/dev/null 2>&1; then
       report_missing_tool curl
       return 0
     fi
-    # Prefer a clone whose remote names a repository, because only a repository
-    # read proves the credential is still accepted.
-    if ! repo=$("$resolver" repo-of "$url" 2>/dev/null); then
-      unnamed=$forge
-      continue
-    fi
-    out=$("$resolver" check "$forge" "$repo" 2>&1 >/dev/null)
+    out=$("$resolver" check "$probe_forge" "$probe_repo" 2>&1 >/dev/null)
     status=$?
-    # Only "not visible to this credential" depends on WHICH clone glob order
-    # happened to reach first: the credential itself authenticated. Keep looking
-    # for a readable clone on the same forge, and report it only when none is.
-    # Every other verdict is true of the credential regardless of the repository
-    # probed, so it is reported from the first clone that produced it.
-    if [ "$status" -eq 8 ]; then
-      invisible=$forge
-      continue
-    fi
-    forge_credential_report "$forge" "$status" "$out"
-    return 0
-  done
-  if [ -n "$invisible" ]; then
-    echo "FORGE_CREDENTIAL: $invisible: the credential authenticates but sees none of the tracked $invisible repositories"
+    forge_credential_report "$probe_forge" "$status" "$out"
     return 0
   fi
   # Every tracked clone on that forge has an unusable remote: fall back to the
-  # local proof, which still catches a missing or empty credential.
+  # local proof, which still catches a missing or empty credential and needs no
+  # request at all.
   [ -n "$unnamed" ] || return 0
   out=$("$resolver" check "$unnamed" 2>&1 >/dev/null)
   status=$?
