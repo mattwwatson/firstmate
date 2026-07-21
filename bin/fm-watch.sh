@@ -20,17 +20,23 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
-#                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine supervision
-#                          resume. Unless afk is active.
+#                          re-surface cadence, never as a wedge; a live agent behind
+#                          that pause still surfaces ONCE, labeled as the declared
+#                          pause it is. Only when neither absorb class applies does
+#                          the log's last line decide: terminal (captain-relevant)
+#                          or non-terminal (no verb), both surfaced at once. A
+#                          provably-working stale past the wedge threshold also
+#                          surfaces, with an "escalation N" count in the reason; at
+#                          FM_WEDGE_DEMAND_INSPECT_COUNT consecutive escalations on
+#                          the SAME pane, the reason also carries a
+#                          "demand-deep-inspection" marker so the wake payload
+#                          itself, not just repetition, forces a closer look
+#                          instead of another routine supervision resume. Repeat
+#                          escalations require NEW evidence: the crew state is
+#                          re-read every FM_STALE_ESCALATE_SECS, an unchanged
+#                          verdict backs the next escalation off (capped at
+#                          FM_WEDGE_ESCALATE_MAX_SECS) and a changed one escalates
+#                          at once. Unless afk is active.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
@@ -135,6 +141,11 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Ceiling for the repeat-escalation backoff below. The FIRST escalation of a
+# stale pane is never delayed by it; it only spaces out repeats whose evidence
+# has not changed, and it bounds how long the watcher can go without re-reading
+# that evidence.
+WEDGE_ESCALATE_MAX_SECS=${FM_WEDGE_ESCALATE_MAX_SECS:-900}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -272,37 +283,93 @@ wake() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# Seconds to wait before the Nth REPEAT escalation of an unchanged stale pane.
+# N is how many escalations this pane has already produced, so N=0 - the first
+# escalation, the one that decides how fast a genuine wedge is detected - always
+# returns the unmodified STALE_ESCALATE_SECS. Each unchanged repeat doubles from
+# there, capped at WEDGE_ESCALATE_MAX_SECS, which also bounds how stale the
+# evidence behind an absorbed pane can get.
+wedge_escalate_interval() {  # <escalations-so-far>
+  local n=$1 secs
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  [ "$n" -gt 12 ] && n=12
+  secs=$(( STALE_ESCALATE_SECS * (1 << n) ))
+  [ "$secs" -gt "$WEDGE_ESCALATE_MAX_SECS" ] && secs=$WEDGE_ESCALATE_MAX_SECS
+  printf '%s' "$secs"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates the pane as a possible wedge. Shared by both places a hash can be
+# absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+#
+# An escalation must be driven by EVIDENCE, not by another turn of the clock.
+# Elapsed pane-quiet time alone cannot tell a wedged crew from a legitimately
+# long quiet step: a single-command validation step routinely runs 15-45 minutes
+# in this repo with nothing rendered in the pane, and re-escalating it every
+# STALE_ESCALATE_SECS produced four identical "possible wedge" alarms - three of
+# them demanding manual inspection - for a crew that was healthy every time
+# (2026-07-21). So once per STALE_ESCALATE_SECS this re-reads the ONE
+# authoritative verdict (crew_absorb_class, the same bounded read the first
+# sighting made) and records it in .wedge-probe-<key>, whose mtime doubles as
+# the probe schedule:
+#   - verdict CHANGED since the last probe (including the first probe of a
+#     stale hash, which is what makes the first escalation land at exactly
+#     STALE_ESCALATE_SECS as before): escalate now, because that is new
+#     information the supervisor does not have;
+#   - verdict UNCHANGED: escalate only once the backed-off window
+#     (wedge_escalate_interval) has passed, because repeating the same evidence
+#     tells the supervisor nothing it was not told last time.
+# Nothing is suppressed: every escalation still fires, the escalation ladder and
+# its demand-deep-inspection marker are unchanged, and a crew that stops looking
+# like it is working is surfaced at the next probe rather than at the backed-off
+# window.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 \
+    since age n interval reason key probe_file prev_class class
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
       triage_log "absorbed $label timer reset: $win"
-      ;;
-    *)
-      age=$(( $(date +%s) - since ))
-      if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
-        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
-        fi
-        fm_wake_append stale "$win" "$reason" || exit 1
-        rm -f "$since_file"
-        wake "$reason"
-      fi
+      return 0
       ;;
   esac
+  age=$(( $(date +%s) - since ))
+  [ "$age" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  probe_file="$STATE/.wedge-probe-$key"
+  [ "$(age_of "$probe_file")" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  prev_class=$(cat "$probe_file" 2>/dev/null || true)
+  class=$(crew_absorb_class "$(window_to_task "$win" "$STATE")")
+  printf '%s' "$class" > "$probe_file"
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  interval=$(wedge_escalate_interval "$n")
+  if [ "$class" = "$prev_class" ] && [ "$age" -lt "$interval" ]; then
+    triage_log "absorbed $label (unchanged $class verdict, quiet ${age}s, next escalation window ${interval}s): $win"
+    return 0
+  fi
+  n=$((n + 1))
+  echo "$n" > "$escalation_file"
+  if [ "$class" = working ]; then
+    reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+  else
+    reason="stale: $win (idle ${age}s, the crew stopped looking active - its work signal is gone with no status update, escalation $n)"
+  fi
+  if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+    reason="$reason (demand-deep-inspection: same pane has escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
+  # The idle clock restarts for the next window, but the probe file stays: its
+  # content is the evidence this escalation reported, and the NEXT probe has to
+  # compare against it to tell a changed verdict from another repeat of the same
+  # one. Only a pane that resets to genuinely active clears it (clear_wedge_tracking).
+  rm -f "$since_file"
+  wake "$reason"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -320,7 +387,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_wedge_tracking "$win"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -344,20 +411,56 @@ clear_pause_state() {  # <window>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
+# Drop every artifact of an in-flight wedge timer for <window>: the idle clock,
+# the escalation ladder, and the evidence probe that paces repeat escalations.
+# The single owner of that file list - call it wherever a pane's state resets to
+# genuinely active, so no half-cleared ladder can outlive the pane it described.
+clear_wedge_tracking() {  # <window>
+  local win=$1 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-probe-$key"
+}
+
 clear_pause_tracking() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_wedge_tracking "$win"
+  rm -f "$STATE/.stale-$key"
+}
+
+# The verdict for a declared pause or captain hold that authoritative crew state
+# did NOT override. Prints:
+#   surface - the crew's agent is still live (or unreadable) and firstmate has
+#             not yet been shown this pause: it may be a real decision gate
+#             sitting behind an optimistic paused: line, so it must be seen once;
+#   paused  - the bounded pause cadence owns it from here: a secondmate (idle by
+#             design), a confidently dead agent (nothing left to interrupt), or a
+#             pause firstmate has already been shown once.
+# The already-shown record is .paused-resurfaced-<key>, the SAME marker the
+# bounded cadence throttles on, so "shown once" is anchored on the pause itself.
+# It must never be anchored on the pane hash: an idle harness pane repaints (a
+# clock, a context counter, a hint that rotates), and a hash-tied record turned
+# "surface this pause once" into "surface it again on every repaint" - six bare
+# stale wakes for one healthy paused crew in a single session (2026-07-21).
+pause_declared_class() {  # <window> <key>
+  local win=$1 key=$2 agent_alive
+  [ "$(window_kind "$win")" = secondmate ] && { printf 'paused'; return; }
+  [ -e "$STATE/.paused-resurfaced-$key" ] && { printf 'paused'; return; }
+  agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+  [ "$agent_alive" = dead ] && { printf 'paused'; return; }
+  printf 'surface'
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# An active run always outranks the declared pause; otherwise pause_declared_class
+# decides between the one live-agent sighting and the bounded cadence. The costly
+# authoritative read is skipped while a fresh .paused-rechecked-<key> says it ran
+# within the last STALE_ESCALATE_SECS.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -369,15 +472,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
-    printf 'paused'
+    pause_declared_class "$win" "$key"
     return
   fi
   class=$(crew_absorb_class "$task")
@@ -386,15 +481,7 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
-  fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  class=$(pause_declared_class "$win" "$key")
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
@@ -402,22 +489,34 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Surface a stale pane firstmate has to look at, and record what was surfaced.
+# A pane whose crew declared a pause (or a captain hold) is still surfaced - the
+# declaration is the crew's own claim, and a live agent behind it may really be
+# waiting on a decision - but it is surfaced ONCE and labeled for what it is, so
+# firstmate is not handed a bare stale that reads as a stopped or wedged crew.
+# Recording .paused-resurfaced-<key> here is what hands the pane to the bounded
+# pause cadence from the next sighting on.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last reason declared=0
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
-  printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  reason="stale: $win"
   if status_is_paused_or_captain_held "$last"; then
+    declared=1
+    reason="stale: $win (declared pause, agent still live - surfaced once, then rechecked on the long pause cadence not as a wedge; confirm the wait is real)"
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
+  if [ "$declared" = 1 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -963,6 +1062,9 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - surface: a declared pause whose agent is still live and that has not
+          #     been shown to firstmate yet - surface it once, labeled as the pause
+          #     it is, then it joins the bounded cadence above;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -993,6 +1095,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                surface) surface_nonterminal_stale "$w" "$h" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -1002,7 +1105,7 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
-        rm -f "$ssf" "$ewf"
+        clear_wedge_tracking "$w"
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
@@ -1010,12 +1113,18 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
+      clear_wedge_tracking "$w"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
+        # A repaint is not a resume. Only an authoritative verdict may take a
+        # declared pause off the bounded cadence: `working` means the crew really
+        # went back to work, while `surface` means this pause still owes firstmate
+        # its one sighting and must keep its tracking until the pane settles into
+        # a stale hash the surface path can report.
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          surface) : ;;
+          *)       clear_pause_tracking "$w" ;;
         esac
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"
