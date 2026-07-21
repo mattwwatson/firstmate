@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "FORGE_CREDENTIAL: <forge>: <reason>",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -40,6 +41,13 @@
 #          skipped means the probe could not confidently classify the endpoint,
 #          and respawn failed means relaunch did not complete. Already-live and
 #          successfully respawned secondmates are silent.
+#          A FORGE_CREDENTIAL line means this home tracks a repository on a forge
+#          whose credential firstmate holds itself (today only Bitbucket), and
+#          that credential is missing, unusable, or refused - so merge and build
+#          checks for it cannot work. It is detect-only, costs at most one bounded
+#          request, and stays silent both when no such repository is tracked and
+#          when the forge could not be reached. bin/fm-forge-credential.sh owns
+#          the resolution, the reason wording, and the exit-code contract.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -422,6 +430,60 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+# Forge-credential detection. A missing, empty, or rejected credential used to
+# be invisible until a PR step failed an hour into finished work; this moves
+# that discovery to session start. It runs ONLY when this home actually tracks a
+# repository on a forge whose credential firstmate holds itself, so a
+# GitHub-only home never sees a line (gh owns that credential, per
+# bin/fm-forge-credential.sh). One tracked repository is enough to prove or
+# disprove the credential, because it is account-wide rather than per
+# repository, so this costs at most one bounded request per session start.
+# A forge that could not be reached is deliberately silent: being offline is not
+# a credential fault, and nothing was disproved.
+forge_credential_report() {  # <forge> <status> <reason>
+  local forge=$1 status=$2 reason=$3
+  case "$status" in
+    0|7) return 0 ;;
+  esac
+  reason=$(first_line "${reason#error: }")
+  [ -n "$reason" ] || reason="credential check failed (exit $status)"
+  echo "FORGE_CREDENTIAL: $forge: $reason"
+}
+
+forge_credential_check() {
+  local resolver proj url forge repo out status unnamed
+  resolver="$SCRIPT_DIR/fm-forge-credential.sh"
+  [ -x "$resolver" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+  unnamed=
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
+    forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
+    [ "$forge" = bitbucket ] || continue
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "MISSING: curl (install: $(install_cmd curl))"
+      return 0
+    fi
+    # Prefer a clone whose remote names a repository, because only a repository
+    # read proves the credential is still accepted.
+    if ! repo=$("$resolver" repo-of "$url" 2>/dev/null); then
+      unnamed=$forge
+      continue
+    fi
+    out=$("$resolver" check "$forge" "$repo" 2>&1 >/dev/null)
+    status=$?
+    forge_credential_report "$forge" "$status" "$out"
+    return 0
+  done
+  # Every tracked clone on that forge has an unusable remote: fall back to the
+  # local proof, which still catches a missing or empty credential.
+  [ -n "$unnamed" ] || return 0
+  out=$("$resolver" check "$unnamed" 2>&1 >/dev/null)
+  status=$?
+  forge_credential_report "$unnamed" "$status" "$out"
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -777,6 +839,7 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+forge_credential_check
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

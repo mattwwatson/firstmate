@@ -243,6 +243,7 @@ Orca provides both the task worktree and terminal endpoint (see "Runtime backend
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+When this home tracks a repository on a forge whose credential firstmate holds itself, bootstrap also requires `curl` for the credential check in "Forge credentials" below.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
@@ -264,6 +265,40 @@ For a mid-session inherited local-material edit where tracked-file sync and rere
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+
+## Forge credentials (login keychain)
+
+Some forges have no credential-owning CLI for firstmate to shell out to, so firstmate holds a credential of its own for them.
+GitHub is not one of them: `gh` owns that credential, firstmate has never held a GitHub token, and nothing here changes that.
+Bitbucket Cloud is, and `bin/fm-forge-credential.sh` is the only thing that reads it; its header owns the entry names, subcommands, and exit-code contract, and every caller goes through it rather than reading a store directly.
+
+What the captain provisions for Bitbucket is an Atlassian **account API token on the work account**, cached as two login-keychain items:
+
+| Keychain service | Holds |
+| --- | --- |
+| `firstmate-bitbucket-email` | the account email, used as the HTTP Basic username |
+| `firstmate-bitbucket-token` | the token, used as the HTTP Basic password |
+
+Both halves are required, because an account API token authenticates over HTTP Basic rather than as a bearer token.
+
+Three properties of this arrangement are deliberate and load-bearing.
+
+**It is read-only.** Its scopes are repository, pull request, and pipeline READ, nothing else, so an unattended reader cannot push, merge, or otherwise change a repository - it is write-incapable by construction rather than by convention.
+The accepted consequence is that firstmate can detect merges and read build results but cannot merge on Bitbucket; granting that would require pull-request write, which is a separate captain decision.
+
+**It is separate from no-mistakes' credential.** no-mistakes keeps its own write-capable Bitbucket credential, cached under a different service name and populated from the interactive shell path, because it pushes branches and opens pull requests.
+Firstmate must never read it. Keeping an unattended reader write-incapable is the entire point of holding two credentials instead of one.
+
+**It is read from the keychain directly, never from the environment.** The resolver reads the store itself, so it behaves identically whether firstmate was started from a warm interactive terminal, re-armed by a background repair path, or resumed after a reboot.
+Inheriting an exported token from a shell profile is what leaves a restarted daemon silently tokenless, and firstmate does not reproduce it.
+
+Session start verifies the credential when, and only when, this home tracks a repository on such a forge, and reports `FORGE_CREDENTIAL: <forge>: <reason>` when it is missing, empty, unusable, refused, or valid-but-blind to the tracked repository.
+That check costs at most one bounded request per session start, because the credential is account-wide rather than per repository, and it stays silent when the forge cannot be reached: being offline is not a credential fault.
+The whole reason it runs at startup is that a stale credential used to be invisible until a pull-request step failed roughly an hour into finished work.
+No diagnostic anywhere in this path prints a credential value; each one names the failing requirement instead.
+
+Verified 21/07/2026 against the live Bitbucket Cloud API with `bin/fm-forge-credential.sh check bitbucket <workspace>/<repo>`: a valid read-only credential on a private repository returns HTTP 200 and exit 0, the same request with an invalid token returns HTTP 401 and exit 5, and an unknown repository returns HTTP 404 and exit 8.
+The account-wide listing endpoints that would otherwise make a workspace-agnostic probe possible - `/2.0/repositories`, `/2.0/workspaces`, `/2.0/user/permissions/repositories` - all answer HTTP 410 with `CHANGE-2770 - Functionality has been deprecated`, authenticated or not, which is why the verification probe reads one named repository instead.
 
 ## X mode (.env)
 
@@ -351,6 +386,8 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
+FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/security   # credential-store reader used by fm-forge-credential.sh, mainly for tests
+FM_FORGE_CREDENTIAL_TIMEOUT=10   # seconds allowed for one forge API request; a blank or non-numeric value uses 10
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
