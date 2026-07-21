@@ -40,6 +40,10 @@
 #   response-derived new workspace is appended to the stable primary-worker block
 #   immediately after firstmate. Ordering never authorizes lifecycle cleanup, and
 #   any unavailable, ambiguous, or failed move warns while the spawn continues.
+#   Every projected create, prune, and move captures and verifies the named
+#   session's exact active workspace and tab. A detected focus change restores
+#   only that exact tab id; an ambiguous pre-operation snapshot refuses the
+#   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.

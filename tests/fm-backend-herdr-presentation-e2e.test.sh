@@ -24,12 +24,14 @@ FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
+FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
+: > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -69,7 +71,48 @@ done
 if [ "${1:-}" = --version ]; then
   exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
 fi
-exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
+focus_snapshot() {
+  local list row workspace tab tabs
+  list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
+  row=$(printf '%s' "$list" | jq -r '
+    [.result.workspaces[]? | select(.focused == true)]
+    | select(length == 1)
+    | .[0]
+    | select((.workspace_id | type) == "string" and (.active_tab_id | type) == "string")
+    | [.workspace_id, .active_tab_id]
+    | @tsv
+  ') || return 1
+  [ -n "$row" ] || return 1
+  workspace=${row%%$'\t'*}
+  tab=${row#*$'\t'}
+  tabs=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab list --workspace "$workspace") || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" '
+    ([.result.tabs[]? | select(.focused == true)] | length) == 1
+    and ([.result.tabs[]? | select(.focused == true)][0].tab_id == $tab)
+  ' >/dev/null 2>&1 || return 1
+  printf '%s/%s' "$workspace" "$tab"
+}
+
+mutation=
+case "${1:-} ${2:-}" in
+  "workspace create") mutation=workspace-create ;;
+  "tab create") mutation=tab-create ;;
+  "pane close") mutation=pane-close ;;
+  "tab focus") mutation=tab-focus ;;
+esac
+before=
+[ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
+if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+  status=0
+else
+  status=$?
+fi
+if [ -n "$mutation" ]; then
+  after=$(focus_snapshot || printf ambiguous/ambiguous)
+  printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+fi
+[ -z "$out" ] || printf '%s\n' "$out"
+exit "$status"
 SH
 
 cat > "$FAKEBIN/treehouse" <<'SH'
@@ -90,8 +133,37 @@ SH
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
 #!/usr/bin/env bash
 set -u
+focus_snapshot() {
+  local list row workspace tab tabs
+  list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
+  row=$(printf '%s' "$list" | jq -r '
+    [.result.workspaces[]? | select(.focused == true)]
+    | select(length == 1)
+    | .[0]
+    | [.workspace_id, .active_tab_id]
+    | @tsv
+  ') || return 1
+  [ -n "$row" ] || return 1
+  workspace=${row%%$'\t'*}
+  tab=${row#*$'\t'}
+  tabs=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab list --workspace "$workspace") || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" '
+    ([.result.tabs[]? | select(.focused == true)] | length) == 1
+    and ([.result.tabs[]? | select(.focused == true)][0].tab_id == $tab)
+  ' >/dev/null 2>&1 || return 1
+  printf '%s/%s' "$workspace" "$tab"
+}
 printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$MOVE_CALL_LOG"
-exec "$REAL_MOVER" "$@"
+before=$(focus_snapshot || printf ambiguous/ambiguous)
+if out=$("$REAL_MOVER" "$@"); then
+  status=0
+else
+  status=$?
+fi
+after=$(focus_snapshot || printf ambiguous/ambiguous)
+printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_LOG"
+[ -z "$out" ] || printf '%s\n' "$out"
+exit "$status"
 SH
 chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
@@ -128,6 +200,61 @@ LAB_READY=1
 
 lab() {
   PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
+}
+
+focus_snapshot() {
+  local list row workspace tab tabs
+  list=$(lab workspace list) || fail "could not read the active workspace for focus instrumentation"
+  row=$(printf '%s' "$list" | jq -r '
+    [.result.workspaces[]? | select(.focused == true)]
+    | select(length == 1)
+    | .[0]
+    | select((.workspace_id | type) == "string" and (.active_tab_id | type) == "string")
+    | [.workspace_id, .active_tab_id]
+    | @tsv
+  ') || fail "could not parse the active workspace and tab"
+  [ -n "$row" ] || fail "focus instrumentation found an ambiguous active workspace"
+  workspace=${row%%$'\t'*}
+  tab=${row#*$'\t'}
+  tabs=$(lab tab list --workspace "$workspace") || fail "could not verify the active tab"
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" '
+    ([.result.tabs[]? | select(.focused == true)] | length) == 1
+    and ([.result.tabs[]? | select(.focused == true)][0].tab_id == $tab)
+  ' >/dev/null 2>&1 || fail "workspace active_tab_id disagreed with the focused tab"
+  printf '%s/%s' "$workspace" "$tab"
+}
+
+assert_focus_is() {  # <expected> <case-name>
+  local expected=$1 case_name=$2 actual
+  actual=$(focus_snapshot)
+  [ "$actual" = "$expected" ] || fail "$case_name changed active workspace/tab from $expected to $actual"
+}
+
+focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
+
+assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
+  local start=$1 case_name=$2 changed
+  changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
+    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
+      print $0
+    }
+  ')
+  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
+}
+
+assert_cleanup_focus_steal_was_restored() {  # <line-count> <pane-id> <expected-focus>
+  local start=$1 pane_id=$2 expected=$3
+  sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
+    $1 == "pane-close" && $4 == pane && $2 == expected && $3 != expected {
+      drift = $3
+      saw_close = 1
+      next
+    }
+    saw_close && $1 == "tab-focus" && $2 == drift && $3 == expected {
+      restored = 1
+    }
+    END { exit(restored ? 0 : 1) }
+  ' || fail "projected task-pane close did not demonstrate and immediately restore the exact focus-steal regression"
 }
 
 remember_meta_worktree() {  # <meta>
@@ -253,16 +380,22 @@ SECOND_TWO_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label 2ndmate-bravo
   || fail "could not create the focused secondmate presentation fixture"
 SECOND_ONE_WSID=$(printf '%s' "$SECOND_ONE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 SECOND_TWO_WSID=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.workspace.workspace_id // empty')
+SECOND_TWO_TAB=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.tab.tab_id // empty')
 SECOND_TWO_PANE=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.root_pane.pane_id // empty')
-[ -n "$SECOND_ONE_WSID" ] && [ -n "$SECOND_TWO_WSID" ] && [ -n "$SECOND_TWO_PANE" ] \
+[ -n "$SECOND_ONE_WSID" ] && [ -n "$SECOND_TWO_WSID" ] && [ -n "$SECOND_TWO_TAB" ] && [ -n "$SECOND_TWO_PANE" ] \
   || fail "secondmate presentation fixtures returned incomplete IDs"
 SECOND_ORDER_BEFORE=$(printf '%s\n%s\n' "$SECOND_ONE_WSID" "$SECOND_TWO_WSID")
+CAPTAIN_FOCUS="$SECOND_TWO_WSID/$SECOND_TWO_TAB"
+assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 
 : > "$TREEHOUSE_CALL_LOG"
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 PROJECTION_ORDER_START=$(log_line_count)
+SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
+assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
@@ -294,7 +427,7 @@ printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
-pass "real Herdr lab: projected create leaves one normal task pane, no placeholder, and does not steal focus"
+pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
@@ -305,12 +438,15 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
 # Two real concurrent primary spawns share the bounded presentation-order lock.
 # Their final relative order must match Herdr's actual serialized create order,
 # rather than a task-name or priority guess.
+CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
 wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
 wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
+assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
 ORDER_A_META="$HOME_DIR/state/order-a.meta"
 ORDER_B_META="$HOME_DIR/state/order-b.meta"
 remember_meta_worktree "$ORDER_A_META" >/dev/null
@@ -334,7 +470,7 @@ SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | s
 [ "$(lab workspace get "$SECOND_TWO_WSID" | jq -r '.result.workspace.focused')" = true ] \
   || fail "concurrent primary workspace ordering stole focus"
 assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering"
-pass "real Herdr lab: concurrent primary workers form one stable contiguous block after firstmate and before unchanged secondmates"
+pass "real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift"
 
 # Force only the raw move transport to fail after a safe projected create.
 # The spawn must remain successful in Herdr's default appended order, with its
@@ -346,9 +482,12 @@ exit 9
 SH
 chmod +x "$FAIL_MOVER"
 FAIL_START=$(log_line_count)
+FAIL_FOCUS_AUDIT_START=$(focus_audit_line_count)
 FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
   spawn_task order-fail "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
   || fail "move-failure projected spawn should still succeed: $(cat "$TMP_ROOT/order-fail.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "failed presentation ordering"
+assert_raw_presentation_mutations_preserved_since "$FAIL_FOCUS_AUDIT_START" "failed presentation ordering"
 grep -F "workspace move failed or had an ambiguous response" "$TMP_ROOT/order-fail.err" >/dev/null 2>&1 \
   || fail "forced workspace.move failure did not report only the best-effort warning"
 ORDER_FAIL_META="$HOME_DIR/state/order-fail.meta"
@@ -368,8 +507,11 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
+SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
+assert_cleanup_focus_steal_was_restored "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
 pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
@@ -377,14 +519,60 @@ fi
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
-pass "real Herdr lab: exact task-pane close removes only the last-tab projection workspace and leaves its neighbor untouched"
+pass "real Herdr lab: exact task-pane close restores the exact captain workspace/tab after Herdr's raw focus steal"
 
-teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" \
-  || fail "projected ordering fixture A teardown failed"
-teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" \
-  || fail "projected ordering fixture B teardown failed"
+teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
+ORDER_A_TEARDOWN_PID=$!
+teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
+ORDER_B_TEARDOWN_PID=$!
+wait "$ORDER_A_TEARDOWN_PID" || fail "projected ordering fixture A teardown failed"
+wait "$ORDER_B_TEARDOWN_PID" || fail "projected ordering fixture B teardown failed"
+assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected teardowns"
 teardown_task order-fail "$HOME_DIR" > "$TMP_ROOT/order-fail-teardown.out" 2> "$TMP_ROOT/order-fail-teardown.err" \
   || fail "projected ordering failure fixture teardown failed"
+assert_focus_is "$CAPTAIN_FOCUS" "failed-order projection teardown"
+pass "real Herdr lab: concurrent projected cleanup is serialized and leaves active workspace/tab unchanged"
+
+# Repeat full two-worker create, order, and cleanup waves.
+# This exercises the focus guard after the original regression sequence and
+# proves the shared presentation lock keeps concurrent operations composable.
+for ROUND in 1 2 3; do
+  mkdir -p "$HOME_DIR/data/focus-$ROUND-a" "$HOME_DIR/data/focus-$ROUND-b"
+  printf 'Projection focus wave %s fixture A.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
+  printf 'Projection focus wave %s fixture B.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
+  WAVE_LOG_START=$(log_line_count)
+  WAVE_FOCUS_START=$(focus_audit_line_count)
+  spawn_task "focus-$ROUND-a" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
+  WAVE_A_PID=$!
+  spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
+  WAVE_B_PID=$!
+  wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
+  wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
+  remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
+  remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
+  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
+  assert_raw_presentation_mutations_preserved_since "$WAVE_FOCUS_START" "focus wave $ROUND concurrent spawns"
+  WAVE_LABELS=$(projection_labels_from_log "$WAVE_LOG_START")
+  WAVE_EXPECTED=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$WAVE_LABELS")
+  WAVE_ACTUAL=$(lab workspace list | jq -r '.result.workspaces[].label')
+  [ "$WAVE_ACTUAL" = "$WAVE_EXPECTED" ] \
+    || fail "focus wave $ROUND lost stable contiguous ordering: $WAVE_ACTUAL"
+  WAVE_SECOND_ORDER=$(lab workspace list | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
+  [ "$WAVE_SECOND_ORDER" = "$SECOND_ORDER_BEFORE" ] \
+    || fail "focus wave $ROUND changed secondmate relative order"
+
+  teardown_task "focus-$ROUND-a" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-a-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-a-teardown.err" &
+  WAVE_A_TEARDOWN_PID=$!
+  teardown_task "focus-$ROUND-b" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" &
+  WAVE_B_TEARDOWN_PID=$!
+  wait "$WAVE_A_TEARDOWN_PID" || fail "focus wave $ROUND teardown A failed"
+  wait "$WAVE_B_TEARDOWN_PID" || fail "focus wave $ROUND teardown B failed"
+  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
+  WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
+  [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
+    || fail "focus wave $ROUND cleanup left a projected workspace behind: $WAVE_REMAINING"
+done
+pass "real Herdr lab: three repeated concurrent create/order/cleanup waves have zero active workspace or tab drift"
 
 # A restart preserves the label and structural pane but removes the registered
 # agent.
