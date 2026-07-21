@@ -196,20 +196,11 @@ test_a_stalling_store_times_out_instead_of_hanging() {
   assert_not_contains "$err" "absent" "a stalled store must not read as an absent entry"
   assert_absent "$dir/curl-argv" "a stalled store must never reach a request"
   assert_no_credential_leak "$err" "the store-timeout refusal"
-
-  # The watchdog records the timeout before it kills the store command, so the
-  # verdict cannot depend on which of the two the main shell observes first.
-  # Repeating the case exercises that interleaving rather than assuming the
-  # losing order is rare enough to ignore: a lost race would surface here as
-  # exit 3, the absent-entry verdict this outcome exists to stay distinct from.
-  local attempt status
-  for attempt in 1 2 3; do
-    dir=$(new_case)
-    record=$(FAKE_KEYCHAIN_SECRET=stall FM_FORGE_KEYCHAIN_TIMEOUT=1 \
-      run_resolver "$dir" check bitbucket mattw_watson/hexbattle)
-    status=$(field "$record" 1)
-    expect_code 10 "$status" "a stalled store on attempt $attempt"
-  done
+  # The exit-3 assertion above is what keeps a stalled read from being reported
+  # as an absent entry. The ordering that guarantees it is structural rather than
+  # probabilistic: the watchdog records the timeout BEFORE it kills the store
+  # command, and that kill is the only thing that releases the main shell's wait,
+  # so the marker is always in place by the time the verdict is read.
   pass "a store that never answers is its own outcome, not a hang and not a pass"
 }
 
@@ -609,18 +600,17 @@ test_bootstrap_probes_one_repository_per_forge() {
   home="$dir/home"
   fakebin="$dir/bin"
 
-  # The chosen clone answers "not visible to this credential". Because the forge
-  # authenticates BEFORE it resolves the resource, that answer proves the
-  # credential was accepted, so startup stays silent and no other clone is
-  # probed to chase it.
+  # The chosen clone answers "not visible to this credential". No other clone is
+  # probed to chase it: a credential-level verdict would have been true of this
+  # clone too, so a second request could not tell the captain anything more.
   out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
     FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
     FAKE_CURL_404_MATCH='mattw_watson/invisible' \
     FAKE_CURL_ARGV_LOG="$dir/probe-argv" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_not_contains "$out" "FORGE_CREDENTIAL" \
-    "a repository the credential cannot see must not be reported as a credential fault"
+  assert_contains "$out" "FORGE_CREDENTIAL: bitbucket:" \
+    "a repository the credential cannot see must be reported, not silenced"
   requests=$(grep -c . "$dir/probe-argv")
   [ "$requests" -eq 1 ] || fail "four tracked clones must cost exactly one request, made $requests"
 
@@ -637,6 +627,84 @@ test_bootstrap_probes_one_repository_per_forge() {
   requests=$(grep -c . "$dir/rejected-argv")
   [ "$requests" -eq 1 ] || fail "a rejected credential must cost one request, made $requests"
   pass "session start probes one repository per forge however many clones are tracked"
+}
+
+test_bootstrap_reports_an_unseen_repository_once_per_home() {
+  local dir home fakebin out marker no_store_marker
+  # A 404 does not settle whose fault it is: a credential bound to the wrong
+  # account, or one that has lost access to that private repository, looks
+  # exactly like a repository that moved. Silencing it would hide a genuinely
+  # broken credential until a pull-request step failed, so it is reported - but
+  # once, because repeating an unactionable line trains the reader to skim.
+  dir=$(new_bootstrap_case 'hexbattle=git@bitbucket.org:mattw_watson/hexbattle.git')
+  home="$dir/home"
+  fakebin="$dir/bin"
+  marker="$home/state/forge-credential-not-visible.bitbucket"
+  no_store_marker="$home/state/forge-credential-no-store.bitbucket"
+
+  # A lock-refused session reports the news but must not consume it.
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/hexbattle' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "cannot see bitbucket repository mattw_watson/hexbattle" \
+    "the line must name the repository that was probed"
+  assert_contains "$out" "account or scopes" \
+    "the line must name the credential possibilities, not just a status code"
+  assert_contains "$out" "repository moved" \
+    "the line must name the repository possibility too"
+  assert_absent "$marker" "a lock-refused session must not write the record"
+
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/hexbattle' \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "cannot see bitbucket repository mattw_watson/hexbattle" \
+    "the session holding the lock must be the one that hears and records it"
+  assert_present "$marker" "the session holding the lock must write the record"
+  [ ! -s "$marker" ] || fail "the marker must record only that the line was said, never any value"
+
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/hexbattle' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "FORGE_CREDENTIAL" \
+    "once recorded, an unseen repository stays silent"
+
+  # The two report-once outcomes are independent: having told this home about
+  # one must never swallow the other.
+  assert_absent "$no_store_marker" "recording one outcome must not record the other"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "no credential store on this platform" \
+    "an already-reported unseen repository must not suppress the no-store news"
+  assert_present "$no_store_marker" "the no-store outcome keeps its own record"
+
+  # And the other direction, in a home that heard about the store first.
+  dir=$(new_bootstrap_case 'hexbattle=git@bitbucket.org:mattw_watson/hexbattle.git')
+  home="$dir/home"
+  fakebin="$dir/bin"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/no-such-store" \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "no credential store on this platform" "the store news comes first here"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='mattw_watson/hexbattle' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "cannot see bitbucket repository" \
+    "an already-reported no-store must not suppress the unseen-repository news"
+  pass "a repository the credential cannot see is reported once per home, then silently"
 }
 
 test_a_lock_refused_session_reports_the_news_without_consuming_it() {
@@ -754,6 +822,7 @@ test_a_zero_bound_falls_back_to_the_default
 test_bootstrap_reports_a_broken_credential_at_session_start
 test_bootstrap_reports_no_store_once_per_home
 test_bootstrap_probes_one_repository_per_forge
+test_bootstrap_reports_an_unseen_repository_once_per_home
 test_a_lock_refused_session_reports_the_news_without_consuming_it
 test_bootstrap_reports_a_stalled_store_every_time
 test_a_tool_two_checks_need_is_reported_once

@@ -48,16 +48,16 @@
 #          deterministically chosen tracked repository per forge, so it costs at
 #          most one bounded request per session start however many clones on that
 #          forge the home tracks. It stays silent when no such repository is
-#          tracked, when the forge could not be reached, and when the probed
-#          repository is simply not visible to the credential - the last because
-#          the forge authenticates before it resolves the resource, so that
-#          answer proves the credential was ACCEPTED.
+#          tracked and when the forge could not be reached.
 #          bin/fm-forge-credential.sh owns the resolution, the reason wording,
 #          and the exit-code contract.
-#          A machine with no credential store at all is reported ONCE per home
-#          and recorded in state/forge-credential-no-store.<forge>, because it
-#          is news the first time and unactionable noise every session after.
-#          Under FM_BOOTSTRAP_DETECT_ONLY that record is NOT written: a
+#          Two outcomes are reported ONCE per home and then stay silent, because
+#          each is news the first time and unactionable noise every session
+#          after: a machine with no credential store at all, and a repository
+#          the credential authenticated against but cannot see. The record is
+#          state/forge-credential-<outcome>.<forge>, keyed per home, per forge,
+#          and per outcome so neither can suppress the other.
+#          Under FM_BOOTSTRAP_DETECT_ONLY those records are NOT written: a
 #          lock-refused session reports the news without consuming it.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
@@ -449,28 +449,34 @@ secondmate_liveness_sweep() {
 # bin/fm-forge-credential.sh). Exactly ONE tracked repository is probed per
 # forge per session start, so this costs at most one bounded request however
 # many clones on that forge the home tracks.
-# One probe is enough because Bitbucket authenticates BEFORE it resolves the
-# resource, verified live on 21/07/2026 against api.bitbucket.org: an invalid
-# credential against a real private repository answers HTTP 401, while a valid
-# credential against a nonexistent repository answers HTTP 404. The resolver
-# never sends a request without a fully resolved pair, so 401 and 403 are
-# credential-level verdicts true of whichever repository was probed, and 404
-# proves the opposite - the credential was ACCEPTED and only that repository is
-# out of its reach. Which clone is probed therefore cannot change what is
-# reported, and it is chosen deterministically anyway.
-# A repository the credential cannot see is deliberately silent for the same
-# reason a forge that could not be reached is: nothing about the credential was
-# disproved, and neither is a credential fault.
-# A machine with no credential store at all is reported once per home and then
-# stays silent, because it is news the first time and unactionable wallpaper
-# every time after; state/forge-credential-no-store.<forge> is that record, and
-# it holds no credential value.
+# One probe is enough, and which clone it lands on cannot change what is
+# reported, because of what the forge answers. Verified live on 21/07/2026
+# against api.bitbucket.org, every case with a fully resolved pair: an INVALID
+# credential against a real private repository answers HTTP 401; a credential
+# whose scopes do not cover the request answers HTTP 403 with a body naming the
+# required and granted scopes, NOT 404; and a VALID credential against a
+# nonexistent repository answers HTTP 404. So 401 and 403 are credential-level
+# verdicts true of whichever repository was probed, and scope refusal announces
+# itself rather than hiding as a 404. The clone is still chosen
+# deterministically.
+# What a 404 does NOT settle is whose fault it is: a credential holding
+# repository read but bound to the wrong account, or one that has lost access to
+# that specific private repository, is indistinguishable from a repository that
+# was renamed or moved. Silencing it would put a genuinely broken credential
+# back where this whole check exists to stop it being - invisible until a
+# pull-request step fails - so it is REPORTED, once per home.
+# Two outcomes are reported once per home and then stay silent, because each is
+# news the first time and unactionable wallpaper every time after: a machine
+# with no credential store at all, and a repository the credential cannot see.
+# state/forge-credential-<outcome>.<forge> is that record. It is keyed per home,
+# per forge, AND per outcome, so neither outcome can suppress the other, and it
+# holds no credential value.
 
-# Returns 0 when this home has already been told, 1 when it has not - and marks
-# it told in the same step, so the line is printed exactly once. A record that
-# cannot be written reports again rather than losing the news.
-forge_no_store_already_reported() {  # <forge>
-  local marker="$STATE/forge-credential-no-store.$1"
+# Returns 0 when this home has already been told this piece of news, 1 when it
+# has not - and marks it told in the same step, so the line is printed exactly
+# once. A record that cannot be written reports again rather than losing it.
+forge_news_already_reported() {  # <forge> <outcome>
+  local marker="$STATE/forge-credential-$2.$1"
   [ -e "$marker" ] && return 0
   # A session that did not get the fleet lock stays strictly read-only, so it
   # reports the news without recording it: recording here would consume the one
@@ -484,11 +490,14 @@ forge_no_store_already_reported() {  # <forge>
 forge_credential_report() {  # <forge> <status> <reason>
   local forge=$1 status=$2 reason=$3
   case "$status" in
-    0|7|8) return 0 ;;
+    0|7) return 0 ;;
     6)
-      forge_no_store_already_reported "$forge" && return 0
+      forge_news_already_reported "$forge" no-store && return 0
       echo "FORGE_CREDENTIAL: $forge: no credential store on this platform, so $forge merge and build checks are unavailable here"
       return 0
+      ;;
+    8)
+      forge_news_already_reported "$forge" not-visible && return 0
       ;;
   esac
   reason=$(first_line "${reason#error: }")

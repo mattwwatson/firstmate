@@ -448,7 +448,7 @@ cmd_check() {  # <forge> [<repository>]
     status=$?
     case "$status" in
       "$EX_NOT_FOUND")
-        REASON="the credential works but cannot see $forge repository $repo (HTTP 404): it has no access, or the repository has moved"
+        REASON="the credential authenticated but cannot see $forge repository $repo (HTTP 404): its account or scopes may be wrong, or the repository moved"
         ;;
     esac
     return "$status"
