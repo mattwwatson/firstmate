@@ -284,10 +284,13 @@ fm_wake_start_peer() {
 }
 
 # fm_wake_temp_watcher_pids <root>: print the pid of every watcher still recorded
-# as the live owner of a temp home's singleton lock under <root>. Scoped two ways
-# so it can never name a sibling firstmate home's real watcher: only locks whose
-# own recorded fm-home lies under <root> are considered, and the pid is confirmed
-# through bin/fm-wake-lib.sh's identity check, so a recycled pid is skipped.
+# as the live owner of a temp home's singleton lock under <root>. Scoped by path
+# and identity so it can never name a sibling firstmate home's real watcher: only
+# locks reached through the suite's own mktemp glob "$root"/*/state/.watch.lock are
+# considered - no real home occupies that path - and the pid is confirmed through
+# bin/fm-wake-lib.sh's identity check, so a recycled pid is skipped. The fm-home
+# read from each lock is passed straight back to fm_watcher_lock_matches_pid, so
+# that home argument is no longer load-bearing; the identity comparison is.
 fm_wake_temp_watcher_pids() {
   local root=$1 lock state home pid lib="$ROOT/bin/fm-wake-lib.sh"
   for lock in "$root"/*/state/.watch.lock; do
@@ -297,10 +300,6 @@ fm_wake_temp_watcher_pids() {
     home=$(cat "$lock/fm-home" 2>/dev/null || true)
     case "$pid" in
       ''|*[!0-9]*) continue ;;
-    esac
-    case "$home" in
-      "$root"/*) ;;
-      *) continue ;;
     esac
     kill -0 "$pid" 2>/dev/null || continue
     FM_STATE_OVERRIDE="$state" bash -c '

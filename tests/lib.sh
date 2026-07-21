@@ -65,14 +65,26 @@ pass() {
 # here, in the sourcing shell, so no command-substitution subshell can inherit
 # it and delete a root it has just created.
 #
+# Each registry path is fixed at source time from this shell's own pid, but the
+# FILE is created LAZILY on first write - the cleanup log on the first
+# fm_test_tmproot, the pid log on the first fm_test_track_pid - so a suite that
+# installs its own EXIT trap and never touches a registry leaves no stray /tmp
+# file behind. The path is derived rather than mktemp'd because fm_test_tmproot
+# runs inside TMP_ROOT=$(...): a mktemp assignment there would die with the
+# command-substitution subshell (same hazard as the array append above), whereas
+# a $$-derived path set here in the sourcing shell is visible to every subshell
+# and stays stable across the run. A stale file from a recycled pid is cleared
+# once here. Every read is existence-guarded so an absent file reads as empty.
+#
 # Reaping is BY REGISTERED PID ONLY, and only while that pid is still a child of
 # this shell. Never reap by process-name pattern: a pattern like the watcher's
 # script path matches every firstmate home on the machine, including a sibling
 # home's real watcher.
 
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_LOG=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
-FM_TEST_PID_LOG=$(mktemp "${TMPDIR:-/tmp}/fm-test-pids.XXXXXX")
+FM_TEST_CLEANUP_LOG="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
+FM_TEST_PID_LOG="${TMPDIR:-/tmp}/fm-test-pids.$$"
+rm -f "$FM_TEST_CLEANUP_LOG" "$FM_TEST_PID_LOG"
 
 # fm_test_pid_is_own_child <pid>: true while <pid> is still a direct child of
 # this shell. This guards every signal the reaper sends: once a pid has been
@@ -123,7 +135,7 @@ fm_test_reap_tracked_pids() {
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
-  [ -n "${FM_TEST_PID_LOG:-}" ] && : > "$FM_TEST_PID_LOG"
+  [ -f "$FM_TEST_PID_LOG" ] && : > "$FM_TEST_PID_LOG"
   return 0
 }
 

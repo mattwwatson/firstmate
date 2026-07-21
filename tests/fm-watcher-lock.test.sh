@@ -206,6 +206,7 @@ test_lock_single_winner_under_concurrency() {
       fi
     ' _ "$LIB" "$lockdir" "$marker" &
     pids="$pids $!"
+    fm_test_track_pid "$!"
     i=$((i + 1))
   done
   for pid in $pids; do
@@ -256,6 +257,7 @@ test_lock_stale_steal_single_winner_under_concurrency() {
       fi
     ' _ "$LIB" "$lockdir" "$marker" &
     pids="$pids $!"
+    fm_test_track_pid "$!"
     i=$((i + 1))
   done
   for pid in $pids; do
