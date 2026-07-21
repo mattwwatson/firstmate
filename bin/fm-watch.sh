@@ -37,7 +37,10 @@
 #                          verdict backs the next escalation off (capped at
 #                          FM_WEDGE_ESCALATE_MAX_SECS) and a changed one escalates
 #                          at once, while a read that FAILED is no evidence at all
-#                          and neither escalates nor advances the ladder.
+#                          and neither escalates nor advances the ladder - though
+#                          FM_WEDGE_UNREADABLE_SURFACE_COUNT consecutive failed
+#                          reads surface on their own terms, naming the reader and
+#                          asserting neither a wedge nor a stop.
 #                          Unless afk is active.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
