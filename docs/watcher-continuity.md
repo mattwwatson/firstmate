@@ -25,7 +25,7 @@ Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
-The existing turn-end guard implementation and adapters are unchanged.
+This continuity mechanism does not modify the turn-end guard or its adapters.
 They remain the final backstop rather than the normal continuity mechanism.
 
 ## Captain-wait deferral (Claude)
