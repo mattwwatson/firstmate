@@ -50,18 +50,20 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
+# --notify-wake: passed only by an adapter whose harness delivers a completed
+# background arm task as an autonomous wake (today: the Claude Stop hook in
+# .claude/settings.json). It enables the one-shot hand-off pass below; without
+# it the guard behaves exactly as before, so foreground-checkpoint and passive
+# adapters (codex, opencode, pi, grok) keep today's blocking unchanged.
+NOTIFY_WAKE=0
+case "${1:-}" in
+  --notify-wake) NOTIFY_WAKE=1 ;;
+esac
+
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
-
-# jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
-# "missing jq -> silent no-op" degrade). Without it we cannot safely read the
-# loop-guard field, so we must never block - fail open, not noisy.
-command -v jq >/dev/null 2>&1 || exit 0
-
-STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
-[ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
@@ -75,7 +77,25 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2
 # and differs from the common (shared) git-dir, while a main, non-worktree
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
+# Scoping runs before the jq degrade below so the marker clear next runs on
+# every real primary turn end, jq or no jq.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# The primary's turn is ending, so no captain-decision tool call is pending in
+# it: clear the turn-activity marker bin/fm-turn-pretool-stamp.sh maintains.
+# This is the release signal for the watcher's captain-wait deferral
+# (docs/watcher-continuity.md "Captain-wait deferral"), and it runs on every
+# in-scope Stop - including the loop-guarded second stop - so a marker can never
+# outlive the turn that stamped it while the session is healthy.
+rm -f "$STATE/.primary-turn-active" 2>/dev/null || true
+
+# jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
+# "missing jq -> silent no-op" degrade). Without it we cannot safely read the
+# loop-guard field, so we must never block - fail open, not noisy.
+command -v jq >/dev/null 2>&1 || exit 0
+
+STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
+[ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
@@ -84,6 +104,30 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+
+# --- one-shot hand-off pass (--notify-wake adapters only) -------------------
+# On a background-notify harness, every actionable watcher exit leaves this
+# exact state for the seconds between "arm task completed" and "the model's
+# next turn drains and re-arms": no live watcher, a still-fresh beacon, and the
+# undrained wake sitting in the durable queue. The completed arm task IS the
+# pending re-invocation (docs/turnend-guard.md, measured 2026-07-22), so a Stop
+# landing inside that window is the normal hand-off, not a lapse - blocking it
+# produced the "last beat: 2s ago" false alarms that trained the operator to
+# discount real ones. Allow that state to end the turn exactly ONCE per queued
+# wake, keyed on the newest record's epoch-seq: if the model's next turn does
+# not drain (the notification was lost or ignored), the same undrained record is
+# still newest at its Stop and the guard blocks as before. An empty queue - the
+# forgot-to-re-arm lapse signature - never gets a pass, so that detection is
+# byte-for-byte today's. Fail toward the alarm: if the pass cannot be recorded,
+# block rather than allow unrecorded.
+if [ "$NOTIFY_WAKE" = 1 ] && [ ! -e "$STATE/.afk" ] && [ "$FM_SUP_WATCHER_FRESH" = true ]; then
+  newest=$(tail -n 1 "$STATE/.wake-queue" 2>/dev/null | awk -F '\t' 'NF >= 5 { print $1 "-" $2 }')
+  if [ -n "$newest" ] && [ "$newest" != "$(cat "$STATE/.turnend-handoff-pass" 2>/dev/null || true)" ]; then
+    if printf '%s\n' "$newest" > "$STATE/.turnend-handoff-pass" 2>/dev/null; then
+      exit 0
+    fi
+  fi
+fi
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1

@@ -469,16 +469,16 @@ test_claude_settings_pretool_hook_wired() {
   local settings command
   settings="$ROOT/.claude/settings.json"
   [ -f "$settings" ] || fail "tracked claude primary settings are missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from claude primary settings"
+  # Select the Bash-matcher entry by matcher, not by position: the tracked
+  # settings also register an all-tools turn-stamp entry (bin/fm-turn-pretool-stamp.sh)
+  # ahead of the Bash seatbelts, and the arm checker's contract is tied to the
+  # Bash matcher, not to array order.
+  command=$(jq -r '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] | map(select(contains("fm-arm-pretool-check.sh"))) | first // empty' "$settings")
+  [ -n "$command" ] || fail "Bash-matched PreToolUse arm-checker command is missing from claude primary settings"
   assert_contains "$command" 'CLAUDE_PROJECT_DIR' "claude pretool hook must anchor via CLAUDE_PROJECT_DIR"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "claude pretool hook must invoke the shared checker"
   assert_contains "$command" '--claude' "claude pretool hook must pass --claude so stdout stays empty on deny"
   [ "$command" = '"$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude' ] \
     || fail "claude pretool hook must forward stdin directly with only --claude, got: $command"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"
   pass ".claude/settings.json: PreToolUse hook invokes the shared checker with --claude"
 }
 

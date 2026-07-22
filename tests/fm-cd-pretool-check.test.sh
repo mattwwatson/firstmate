@@ -376,11 +376,11 @@ test_claude_wiring() {
   local settings n
   settings="$ROOT/.claude/settings.json"
   [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  n=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))] | length' "$settings")
+  n=$(jq -r '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command | select(contains("fm-cd-pretool-check.sh"))] | length' "$settings")
   [ "$n" = 1 ] || fail "claude PreToolUse must invoke fm-cd-pretool-check.sh exactly once"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh") and contains("--claude") and contains("CLAUDE_PROJECT_DIR"))] | length == 1' "$settings" >/dev/null \
+  jq -e '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command | select(contains("fm-cd-pretool-check.sh") and contains("--claude") and contains("CLAUDE_PROJECT_DIR"))] | length == 1' "$settings" >/dev/null \
     || fail "claude cd hook must use CLAUDE_PROJECT_DIR and --claude"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
+  jq -e '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
     || fail "claude cd hook must not displace the watcher-arm hook"
   pass ".claude/settings.json: PreToolUse invokes the cd-guard alongside the arm guard"
 }
