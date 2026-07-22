@@ -26,10 +26,11 @@
 //                             unscoped pgrep output (substitution, tainted
 //                             variable, or pipeline into xargs kill - even
 //                             when the pgrep stage is group-wrapped),
-//                             or a literal nested shell/eval payload doing so -
-//                             including a shell run AS the xargs utility or as
-//                             a direct pipeline stage, whose literal -c payload
-//                             is classified recursively (through nested xargs
+//                             or a literal nested shell/eval/group payload
+//                             doing so - including a shell run AS the xargs
+//                             utility or a shell or group run as a direct
+//                             pipeline stage, whose literal payload is
+//                             classified recursively (through nested xargs
 //                             layers) and whose executed kill consumes a
 //                             pgrep-fed pipe.
 //   DENY  unclassifiable-kill unsupported or untokenizable syntax whose raw
@@ -256,6 +257,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
         unscopedPgrep ||= nested.unscopedPgrep;
         executesKill ||= nested.executesKill;
         nodeEmitsPgrep ||= nested.unscopedPgrep;
+        if (pipeCarriesPgrep && nested.executesKill) broadKill = true;
         if ((nested.error || nested.unsupported) && rawMentionsNameKill(token.content)) unsupported = true;
       }
       if (token.type === "word") {

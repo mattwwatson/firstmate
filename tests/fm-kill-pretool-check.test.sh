@@ -89,6 +89,10 @@ matrix_case K25 broad-kill 'echo x | xargs -0 sh -c "killall node"'
 matrix_case K26 broad-kill 'pgrep -f dev | xargs -I{} bash -c "echo {} | xargs kill"'
 matrix_case K27 broad-kill 'pgrep -f dev | xargs -I{} bash -c "echo x | xargs sh -c \"kill {}\""'
 matrix_case K28 broad-kill 'pgrep -f dev | bash -c "xargs kill"'
+# K29-K30: a subshell or brace group consuming the pgrep-fed pipe inherits the
+# pipe stdin exactly like the shell stage K28 denies.
+matrix_case K29 broad-kill 'pgrep -f dev | { xargs kill; }'
+matrix_case K30 broad-kill 'pgrep -f dev | (xargs kill)'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
@@ -134,6 +138,10 @@ matrix_case A28 allow "pgrep -f 'WTFIX' | xargs -I{} bash -c 'kill {}'"
 # unscoped pgrep output or the pgrep is worktree-scoped.
 matrix_case A29 allow 'echo x | bash -c "kill 123"'
 matrix_case A30 allow "pgrep -f 'WTFIX' | bash -c 'xargs kill'"
+# A31-A32: a group consumer with no executed kill, and one fed by a
+# worktree-scoped pgrep, stay allowed.
+matrix_case A31 allow 'pgrep -f dev | { wc -l; }'
+matrix_case A32 allow "pgrep -f 'WTFIX' | { xargs kill; }"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
