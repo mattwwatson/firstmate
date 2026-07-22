@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
-# The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
-#
-# Only GitHub is merged. A Bitbucket pull request URL is accepted far enough to
-# read its build verdict through bin/fm-bb-build-status.sh and refuse anything
-# not provably green with the concrete reason; a green one is still refused,
-# because firstmate's Bitbucket credential is read-only by design
-# (docs/configuration.md "Forge credentials") and granting merge is a separate
-# captain decision. A GitLab URL is refused exactly as before.
+# The canonical PR URL is parsed by bin/fm-pr-lib.sh and dispatched by
+# provider: GitHub merges through gh-axi by owner/repository and PR number,
+# exactly as it always has, and Bitbucket merges through bin/fm-bb-pr-merge.sh,
+# which owns the build gate, the 200/202/409/429/555 merge protocol, and the
+# confirmed-MERGED success rule. Whether the Bitbucket credential CAN merge is
+# a captain provisioning choice enforced by the forge itself
+# (docs/configuration.md "Forge credentials"). A GitLab URL is refused exactly
+# as before.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# --merge, --rebase, or --method after the optional -- separator. On Bitbucket
+# the same flags select the equivalent strategy (--squash -> squash,
+# --merge -> merge_commit, --rebase -> rebase_fast_forward, --method accepts
+# those gh names and Bitbucket's own six strategy names); any other extra
+# argument is refused rather than silently dropped, because there is no gh-axi
+# to forward it to. Extra args must not include --repo or -R on either forge
+# because the repository comes only from the URL.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,50 +36,21 @@ fi
 ID=$1
 RAW_URL=$2
 # bin/fm-pr-lib.sh parses GitLab and Bitbucket URLs so the watcher can follow
-# them, but this path still merges only GitHub by owner/repository. The GitLab
-# refusal holds exactly as it was until merge parity lands; the Bitbucket
-# branch below reads the build verdict first so a red pull request is refused
-# for the real reason rather than as generically unsupported.
+# them; this path merges GitHub through gh-axi and Bitbucket through
+# bin/fm-bb-pr-merge.sh. The GitLab refusal holds exactly as it was until
+# merge parity lands.
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid PR merge request" >&2
   exit 2
 fi
 case "$FM_PR_PROVIDER" in
-  github) ;;
-  bitbucket)
-    # The build gate is live now so it is already standing if merge authority
-    # ever arrives: red and pending never pass it. "none" passes the gate -
-    # a project with no CI has no builds to be green - and today everything
-    # that passes still lands on the unsupported refusal below.
-    if ! BB_BUILD=$("$SCRIPT_DIR/fm-bb-build-status.sh" "$FM_PR_URL"); then
-      echo "error: refusing to merge $FM_PR_URL: its Bitbucket build verdict could not be read" >&2
-      exit 1
-    fi
-    VERDICT=$(printf '%s\n' "$BB_BUILD" | head -n 1)
-    case "$VERDICT" in
-      red)
-        echo "error: refusing to merge $FM_PR_URL: Bitbucket reports failing builds" >&2
-        printf '%s\n' "$BB_BUILD" | tail -n +2 >&2
-        exit 1
-        ;;
-      pending)
-        echo "error: refusing to merge $FM_PR_URL: Bitbucket builds are still running" >&2
-        exit 1
-        ;;
-      green|none) ;;
-      *)
-        echo "error: refusing to merge $FM_PR_URL: unrecognised Bitbucket build verdict" >&2
-        exit 1
-        ;;
-    esac
-    echo "error: merging a Bitbucket pull request is not supported: firstmate's Bitbucket credential is read-only by design" >&2
-    exit 2
-    ;;
+  github|bitbucket) ;;
   *)
     echo "error: invalid PR merge request" >&2
     exit 2
     ;;
 esac
+PROVIDER=$FM_PR_PROVIDER
 URL=$FM_PR_URL
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
@@ -105,7 +80,56 @@ reject_repo_overrides() {
   done
 }
 
+# One gh-name or Bitbucket-name merge method into BB_STRATEGY, or a refusal.
+bb_strategy_map() {  # <value>
+  case "$1" in
+    squash) BB_STRATEGY=squash ;;
+    merge) BB_STRATEGY=merge_commit ;;
+    rebase) BB_STRATEGY=rebase_fast_forward ;;
+    merge_commit|fast_forward|squash_fast_forward|rebase_fast_forward|rebase_merge) BB_STRATEGY=$1 ;;
+    *)
+      echo "error: merge method \"$1\" is not supported for a Bitbucket pull request merge" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Resolve the extra args to one Bitbucket strategy, defaulting to squash like
+# the GitHub path. There is no gh-axi to forward unknown flags to, so anything
+# that is not a merge-method selection is refused rather than silently dropped.
+# Later selections win, matching how gh treats repeated method flags.
+bb_strategy_from_args() {
+  local arg expect_value=0
+  BB_STRATEGY=squash
+  for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then
+      expect_value=0
+      bb_strategy_map "$arg" || return 1
+      continue
+    fi
+    case "$arg" in
+      --squash) BB_STRATEGY=squash ;;
+      --merge) BB_STRATEGY=merge_commit ;;
+      --rebase) BB_STRATEGY=rebase_fast_forward ;;
+      --method) expect_value=1 ;;
+      --method=*) bb_strategy_map "${arg#--method=}" || return 1 ;;
+      *)
+        echo "error: extra argument \"$arg\" is not supported for a Bitbucket pull request merge" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [ "$expect_value" -eq 1 ]; then
+    echo "error: --method requires a value" >&2
+    return 1
+  fi
+}
+
 reject_repo_overrides "$@" || exit 1
+BB_STRATEGY=
+if [ "$PROVIDER" = bitbucket ]; then
+  bb_strategy_from_args "$@" || exit 1
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -119,6 +143,12 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+# Bitbucket dispatches to its own merge protocol; bin/fm-bb-pr-merge.sh owns
+# the build gate and only reports success on a confirmed MERGED state.
+if [ "$PROVIDER" = bitbucket ]; then
+  exec "$SCRIPT_DIR/fm-bb-pr-merge.sh" "$URL" --strategy "$BB_STRATEGY"
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
