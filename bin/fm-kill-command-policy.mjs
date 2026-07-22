@@ -20,9 +20,9 @@
 //
 // Deny/allow shape (docs/kill-guard.md owns the human-readable contract):
 //   DENY  broad-kill          executed pkill/killall whose arguments never
-//                             reference the worktree path (including one run
-//                             through xargs with no scoping in its arguments
-//                             or the pipe source), an executed kill consuming
+//                             reference the worktree path (including one in
+//                             xargs's utility position with no scoping in its
+//                             arguments or the pipe source), an executed kill consuming
 //                             unscoped pgrep output (substitution, tainted
 //                             variable, or pipeline into xargs kill - even
 //                             when the pgrep stage is group-wrapped),
@@ -131,6 +131,28 @@ function evalPayload(position) {
   return payloads.map((payload) => payload.value).join(" ");
 }
 
+// The utility word xargs would execute: the first argument past xargs's own
+// options. Skipped option shapes are bare flag clusters (-0, -p, -r, -t, -x,
+// -o), value options with an attached (-n1, -I{}) or separate (-n 1, -I {})
+// value (-i/-l take attached-only optional values and never consume the next
+// word), and the -- terminator. Anything else makes the utility position
+// ambiguous and is reported instead of guessed at.
+function xargsUtility(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i].value;
+    if (value === "--") return { word: args[i + 1] || null, ambiguous: false };
+    if (!value.startsWith("-")) return { word: args[i], ambiguous: false };
+    if (/^-[0prtxo]+$/.test(value)) continue;
+    const valued = value.match(/^-[0prtxo]*([nLPsIEJRSdail])(.*)$/);
+    if (valued) {
+      if (valued[2] === "" && !"il".includes(valued[1])) i += 1;
+      continue;
+    }
+    return { word: null, ambiguous: true };
+  }
+  return { word: null, ambiguous: false };
+}
+
 const UNSUPPORTED_KEYWORDS = new Set([
   "if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac",
   "do", "done", "function", "time", "coproc",
@@ -225,14 +247,22 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       if (consumesPgrep) broadKill = true;
     }
 
-    // A kill verb as an xargs argument (xargs -0/-n1/-I{} kill and friends).
-    // pkill/killall stay machine-wide name-pattern kills no matter what feeds
-    // the pipe, so they need worktree scoping among the xargs arguments or in
-    // an earlier pipeline stage; bare `kill` selects by PID and is dangerous
-    // only when the pipe carries unscoped pgrep output.
+    // A kill verb xargs would EXECUTE - its utility word, never a later data
+    // word, so `xargs grep -n pkill` stays a data mention. pkill/killall stay
+    // machine-wide name-pattern kills no matter what feeds the pipe, so they
+    // need worktree scoping among the xargs arguments or in an earlier
+    // pipeline stage; bare `kill` selects by PID and is dangerous only when
+    // the pipe carries unscoped pgrep output. An unrecognized xargs option
+    // hides which word runs: with a kill verb present that falls back to the
+    // fail-closed unclassifiable backstop.
     if (commandName === "xargs") {
-      if (!scoped && !pipeCarriesScoped && args.some((word) => NAME_KILLS.has(basename(word.value)))) broadKill = true;
-      if (pipeCarriesPgrep && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) broadKill = true;
+      const utility = xargsUtility(args);
+      const utilityName = utility.word ? basename(utility.word.value) : "";
+      if (utility.ambiguous && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) {
+        unsupported = true;
+      }
+      if (NAME_KILLS.has(utilityName) && !scoped && !pipeCarriesScoped) broadKill = true;
+      if (pipeCarriesPgrep && ["kill", "pkill", "killall"].includes(utilityName)) broadKill = true;
     }
 
     // Literal nested shell and eval payloads are recursively classified.

@@ -76,12 +76,14 @@ matrix_case K17 broad-kill 'p"kill" -f dev'
 matrix_case K18 broad-kill 'echo dev | xargs pkill -f'
 matrix_case K19 broad-kill '(pgrep -f dev) | xargs kill'
 matrix_case K20 broad-kill '{ pgrep -f dev; } | xargs kill'
+matrix_case K21 broad-kill 'echo dev | xargs -I{} pkill -f {}'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
 matrix_case U01 unclassifiable-kill 'while true; do pkill -f dev; done'
 matrix_case U02 unclassifiable-kill 'for x in 1; do killall node; done'
 matrix_case U03 unclassifiable-kill 'until false; do kill $(pgrep -f dev); done'
+matrix_case U04 unclassifiable-kill 'echo dev | xargs --max-procs=1 pkill -f'
 
 # ALLOW: kill-by-PID, worktree-scoped patterns, read-only pgrep, and data
 # mentions. A01-A03 are the legitimate own-process teardown shapes the deny
@@ -107,6 +109,8 @@ matrix_case A18 allow "printf '%s\\n' 'killall node'"
 matrix_case A19 allow 'kill %1'
 matrix_case A20 allow 'wait $DEV_PID'
 matrix_case A21 allow "echo 'WTFIX/dev' | xargs pkill -f"
+matrix_case A22 allow 'git ls-files | xargs grep -n pkill'
+matrix_case A23 allow 'ls | xargs echo killall'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
