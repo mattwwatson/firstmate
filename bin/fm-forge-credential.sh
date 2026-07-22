@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Resolve firstmate's own read-only forge credential and make read-only forge
-# API calls with it.
+# Resolve firstmate's own forge credential and make forge API calls with it:
+# read-only calls everywhere, plus exactly one write action - the pull-request
+# merge POST - which only bin/fm-bb-pr-merge.sh drives.
 #
 # Usage: fm-forge-credential.sh check <forge> [<repository>]
 #        fm-forge-credential.sh api-get <forge> <api-path>
+#        fm-forge-credential.sh merge-capable <forge>
+#        fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
 #        fm-forge-credential.sh forge-of <url>
 #        fm-forge-credential.sh repo-of <url>
 #
@@ -21,6 +24,29 @@
 #          is a path, never a URL: the host is fixed per forge here, so no
 #          caller can point the credential at another host, and redirects are
 #          never followed.
+# merge-capable
+#          Answer whether the resolved credential's ACTUAL scopes can merge a
+#          pull request on <forge>, and print exactly one of:
+#            yes      the scope list proves pull-request write is granted
+#            no       the scope list proves pull-request write is absent
+#            unknown  the scopes could not be enumerated, so nothing is proved
+#          The probe is one GET of /2.0/user, the documented endpoint whose 403
+#          rejection body names the granted scopes (error.detail.granted). A
+#          2xx answer authenticates but enumerates nothing, and a missing
+#          python3 cannot read the body, so both are "unknown" rather than a
+#          guess; a caller warning on "no" therefore never warns speculatively,
+#          and the merge POST itself still fails closed on a real 403.
+# pr-merge The ONE write action this script can perform: a single POST of the
+#          pull-request merge endpoint for <repository> and <number> with the
+#          named merge <strategy>. It deliberately supports no other method,
+#          path, or body, so no caller can turn this credential into a general
+#          write channel. Output is three fixed header lines - "status=<http>",
+#          "location=<Location header or empty>", "retry-after=<header or
+#          empty>" - then the raw response body, and the exit is 0 whenever an
+#          HTTP answer arrived, whatever its status: the CALLER owns the
+#          200/202/409/429/555 protocol (bin/fm-bb-pr-merge.sh), this script
+#          owns only credential resolution and the request. Whether the merge
+#          actually happened is never inferred here.
 # forge-of Print the forge name for a git remote or PR URL (single owner of
 #          that mapping), or exit 1 when the host belongs to no known forge.
 # repo-of  Print the repository identifier that same URL names, in the forge's
@@ -47,7 +73,12 @@
 # is bounded by FM_FORGE_CREDENTIAL_TIMEOUT (default 10 seconds) and the store
 # read by FM_FORGE_KEYCHAIN_TIMEOUT (default 5 seconds); a blank, non-numeric, or
 # zero value falls back to the default, because zero means "no limit" to curl
-# rather than "do not wait". The store read needs a watchdog of its own because
+# rather than "do not wait". The pr-merge POST alone is bounded by
+# FM_FORGE_MERGE_TIMEOUT (default 60 seconds, same fallback rule), because a
+# synchronous merge can legitimately take longer than a read and a client-side
+# timeout mid-merge is inconclusive while the merge may still complete
+# server-side - the caller re-reads the pull request state on that outcome
+# rather than assuming either way. The store read needs a watchdog of its own because
 # `security` has no timeout flag: it blocks indefinitely when the stored item's
 # access control makes the read raise a confirmation dialog, which an unattended
 # session can never answer. That stall is its own outcome (exit 10) rather than
@@ -61,13 +92,16 @@
 # daemon tokenless, so this script reads the store itself: it never sources a
 # profile, never prompts, and never takes a secret from the environment.
 #
-# WHAT IT WILL NOT TOUCH. For Bitbucket, firstmate holds its OWN read-only
-# Atlassian account API token under the keychain services
-# firstmate-bitbucket-email and firstmate-bitbucket-token, used with HTTP Basic
-# (email as username, token as password). no-mistakes' separate write-capable
-# credential is deliberately out of reach - this script must never read it -
-# because keeping an unattended reader write-incapable is the point of the
-# design, not a detail. For GitHub, firstmate holds no credential at all; the
+# WHAT IT WILL NOT TOUCH. For Bitbucket, firstmate holds its OWN Atlassian
+# account API token under the keychain services firstmate-bitbucket-email and
+# firstmate-bitbucket-token, used with HTTP Basic (email as username, token as
+# password). Whether that one credential can merge is the captain's
+# provisioning choice, detected from its real scopes by merge-capable rather
+# than assumed; with the recommended read-only scopes every write is refused by
+# the forge itself and the pr-merge action stays dormant. no-mistakes' separate
+# write-capable credential is deliberately out of reach - this script must
+# never read it - because the two credentials serve different systems and must
+# rotate independently. For GitHub, firstmate holds no credential at all; the
 # gh CLI owns it.
 #
 # SECRET HANDLING. The resolved pair never reaches stdout, stderr, a log, argv,
@@ -113,6 +147,7 @@ positive_seconds() {  # <value> <default>
 
 REQUEST_TIMEOUT=$(positive_seconds "${FM_FORGE_CREDENTIAL_TIMEOUT:-}" 10)
 STORE_TIMEOUT=$(positive_seconds "${FM_FORGE_KEYCHAIN_TIMEOUT:-}" 5)
+MERGE_TIMEOUT=$(positive_seconds "${FM_FORGE_MERGE_TIMEOUT:-}" 60)
 
 NL='
 '
@@ -138,6 +173,8 @@ usage() {
   cat <<'EOF'
 usage: fm-forge-credential.sh check <forge> [<repository>]
        fm-forge-credential.sh api-get <forge> <api-path>
+       fm-forge-credential.sh merge-capable <forge>
+       fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
        fm-forge-credential.sh forge-of <url>
        fm-forge-credential.sh repo-of <url>
 
@@ -181,6 +218,30 @@ forge_repo_path() {  # <forge> <repository>
   forge_repo_valid "$1" "$2" || return 1
   case "$1" in
     bitbucket) printf '%s' "/2.0/repositories/$2" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The six documented Bitbucket Cloud merge strategies, exactly. Anything else
+# never reaches a request; the caller separately validates its choice against
+# what the pull request's destination actually permits.
+forge_merge_strategy_valid() {
+  case "$1" in
+    merge_commit|squash|fast_forward|squash_fast_forward|rebase_fast_forward|rebase_merge) ;;
+    *) return 1 ;;
+  esac
+}
+
+forge_pr_merge_path() {  # <forge> <repository> <number>
+  forge_repo_valid "$1" "$2" || return 1
+  case "$3" in
+    [1-9]) ;;
+    [1-9]*[!0-9]*) return 1 ;;
+    [1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    bitbucket) printf '%s' "/2.0/repositories/$2/pullrequests/$3/merge" ;;
     *) return 1 ;;
   esac
 }
@@ -434,6 +495,71 @@ forge_get() {  # <forge> <api-path>
   return "$status"
 }
 
+# The one write request. Same secret handling as forge_get - credential
+# through a curl config on stdin, every curl diagnostic discarded - plus the
+# response headers, captured to a private file because the caller's protocol
+# needs Location (202) and Retry-After (429). On success it prints the three
+# fixed header lines and then the body; any received HTTP status is success
+# here, because interpreting the status IS the caller's job.
+forge_post_merge() {  # <forge> <api-path> <strategy>
+  local forge=$1 path=$2 strategy=$3 base body headers http curl_status line location retry_after
+  base=$(forge_api_base "$forge") || {
+    REASON="unknown forge"
+    return "$EX_USAGE"
+  }
+  if ! command -v curl >/dev/null 2>&1; then
+    REASON="curl is not installed, so the merge request could not be made"
+    return "$EX_INCONCLUSIVE"
+  fi
+  body=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-body.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the response"
+    return "$EX_INCONCLUSIVE"
+  }
+  headers=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-headers.XXXXXX" 2>/dev/null) || {
+    rm -f -- "$body"
+    REASON="could not create a temporary file for the response headers"
+    return "$EX_INCONCLUSIVE"
+  }
+  # The strategy was validated against the closed six-name list, so this JSON
+  # literal cannot carry anything but one of those names.
+  http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
+    | curl --silent --config - \
+        --request POST \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data "{\"merge_strategy\": \"$strategy\"}" \
+        --max-time "$MERGE_TIMEOUT" \
+        --dump-header "$headers" \
+        --output "$body" \
+        --write-out '%{http_code}' \
+        "$base$path" 2>/dev/null)
+  curl_status=$?
+  if [ "$curl_status" -ne 0 ] || [ "$http" = 000 ] || [ -z "$http" ]; then
+    rm -f -- "$body" "$headers"
+    REASON="no usable response from ${base#https://} for the merge request; re-read the pull request state before retrying"
+    return "$EX_INCONCLUSIVE"
+  fi
+  location=
+  retry_after=
+  while IFS= read -r line; do
+    line=${line%"$CR"}
+    case "$line" in
+      [Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:*)
+        location=${line#*:}
+        location=${location# }
+        ;;
+      [Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]:*)
+        retry_after=${line#*:}
+        retry_after=${retry_after# }
+        ;;
+    esac
+  done < "$headers" 2>/dev/null
+  printf 'status=%s\nlocation=%s\nretry-after=%s\n' "$http" "$location" "$retry_after"
+  cat -- "$body"
+  rm -f -- "$body" "$headers"
+  return "$EX_OK"
+}
+
 # --- subcommands -------------------------------------------------------------
 
 cmd_check() {  # <forge> [<repository>]
@@ -462,6 +588,98 @@ cmd_api_get() {  # <forge> <api-path>
   forge_supported "$forge" || return "$EX_USAGE"
   resolve_credential "$forge" || { status=$?; return "$status"; }
   forge_get "$forge" "$path" || { status=$?; return "$status"; }
+  return "$EX_OK"
+}
+
+# Scope probe for the merge capability. /2.0/user is the documented probe:
+# firstmate's recommended credential deliberately lacks the account read scope,
+# so the request answers HTTP 403 with a body whose error.detail.granted names
+# every scope the credential actually holds - the only place the live API
+# enumerates them. Merge needs pull-request write, spelled pullrequest:write on
+# app passwords and repository or workspace access tokens and
+# write:pullrequest:* on granular Atlassian account API tokens; both are
+# matched, nothing else implies them. A 2xx authenticates but enumerates
+# nothing, and a missing python3 cannot read the body, so both print "unknown"
+# rather than a guess.
+cmd_merge_capable() {  # <forge>
+  local forge=$1 base body http curl_status status verdict
+  forge_supported "$forge" || return "$EX_USAGE"
+  resolve_credential "$forge" || { status=$?; return "$status"; }
+  base=$(forge_api_base "$forge") || {
+    REASON="unknown forge"
+    return "$EX_USAGE"
+  }
+  if ! command -v curl >/dev/null 2>&1; then
+    REASON="curl is not installed, so the credential's scopes could not be probed"
+    return "$EX_INCONCLUSIVE"
+  fi
+  body=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-body.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the response"
+    return "$EX_INCONCLUSIVE"
+  }
+  http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
+    | curl --silent --config - \
+        --request GET \
+        --header 'Accept: application/json' \
+        --max-time "$REQUEST_TIMEOUT" \
+        --output "$body" \
+        --write-out '%{http_code}' \
+        "$base/2.0/user" 2>/dev/null)
+  curl_status=$?
+  if [ "$curl_status" -ne 0 ] || [ "$http" = 000 ] || [ -z "$http" ]; then
+    rm -f -- "$body"
+    REASON="no usable response from ${base#https://}, so nothing was proved about the credential's scopes"
+    return "$EX_INCONCLUSIVE"
+  fi
+  verdict=unknown
+  case "$http" in
+    2??) verdict=unknown ;;
+    401)
+      rm -f -- "$body"
+      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
+      return "$EX_REJECTED"
+      ;;
+    403)
+      if command -v python3 >/dev/null 2>&1; then
+        verdict=$(python3 -c '
+import json
+import sys
+try:
+    granted = json.load(sys.stdin)["error"]["detail"]["granted"]
+except Exception:
+    print("unknown")
+    sys.exit(0)
+if not isinstance(granted, list) or not all(isinstance(s, str) for s in granted):
+    print("unknown")
+    sys.exit(0)
+for scope in granted:
+    if scope == "pullrequest:write" or scope.startswith("write:pullrequest:"):
+        print("yes")
+        sys.exit(0)
+print("no")
+' < "$body" 2>/dev/null) || verdict=unknown
+      fi
+      [ -n "$verdict" ] || verdict=unknown
+      ;;
+  esac
+  rm -f -- "$body"
+  printf '%s\n' "$verdict"
+  return "$EX_OK"
+}
+
+cmd_pr_merge() {  # <forge> <repository> <number> <strategy>
+  local forge=$1 repo=$2 number=$3 strategy=$4 path status
+  forge_supported "$forge" || return "$EX_USAGE"
+  if ! path=$(forge_pr_merge_path "$forge" "$repo" "$number"); then
+    REASON="'$repo' number '$number' is not a valid $forge pull request identifier"
+    return "$EX_USAGE"
+  fi
+  if ! forge_merge_strategy_valid "$strategy"; then
+    REASON="'$strategy' is not a Bitbucket merge strategy; expected merge_commit, squash, fast_forward, squash_fast_forward, rebase_fast_forward, or rebase_merge"
+    return "$EX_USAGE"
+  fi
+  resolve_credential "$forge" || { status=$?; return "$status"; }
+  forge_post_merge "$forge" "$path" "$strategy" || { status=$?; return "$status"; }
   return "$EX_OK"
 }
 
@@ -547,6 +765,24 @@ case "$COMMAND" in
       exit "$EX_USAGE"
     fi
     cmd_api_get "$1" "$2"
+    STATUS=$?
+    ;;
+  merge-capable)
+    shift
+    if [ "$#" -ne 1 ]; then
+      echo "usage: fm-forge-credential.sh merge-capable <forge>" >&2
+      exit "$EX_USAGE"
+    fi
+    cmd_merge_capable "$1"
+    STATUS=$?
+    ;;
+  pr-merge)
+    shift
+    if [ "$#" -ne 4 ]; then
+      echo "usage: fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>" >&2
+      exit "$EX_USAGE"
+    fi
+    cmd_pr_merge "$1" "$2" "$3" "$4"
     STATUS=$?
     ;;
   forge-of)
