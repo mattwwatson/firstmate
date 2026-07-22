@@ -20,9 +20,12 @@
 //
 // Deny/allow shape (docs/kill-guard.md owns the human-readable contract):
 //   DENY  broad-kill          executed pkill/killall whose arguments never
-//                             reference the worktree path, an executed kill
-//                             consuming unscoped pgrep output (substitution,
-//                             tainted variable, or pipeline into xargs kill),
+//                             reference the worktree path (including one run
+//                             through xargs with no scoping in its arguments
+//                             or the pipe source), an executed kill consuming
+//                             unscoped pgrep output (substitution, tainted
+//                             variable, or pipeline into xargs kill - even
+//                             when the pgrep stage is group-wrapped),
 //                             or a literal nested shell/eval payload doing so.
 //   DENY  unclassifiable-kill unsupported or untokenizable syntax whose raw
 //                             bytes carry a name-pattern kill verb.
@@ -159,9 +162,13 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
   // is recognized as consuming pattern-matched PIDs. A clean reassignment
   // clears the taint, mirroring the arm policy's variable tracking.
   const tainted = new Set(taintedVars || []);
-  // Pipeline taint: an unscoped pgrep stage flows into later stages of the
-  // same pipeline, so `pgrep -f dev | xargs kill` is recognized.
+  // Pipeline taint: an unscoped pgrep stage (bare, group-wrapped, or inside a
+  // literal nested payload) flows into later stages of the same pipeline, so
+  // `pgrep -f dev | xargs kill` is recognized. Worktree-scoped bytes in an
+  // earlier stage flow forward too, so `echo "$PWD/dev" | xargs pkill -f`
+  // stays allowed.
   let pipeCarriesPgrep = false;
+  let pipeCarriesScoped = false;
 
   for (let index = 0; index < nodes.length; index += 1) {
     const tokens = nodes[index];
@@ -170,12 +177,16 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
     if (position.unresolvedWrapperOption) unsupported = true;
 
     // Recurse into subshell/brace groups and command/process substitutions.
+    // nodeEmitsPgrep marks this pipeline stage as emitting unscoped pgrep
+    // output even when the pgrep hides behind a group or nested payload.
     const substitutionResults = new Map();
+    let nodeEmitsPgrep = false;
     for (const token of tokens) {
       if (token.type === "group") {
         const nested = analyzeProgram(token.content, worktree, tainted, depth + 1);
         broadKill ||= nested.broadKill;
         unscopedPgrep ||= nested.unscopedPgrep;
+        nodeEmitsPgrep ||= nested.unscopedPgrep;
         if ((nested.error || nested.unsupported) && rawMentionsNameKill(token.content)) unsupported = true;
       }
       if (token.type === "word") {
@@ -214,10 +225,14 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       if (consumesPgrep) broadKill = true;
     }
 
-    // `... | xargs kill` (or xargs -0/-n1/-I{} kill): the kill verb is an
-    // argument of xargs, fed by whatever the pipe carries.
-    if (commandName === "xargs" && pipeCarriesPgrep) {
-      if (args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) broadKill = true;
+    // A kill verb as an xargs argument (xargs -0/-n1/-I{} kill and friends).
+    // pkill/killall stay machine-wide name-pattern kills no matter what feeds
+    // the pipe, so they need worktree scoping among the xargs arguments or in
+    // an earlier pipeline stage; bare `kill` selects by PID and is dangerous
+    // only when the pipe carries unscoped pgrep output.
+    if (commandName === "xargs") {
+      if (!scoped && !pipeCarriesScoped && args.some((word) => NAME_KILLS.has(basename(word.value)))) broadKill = true;
+      if (pipeCarriesPgrep && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) broadKill = true;
     }
 
     // Literal nested shell and eval payloads are recursively classified.
@@ -226,14 +241,17 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       const nested = analyzeProgram(payload, worktree, tainted, depth + 1);
       broadKill ||= nested.broadKill;
       unscopedPgrep ||= nested.unscopedPgrep;
+      nodeEmitsPgrep ||= nested.unscopedPgrep;
       if ((nested.error || nested.unsupported) && rawMentionsNameKill(payload)) unsupported = true;
     }
 
     // Propagate pipeline taint to the next stage.
     if (isPipe(separators[index])) {
-      pipeCarriesPgrep = pipeCarriesPgrep || (commandName === "pgrep" && !scoped);
+      pipeCarriesPgrep = pipeCarriesPgrep || (commandName === "pgrep" && !scoped) || nodeEmitsPgrep;
+      pipeCarriesScoped = pipeCarriesScoped || scoped;
     } else {
       pipeCarriesPgrep = false;
+      pipeCarriesScoped = false;
     }
   }
 

@@ -73,6 +73,9 @@ matrix_case K14 broad-kill 'cd apps && pkill -f dev'
 matrix_case K15 broad-kill 'pkill -u "$USER"'
 matrix_case K16 broad-kill '(pkill -f dev)'
 matrix_case K17 broad-kill 'p"kill" -f dev'
+matrix_case K18 broad-kill 'echo dev | xargs pkill -f'
+matrix_case K19 broad-kill '(pgrep -f dev) | xargs kill'
+matrix_case K20 broad-kill '{ pgrep -f dev; } | xargs kill'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
@@ -103,6 +106,7 @@ matrix_case A17 allow 'for t in tests/*.test.sh; do bash "$t"; done'
 matrix_case A18 allow "printf '%s\\n' 'killall node'"
 matrix_case A19 allow 'kill %1'
 matrix_case A20 allow 'wait $DEV_PID'
+matrix_case A21 allow "echo 'WTFIX/dev' | xargs pkill -f"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

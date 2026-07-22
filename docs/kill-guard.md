@@ -59,8 +59,8 @@ The discriminator is victim selection: by machine-wide name pattern (blocked) ve
 
 The guard **blocks**, with reason code `broad-kill`:
 
-- An executed `pkill` or `killall` whose arguments never reference the worktree path: `pkill -f 'concurrently.*dev'` (the incident command), `killall node`, `pkill -u "$USER"`, `sudo pkill -f dev`, `command pkill -f dev`, and quote-split spellings such as `p"kill" -f dev`.
-- An executed `kill` consuming pattern-matched PIDs: `kill $(pgrep -f vite)`, the assignment-tainted `PIDS=$(pgrep -f dev); kill $PIDS`, and the pipeline `pgrep -f dev | xargs kill`.
+- An executed `pkill` or `killall` whose arguments never reference the worktree path: `pkill -f 'concurrently.*dev'` (the incident command), `killall node`, `pkill -u "$USER"`, `sudo pkill -f dev`, `command pkill -f dev`, and quote-split spellings such as `p"kill" -f dev`. Running the name-kill through `xargs` changes nothing - `echo dev | xargs pkill -f` is denied unless the worktree path appears in the xargs arguments or the pipe source.
+- An executed `kill` consuming pattern-matched PIDs: `kill $(pgrep -f vite)`, the assignment-tainted `PIDS=$(pgrep -f dev); kill $PIDS`, and the pipeline `pgrep -f dev | xargs kill` - including group-wrapped pgrep stages such as `(pgrep -f dev) | xargs kill` and `{ pgrep -f dev; } | xargs kill`.
 - A literal nested payload doing either: `bash -c 'pkill -f dev'`, `eval "pkill -f dev"`, `(pkill -f dev)`, and a broad kill anywhere in a command list such as `cd apps && pkill -f dev`.
 
 The guard **blocks**, with reason code `unclassifiable-kill`, unsupported grammar (a loop, `case`, `if`, or other construct the classifier does not model) whose raw bytes carry `pkill`/`killall`, or both `kill` and `pgrep`.
@@ -69,7 +69,7 @@ This mirrors the watcher-arm seatbelt's fail-closed backstop: when the classifie
 The guard **allows** everything else, including the legitimate teardown shapes its own deny reason recommends:
 
 - Kill by PID: `kill 12345`, `kill -9 $SERVER_PID`, `kill "$(cat .fm-dev.pid)"`, `kill %1`, `PIDS=$(cat .fm-dev.pid); kill $PIDS`.
-- Worktree-scoped patterns: `pkill -f '<worktree>/dev-server'`, `kill $(pgrep -f '<worktree>/vite')`, `pgrep -f '<worktree>' | xargs kill`, and the byte-visible cwd forms `pkill -f "$PWD/..."` and `pkill -f "$(pwd)/..."` (crew rules pin the shell inside the worktree; the classifier matches bytes, never expands).
+- Worktree-scoped patterns: `pkill -f '<worktree>/dev-server'`, `kill $(pgrep -f '<worktree>/vite')`, `pgrep -f '<worktree>' | xargs kill`, `echo '<worktree>/dev' | xargs pkill -f`, and the byte-visible cwd forms `pkill -f "$PWD/..."` and `pkill -f "$(pwd)/..."` (crew rules pin the shell inside the worktree; the classifier matches bytes, never expands).
 - Read-only process inspection: a standalone `pgrep`, `pgrep -fl dev || true`.
 - Every data mention: `echo "pkill -f dev"`, `git commit -m "add pkill guard"`, `grep -rn pkill bin/`, `printf '%s\n' 'killall node'`, and words that merely contain the bytes (`.agents/skills`).
 - Starting servers and recording PIDs: `npm run dev & echo $! > .fm-dev.pid`.
