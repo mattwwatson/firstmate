@@ -550,7 +550,10 @@ EOF
   # persona (bin/fm-persona.sh) must be re-applied here or the seeded clone
   # silently falls back to the global identity. A preexisting clone is verified
   # instead, never mutated, matching the initialization rule below.
-  persona=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project" --persona 2>/dev/null) || persona=none
+  persona=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project" --persona 2>/dev/null) || {
+    echo "error: cannot determine the recorded persona for project $project (fm-project-mode.sh $project --persona failed); refusing to seed" >&2
+    return 1
+  }
   [ -n "$persona" ] || persona=none
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }

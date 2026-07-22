@@ -129,6 +129,26 @@ EOF
   pass "fm-persona.sh: a glob condition still yields a persona, named from its config file"
 }
 
+test_relative_include_path_resolves_against_the_including_file() {
+  local home
+  home=$(fm_persona_fixture relinclude)
+  # Git resolves a relative include.path against the including file's
+  # directory, not the process CWD; detection must read the same file git
+  # applies, from any CWD.
+  cat > "$home/.gitconfig" <<EOF
+[user]
+	name = Matthew Watson
+	email = mattw.watson@gmail.com
+[includeIf "gitdir:~/work/moroku/"]
+	path = work/moroku/.gitconfig-moroku
+EOF
+  fm_persona_run "$home" "$PERSONA" list --porcelain
+  expect_code 0 "$CODE" "list refused a relative include path git itself resolves: $OUT"
+  assert_contains "$OUT" "moroku	mattw@moroku.com		ssh -i ~/.ssh/id_moroku" \
+    "relative include path was not resolved against the including file's directory"
+  pass "fm-persona.sh: a relative include path resolves against its including file, as git does"
+}
+
 test_show_prints_the_effective_identity() {
   local home
   home=$(fm_persona_fixture show)
@@ -377,6 +397,7 @@ test_detects_global_and_includeif_personas
 test_list_presents_email_and_key_per_persona
 test_detects_multiple_work_identities
 test_glob_condition_slug_falls_back_to_the_config_name
+test_relative_include_path_resolves_against_the_including_file
 test_show_prints_the_effective_identity
 test_apply_writes_identity_and_worktrees_inherit_it
 test_apply_converges_stale_local_overrides

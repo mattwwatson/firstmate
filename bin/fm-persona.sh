@@ -210,6 +210,13 @@ persona_detect() {
 
   while IFS=$'\t' read -r cond include_file including; do
     [ -n "${cond:-}" ] || continue
+    # Git resolves a relative include.path against the including file's
+    # directory, never the process CWD; --type=path already made ~-paths
+    # absolute, so only a path with no leading / needs the same resolution.
+    case "$include_file" in
+      /*) ;;
+      *) include_file="$(dirname "$including")/$include_file" ;;
+    esac
     # A rule that defines a persona but cannot be read leaves every verdict
     # about that persona unknowable, and unknowable must refuse, not pass.
     if [ ! -r "$include_file" ]; then
