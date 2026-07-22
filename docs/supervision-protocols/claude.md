@@ -17,6 +17,7 @@ When this session owns supervision and away mode is not active:
 11. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
 12. Do not send idle progress while the watcher is parked.
 
+While a turn is blocked inside a captain-decision tool call (AskUserQuestion), the watcher automatically holds its actionable exits and delivers them when the turn ends; this needs no protocol action and never replaces the drain-first rule (see [`watcher-continuity.md`](../watcher-continuity.md) "Captain-wait deferral").
 Claude Code's background task completion is the wake mechanism.
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` is only the verified background arm wrapper.
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.

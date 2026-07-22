@@ -40,7 +40,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 
 All verified primary harnesses have a tracked integration:
 
-- `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
+- `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh --notify-wake` (the hand-off pass opt-in described in the 2026-07-22 section), plus an all-tools `PreToolUse` turn-activity stamp through `bin/fm-turn-pretool-stamp.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
@@ -146,8 +146,49 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-22: captain-wait supervision gap and the hand-off false alarm
+
+Two related symptoms were observed live on 21-22/07/2026 in the main home (backlog `fm-supervision-gap-on-captain-wait`) and fixed together.
+
+First, fleet supervision lapsed while firstmate waited on a captain decision: the cycle ledger `state/.watch-cycle-exits.log` shows 902s and 2518s stretches with zero watcher cycles, each beginning at an actionable watcher exit and ending only when the captain's answer produced a turn, and each reported by this guard as "WATCHER DOWN" only at that first turn end - truthful, but entirely after the fact.
+
+Second, the guard fired "TURN WOULD END BLIND ... last beat: 2s ago" during the benign seconds-long hand-off after every actionable exit (previous cycle just notified and exited, fresh arm not yet holding the lock), training the operator to discount real alarms.
+
+Three first-hand measurements on Claude Code 2.1.217 (Darwin 24.6.0, macOS 15.7.3, interactive session in a tmux pane) established the mechanism:
+
+1. **Idle re-invocation works even with a pending question.**
+   Procedure: launch a detached `run_in_background` Bash task (`sleep 25`, epoch markers to the session scratchpad), then end the turn with a question pending in the final assistant text.
+   Observed: `launch=1784708317 complete=1784708342 reinvoke=1784708347` - re-invoked 5s after completion with zero human input, via a `<task-notification>` whose system notice stated no human input had been received.
+   So a plain-chat question does NOT suppress the background-notify wake.
+2. **Notifications deliver mid-turn at tool boundaries.**
+   Procedure: launch a background `sleep 10` task, then run a foreground `sleep 40` tool call in the same turn.
+   Observed: the task completed during the foreground call and its notification was delivered immediately after that tool returned, inside the same turn.
+3. **A hook command's parent is the session process.**
+   Procedure: scratch project with a PreToolUse hook logging `$$`, `$PPID`, and `ps -o comm= -p $PPID`; run `claude -p 'Run the bash command `true` ...' --dangerously-skip-permissions`.
+   Observed: `self=14867 ppid=8316 pcomm=claude` - the hook's parent is the long-lived `claude` session process, so a stamp recording `$PPID` self-invalidates when the session dies.
+
+Together with the ledger, measurements 1 and 2 pin the lapse's masking condition: the only state in which a completed arm task can wake nothing is a turn blocked INSIDE a captain-decision tool call (AskUserQuestion awaiting the captain), which lasts exactly as long as the captain wait.
+Both reproductions were confirmed end to end against unfixed `main` (0278fc3) before the fix: an actionable exit with no following turn left the beacon stale past grace with the wake durably queued, and a Stop landing seconds after an actionable exit blocked with "last beat: 3s ago".
+
+The fix has two guard-side parts, plus the watcher-side captain-wait deferral owned by [`watcher-continuity.md`](watcher-continuity.md):
+
+- **Marker clearing.** Every in-scope Stop removes `state/.primary-turn-active`, the turn-activity marker `bin/fm-turn-pretool-stamp.sh` maintains from PreToolUse; that clear is the deferral's release signal and runs before the `jq` degrade so it works on every real primary turn end.
+- **One-shot hand-off pass (`--notify-wake`).** Passed only by an adapter whose harness delivers a completed background arm task as an autonomous wake; today that is the Claude Stop registration in `.claude/settings.json`.
+  When the predicate would block but the beacon is inside grace, away mode is off, and the newest `state/.wake-queue` record is undrained and has not been passed before, the guard records that record's epoch-seq in `state/.turnend-handoff-pass` and allows the stop once: the undrained fresh wake IS the in-flight notification (measurements 1-2), and the turn end is what lets the harness deliver it.
+  If the pass cannot be recorded, the guard blocks rather than allowing unrecorded.
+
+Detection-latency accounting for the pass, stated per the constraint that a genuinely unsupervised fleet must still be detected as promptly as before:
+
+- Empty wake queue - the forgot-to-re-arm lapse signature - never earns a pass, so that detection is byte-for-byte unchanged.
+- A stale beacon never earns a pass, so every aged lapse still blocks immediately.
+- Without `--notify-wake` (codex, opencode, pi, grok) nothing changes at all.
+- The only deferred case is a Stop with a fresh undrained wake whose completed-task notification is then lost by the harness AND ignored by the model: detection moves from that Stop to the next turn end, at most one turn cycle later, and the pass is per-wake so it cannot compound.
+  No such lost notification has been observed; measurements 1-2 and the 2026-07-12 measurement above are the delivery evidence.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+It also covers the 2026-07-22 hand-off pass (one silent pass per undrained wake, spent-pass and empty-queue and stale-beacon and afk blocking, `--notify-wake` scoping, per-wake keying), turn-activity marker clearing and its primary scoping, and `bin/fm-turn-pretool-stamp.sh`'s stamp, scope, and jq fail-open behavior.
+`tests/fm-watch-captain-wait.test.sh` holds the end-to-end captain-wait reproductions and the watcher deferral suite.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

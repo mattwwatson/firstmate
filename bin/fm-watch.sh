@@ -10,7 +10,11 @@
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# on every wake. While bin/fm-turn-pretool-stamp.sh's captain-wait marker is
+# valid, actionable exits are deferred - queued durably, held, and flushed
+# together when the marker clears - so a primary blocked on a captain decision
+# keeps a live supervised fleet (see "captain-wait deferral" below).
+# Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
@@ -270,14 +274,100 @@ recorded_windows() {
   done
 }
 
+# --- captain-wait deferral ---------------------------------------------------
+# An actionable exit is the wake mechanism on a background-notify harness: the
+# arm task completes and its completion re-invokes the primary. But a turn
+# blocked INSIDE a captain-decision tool call (AskUserQuestion awaiting the
+# captain's answer) cannot receive that completion until the captain acts -
+# notifications deliver only at tool boundaries, and re-invocation only after a
+# turn end (both measured 2026-07-22, docs/turnend-guard.md). Exiting there
+# buys nothing and orphans the fleet for the whole wait: observed twice on
+# 21/07/2026 as 902s and 2518s with zero watcher cycles (docs/watcher-continuity.md).
+# So while bin/fm-turn-pretool-stamp.sh's marker says the primary is mid-turn in
+# such a tool call, an actionable wake is DEFERRED: it is already durably
+# queued (every wake() caller enqueues first), so the watcher just keeps
+# polling - beacon fresh, wedge timers accruing evidence, checks running - and
+# exits with every deferred reason the moment the marker clears (the guard
+# removes it at the turn's Stop, or any later tool call re-stamps a different
+# tool), the stamping session dies, or FM_WATCH_DEFER_MAX is exhausted.
+# The cap bounds a leaked marker (a turn aborted mid-question with the session
+# left idle) to at most one deferral window before this reverts to today's
+# exit-and-notify behavior. Never active while afk: the daemon owns triage and
+# wakes the primary by pane injection, which a blocked turn does not gate.
+FM_WATCH_DEFER_TOOLS=${FM_WATCH_DEFER_TOOLS:-AskUserQuestion}
+FM_WATCH_DEFER_MAX=${FM_WATCH_DEFER_MAX:-3600}
+case "$FM_WATCH_DEFER_MAX" in ''|*[!0-9]*|0) FM_WATCH_DEFER_MAX=3600 ;; esac
+FM_DEFERRED_REASONS=()
+FM_DEFER_SINCE=
+
+# 0 iff the turn-activity marker currently justifies holding actionable exits:
+# present, naming a configured captain-decision tool, stamped by a live session
+# pid, and (once deferral has begun) still inside the deferral cap.
+defer_marker_holds() {
+  local mfile="$STATE/.primary-turn-active" line tool rest pid
+  afk_present && return 1
+  [ -f "$mfile" ] || return 1
+  IFS= read -r line < "$mfile" 2>/dev/null || return 1
+  tool=${line%%$'\t'*}
+  [ -n "$tool" ] || return 1
+  case " $FM_WATCH_DEFER_TOOLS " in
+    *" $tool "*) ;;
+    *) return 1 ;;
+  esac
+  rest=${line#*$'\t'}
+  pid=${rest%%$'\t'*}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -n "$FM_DEFER_SINCE" ]; then
+    [ $(( $(date +%s) - FM_DEFER_SINCE )) -lt "$FM_WATCH_DEFER_MAX" ] || return 1
+  fi
+  return 0
+}
+
+# Print every deferred reason and end this cycle. All of them are already in
+# the durable queue; printing them makes the arm's collected output carry the
+# full story the way a single-wake exit always has.
+defer_flush_and_exit() {
+  local r
+  if [ "${#FM_DEFERRED_REASONS[@]}" -gt 0 ]; then
+    for r in "${FM_DEFERRED_REASONS[@]}"; do
+      printf '%s\n' "$r"
+    done
+  fi
+  exit 0
+}
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
+# Under an active captain-wait marker the exit is deferred instead (above):
+# the wake is queued, the reason is remembered for the eventual flush, and the
+# caller's loop continues. Callers therefore must treat wake() returning as
+# "keep supervising", which every call site does.
 wake() {
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  if defer_marker_holds; then
+    [ -n "$FM_DEFER_SINCE" ] || FM_DEFER_SINCE=$(date +%s)
+    local r dup=0
+    if [ "${#FM_DEFERRED_REASONS[@]}" -gt 0 ]; then
+      for r in "${FM_DEFERRED_REASONS[@]}"; do
+        [ "$r" = "$1" ] && dup=1
+      done
+    fi
+    [ "$dup" = 1 ] || FM_DEFERRED_REASONS+=("$1")
+    triage_log "deferred actionable wake (primary mid-turn on a captain-decision tool, ${#FM_DEFERRED_REASONS[@]} held): $1"
+    return 0
+  fi
+  if [ "${#FM_DEFERRED_REASONS[@]}" -gt 0 ]; then
+    local r
+    for r in "${FM_DEFERRED_REASONS[@]}"; do
+      printf '%s\n' "$r"
+    done
+  fi
   echo "$1"
   exit 0
 }
@@ -489,6 +579,9 @@ handle_paused_stale() {  # <window> <task> <hash>
     fm_wake_append stale "$win" "$reason" || exit 1
     pause_instance "$task" > "$rf"
     wake "$reason"
+    # wake() returns (rather than exiting) only under captain-wait deferral;
+    # the re-surface was queued and held, so do not also log it as absorbed.
+    return 0
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
@@ -950,6 +1043,14 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # Captain-wait deferral release: once wakes are held and the marker no longer
+  # justifies holding them (the turn ended, the tool changed, the session died,
+  # or the cap ran out), exit with everything deferred so the arm completes and
+  # the now-deliverable notification wakes the primary.
+  if [ "${#FM_DEFERRED_REASONS[@]}" -gt 0 ] && ! defer_marker_holds; then
+    defer_flush_and_exit
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is

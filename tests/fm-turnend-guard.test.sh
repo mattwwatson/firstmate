@@ -544,6 +544,181 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
+# --- hand-off pass (--notify-wake) ------------------------------------------
+#
+# Regression cover for the "last beat: 2s ago" false alarm
+# (fm-supervision-gap-on-captain-wait, observed 21-22/07/2026): on a
+# background-notify harness, every actionable watcher exit leaves seconds of
+# "no live watcher, fresh beacon, undrained queued wake" while the completed
+# arm task's notification is in flight. A Stop landing there is the normal
+# hand-off, not a lapse. The guard allows that state to end the turn exactly
+# once per queued wake and keeps every real-lapse signature blocking unchanged.
+
+run_hook_notify() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --notify-wake 2>&1
+}
+
+# The hand-off state the ledger shows after every actionable exit: in-flight
+# work, a beacon the watcher touched seconds ago, no lock holder, and the wake
+# it queued still undrained.
+make_handoff_state() {  # <dir> [seq]
+  local dir=$1 seq=${2:-1}
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  printf '%s\t%s\tsignal\ttask1.status\tsignal: task1.status\n' "$(date +%s)" "$seq" >> "$dir/state/.wake-queue"
+}
+
+test_hook_handoff_pass_allows_one_stop() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-pass")
+  make_handoff_state "$dir"
+  out=$(run_hook_notify "$dir" false); status=$?
+  expect_code 0 "$status" "first Stop in the hand-off must be allowed (undrained fresh wake = notification in flight)"
+  [ -z "$out" ] || fail "hand-off pass must be silent, got: $out"
+  [ -s "$dir/state/.turnend-handoff-pass" ] || fail "hand-off pass must be durably recorded"
+  out=$(run_hook_notify "$dir" false); status=$?
+  expect_code 2 "$status" "a second Stop with the same undrained wake must block (pass spent)"
+  assert_contains "$out" 'TURN WOULD END BLIND' "spent-pass block must carry the full banner"
+  pass "fm-turnend-guard: hand-off pass allows exactly one Stop per undrained wake"
+}
+
+test_hook_handoff_pass_requires_notify_flag() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-noflag")
+  make_handoff_state "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "without --notify-wake the hand-off state must block exactly as before"
+  assert_contains "$out" 'TURN WOULD END BLIND' "non-notify adapters must keep the unchanged banner"
+  pass "fm-turnend-guard: hand-off pass is scoped to --notify-wake adapters only"
+}
+
+test_hook_handoff_pass_requires_undrained_wake() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-empty-queue")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  : > "$dir/state/.wake-queue"
+  out=$(run_hook_notify "$dir" false); status=$?
+  expect_code 2 "$status" "an empty queue (the forgot-to-re-arm signature) must never earn a pass"
+  assert_contains "$out" 'TURN WOULD END BLIND' "real-lapse detection latency must be unchanged"
+  pass "fm-turnend-guard: drained queue still blocks immediately - no detection regression"
+}
+
+test_hook_handoff_pass_requires_fresh_beacon() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-stale-beacon")
+  make_handoff_state "$dir"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook_notify "$dir" false); status=$?
+  expect_code 2 "$status" "an aged lapse must block even with an undrained wake queued"
+  pass "fm-turnend-guard: hand-off pass demands the seconds-fresh beacon of a genuine hand-off"
+}
+
+test_hook_handoff_pass_blocked_while_afk() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-afk")
+  make_handoff_state "$dir"
+  : > "$dir/state/.afk"
+  out=$(run_hook_notify "$dir" false); status=$?
+  expect_code 2 "$status" "away mode owns triage; the hand-off pass must not fire there"
+  pass "fm-turnend-guard: hand-off pass never fires while away mode is active"
+}
+
+test_hook_new_wake_earns_new_pass() {
+  local dir status
+  dir=$(make_primary_dir "$TMP_ROOT/handoff-new-wake")
+  make_handoff_state "$dir" 1
+  run_hook_notify "$dir" false >/dev/null; status=$?
+  expect_code 0 "$status" "first wake's hand-off must pass"
+  run_hook_notify "$dir" false >/dev/null; status=$?
+  expect_code 2 "$status" "same wake must not pass twice"
+  make_handoff_state "$dir" 2
+  run_hook_notify "$dir" false >/dev/null; status=$?
+  expect_code 0 "$status" "a genuinely new queued wake must earn its own single pass"
+  run_hook_notify "$dir" false >/dev/null; status=$?
+  expect_code 2 "$status" "and that pass must also be one-shot"
+  pass "fm-turnend-guard: the pass is keyed per queued wake, never a standing allowance"
+}
+
+# --- turn-activity marker ----------------------------------------------------
+
+test_hook_clears_turn_activity_marker() {
+  local dir status
+  dir=$(make_primary_dir "$TMP_ROOT/marker-clear")
+  printf 'AskUserQuestion\t%s\t%s\n' "$$" "$(date +%s)" > "$dir/state/.primary-turn-active"
+  run_hook "$dir" false >/dev/null; status=$?
+  expect_code 0 "$status" "idle primary must still allow the stop"
+  [ ! -e "$dir/state/.primary-turn-active" ] || fail "an in-scope Stop must clear the turn-activity marker"
+  : > "$dir/state/task1.meta"
+  printf 'AskUserQuestion\t%s\t%s\n' "$$" "$(date +%s)" > "$dir/state/.primary-turn-active"
+  run_hook "$dir" false >/dev/null; status=$?
+  expect_code 2 "$status" "unsupervised in-flight work must still block"
+  [ ! -e "$dir/state/.primary-turn-active" ] || fail "a blocking Stop must also clear the turn-activity marker"
+  pass "fm-turnend-guard: every in-scope Stop clears the turn-activity marker"
+}
+
+test_hook_keeps_marker_outside_primary_scope() {
+  local base dir
+  base=$(make_primary_dir "$TMP_ROOT/marker-scope-base")
+  dir=$(make_crewmate_worktree_dir "$base" "$TMP_ROOT/marker-scope-worktree")
+  printf 'AskUserQuestion\t%s\t%s\n' "$$" "$(date +%s)" > "$dir/state/.primary-turn-active"
+  run_hook "$dir" false >/dev/null
+  [ -e "$dir/state/.primary-turn-active" ] || fail "an out-of-scope Stop must not touch another home's marker"
+  pass "fm-turnend-guard: marker clearing is scoped to a genuine primary checkout"
+}
+
+test_turn_stamp_writes_marker() {
+  local dir out status marker tool
+  dir=$(make_primary_dir "$TMP_ROOT/stamp-writes")
+  out=$(printf '{"tool_name":"AskUserQuestion"}' | FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" bash "$ROOT/bin/fm-turn-pretool-stamp.sh" 2>&1); status=$?
+  expect_code 0 "$status" "stamp must exit 0 (it may never block a tool call)"
+  [ -z "$out" ] || fail "stamp produced output: $out"
+  marker="$dir/state/.primary-turn-active"
+  [ -s "$marker" ] || fail "stamp must write the turn-activity marker"
+  tool=$(cut -f1 "$marker")
+  [ "$tool" = AskUserQuestion ] || fail "marker must record the tool name, got: $tool"
+  pass "fm-turn-pretool-stamp: records the tool about to run in the primary's turn"
+}
+
+test_turn_stamp_silent_outside_primary() {
+  local base dir status
+  base=$(make_primary_dir "$TMP_ROOT/stamp-scope-base")
+  dir=$(make_crewmate_worktree_dir "$base" "$TMP_ROOT/stamp-scope-worktree")
+  printf '{"tool_name":"AskUserQuestion"}' | FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" bash "$ROOT/bin/fm-turn-pretool-stamp.sh" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "stamp must fail open outside a primary checkout"
+  [ ! -e "$dir/state/.primary-turn-active" ] || fail "crewmate worktrees must never get a turn-activity marker"
+  pass "fm-turn-pretool-stamp: silent no-op in a crewmate/scout worktree"
+}
+
+test_turn_stamp_fails_open_without_jq() {
+  local dir out status fakebin tool tool_path
+  dir=$(make_primary_dir "$TMP_ROOT/stamp-nojq")
+  fakebin=$(fm_fakebin "$TMP_ROOT/stamp-nojq-fake")
+  for tool in bash sh git cat printf date uname stat mkdir dirname; do
+    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
+    ln -s "$tool_path" "$fakebin/$tool"
+  done
+  out=$(printf '{"tool_name":"AskUserQuestion"}' | PATH="$fakebin" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" bash "$ROOT/bin/fm-turn-pretool-stamp.sh" 2>&1); status=$?
+  expect_code 0 "$status" "stamp must fail open when jq is unavailable"
+  [ -z "$out" ] || fail "stamp produced output without jq: $out"
+  [ ! -e "$dir/state/.primary-turn-active" ] || fail "stamp must not guess a tool name without jq"
+  pass "fm-turn-pretool-stamp: fails open (no stamp, no block) when jq is missing"
+}
+
+test_settings_registers_turn_stamp_and_notify_wake() {
+  local settings stamp stop
+  settings="$ROOT/.claude/settings.json"
+  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
+  stamp=$(jq -r '[.hooks.PreToolUse[] | select(.matcher == null) | .hooks[].command] | first // empty' "$settings")
+  assert_contains "$stamp" 'fm-turn-pretool-stamp.sh' "an all-tools PreToolUse entry must invoke the turn stamp"
+  assert_contains "$stamp" 'CLAUDE_PROJECT_DIR' "the stamp must resolve via CLAUDE_PROJECT_DIR"
+  stop=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  assert_contains "$stop" 'notify-wake' "the Claude Stop hook must opt into the hand-off pass"
+  pass ".claude/settings.json: registers the turn stamp on all tools and --notify-wake on Stop"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -929,6 +1104,18 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_hook_handoff_pass_allows_one_stop
+test_hook_handoff_pass_requires_notify_flag
+test_hook_handoff_pass_requires_undrained_wake
+test_hook_handoff_pass_requires_fresh_beacon
+test_hook_handoff_pass_blocked_while_afk
+test_hook_new_wake_earns_new_pass
+test_hook_clears_turn_activity_marker
+test_hook_keeps_marker_outside_primary_scope
+test_turn_stamp_writes_marker
+test_turn_stamp_silent_outside_primary
+test_turn_stamp_fails_open_without_jq
+test_settings_registers_turn_stamp_and_notify_wake
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir

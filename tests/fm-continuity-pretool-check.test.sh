@@ -114,9 +114,9 @@ test_claude_hook_registration_preserves_stop_backstop() {
       | any(contains("fm-continuity-pretool-check.sh"))
   ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude settings omit the continuity PreToolUse hook"
   jq -e '
-    .hooks.Stop == [{"hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh"}]}]
+    .hooks.Stop == [{"hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --notify-wake"}]}]
   ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude Stop turn-end backstop changed"
-  pass "Claude wires the continuity gate while preserving the existing Stop backstop byte-for-byte"
+  pass "Claude wires the continuity gate while preserving the guarded Stop backstop byte-for-byte (--notify-wake is the hand-off pass opt-in, docs/turnend-guard.md)"
 }
 
 test_gate_scope_and_recovery_exceptions
