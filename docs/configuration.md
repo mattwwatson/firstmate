@@ -250,7 +250,7 @@ An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm 
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+The locked session-start bootstrap step also runs a best-effort project refresh through `fm-fleet-sync.sh`, covering clones under `projects/` and registered project paths outside it.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
@@ -485,7 +485,7 @@ FM_WEDGE_UNREADABLE_SURFACE_COUNT=3  # consecutive unreadable crew-state probes 
 FM_WATCH_DEFER_TOOLS=AskUserQuestion   # space-separated captain-decision tools whose live mid-turn marker defers actionable watcher exits (docs/watcher-continuity.md "Captain-wait deferral"); extend only with evidence
 FM_WATCH_DEFER_MAX=3600            # seconds a captain-wait deferral may hold actionable exits before reverting to exit-and-notify; bounds a leaked turn-activity marker
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
-FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort project refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count), counting clones and registered external paths
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_LANDED_PATCH_SCAN_LIMIT=1000          # most recent default-branch commits hashed by fm-teardown.sh's patch-id landed-work proof; 0 or a non-numeric value means unbounded, and truncation only makes teardown refuse
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
