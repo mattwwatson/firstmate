@@ -198,6 +198,11 @@ wait_for_exit() {
 # A background `bash -c ... &` child only shows its marker cmdline once its
 # exec completes; until then pgrep still sees the parent script's argv. Poll
 # until the pattern matches the pid so the assertions are exec-race-free.
+# The sandbox processes are spawned as `exec -a '<marker>' sleep 300` because
+# bash 5 (Linux CI) execs the final command of a -c string, which would replace
+# a plain `: marker; sleep 300` cmdline with `sleep 300` and lose the marker;
+# exec -a pins the marker into argv for the process's whole life on both
+# platforms.
 wait_for_cmdline() {
   local pattern=$1 pid=$2 i=0
   while [ "$i" -lt 50 ]; do
@@ -214,14 +219,14 @@ test_e2e_incident_reproduction() {
 
   # The captain-shaped VICTIM: rooted outside the task worktree, command line
   # matching the incident-shaped dev-server pattern.
-  bash -c ": ${marker}-concurrently dev-server; sleep 300" &
+  bash -c "exec -a '${marker}-concurrently dev-server' sleep 300" &
   victim=$!
   fm_test_track_pid "$victim"
   disown "$victim" 2>/dev/null || true
 
   # The crew's OWN dev server: command line carries the worktree path, PID
   # recorded the way the brief's cleanup rule instructs.
-  bash -c ": $WT_FIX/dev-server; sleep 300" &
+  bash -c "exec -a '$WT_FIX/dev-server' sleep 300" &
   own=$!
   fm_test_track_pid "$own"
   disown "$own" 2>/dev/null || true
