@@ -274,8 +274,12 @@ validate_pr_poll_cleanup() {
 remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  # The .bb-poll-warned markers are the watcher's one-shot dedupe for a
+  # Bitbucket poll's credential and visibility warnings (bin/fm-watch.sh);
+  # they are empty and carry no trust, so removal needs no validation.
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" \
+    "$state_dir/$id.bb-poll-warned.auth" "$state_dir/$id.bb-poll-warned.gone" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
