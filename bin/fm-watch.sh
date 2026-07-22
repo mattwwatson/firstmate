@@ -978,15 +978,37 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+        # The registration's provider tag selects which byte-static poll
+        # template this check must match and run (bin/fm-pr-lib.sh owns the
+        # mapping); every trust property still rests on the artifact
+        # validation against that one template.
+        if fm_pr_poll_task_template "$STATE" "$id" "$SCRIPT_DIR" \
+          && fm_pr_poll_artifacts_valid "$STATE" "$id" "$FM_PR_POLL_TASK_TEMPLATE"; then
           provider=$FM_PR_DATA_PROVIDER
           url=$FM_PR_DATA_URL
           host=$FM_PR_DATA_HOST
           path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          run_check_capture "$FM_PR_POLL_TASK_TEMPLATE" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # A Bitbucket poll also reports a credential or visibility problem,
+          # which is news exactly once: unlike merged it does not end the
+          # task, so without a marker it would wake firstmate every cycle
+          # forever. First report per task and kind wakes; the marker is
+          # removed with the task's other poll artifacts at teardown.
+          case "$out" in
+            bitbucket-auth-missing) bb_warned="$STATE/$id.bb-poll-warned.auth" ;;
+            bitbucket-pr-unreachable) bb_warned="$STATE/$id.bb-poll-warned.gone" ;;
+            *) bb_warned= ;;
+          esac
+          if [ -n "$bb_warned" ]; then
+            if [ -e "$bb_warned" ]; then
+              out=
+            else
+              : > "$bb_warned" || true
+            fi
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1

@@ -12,7 +12,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-TEMPLATE="$SCRIPT_DIR/fm-pr-poll.sh"
 LOG="$STATE/.pr-check-migration.log"
 QUARANTINE="$STATE/.pr-check-quarantine"
 MARKER="$STATE/.pr-check-migration-v1"
@@ -38,6 +37,16 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+
+# A task poll is canonical against its own provider's byte-static template,
+# selected from the registration's provider tag (bin/fm-pr-lib.sh owns the
+# mapping). A legacy record that names no readable provider fails selection
+# exactly as it fails validation, and is rebuilt or quarantined below.
+task_poll_canonical() {  # <task-id>
+  local id=$1
+  fm_pr_poll_task_template "$STATE" "$id" "$SCRIPT_DIR" || return 1
+  fm_pr_poll_artifacts_valid "$STATE" "$id" "$FM_PR_POLL_TASK_TEMPLATE"
+}
 
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
@@ -85,7 +94,7 @@ current_checks_authenticated() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    task_poll_canonical "$id" || return 1
   done
 }
 
@@ -375,7 +384,7 @@ migration_needed() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
+    if ! task_poll_canonical "$id"; then
       return 0
     fi
   done
@@ -392,7 +401,7 @@ unsafe_checks_absent() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    task_poll_canonical "$id" || return 1
   done
 }
 
@@ -716,7 +725,7 @@ remove_diagnostic_obligation() {
 
 canonical_terminal_success() {
   local id=$1
-  fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" \
+  task_poll_canonical "$id" \
     && quarantined_artifact_exists "$id" check
 }
 
@@ -794,7 +803,8 @@ canonical_repair_from_pending() {
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
+  fm_pr_poll_template_for_provider "$SCRIPT_DIR" "$provider" || return 1
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$FM_PR_POLL_TASK_TEMPLATE" || return 1
   fm_pr_poll_publish_prepared || return 1
   canonical_terminal_success "$id"
 }
@@ -1024,7 +1034,7 @@ if migration_needed; then
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    task_poll_canonical "$id" && continue
 
     if fm_pr_task_id_valid "$id"; then
       prefix=$id
@@ -1047,7 +1057,8 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
+          && fm_pr_poll_template_for_provider "$SCRIPT_DIR" "$provider" \
+          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$FM_PR_POLL_TASK_TEMPLATE" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then
           :

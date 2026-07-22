@@ -4,13 +4,14 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub,
+# workspace/repository on Bitbucket Cloud, and an arbitrarily nested
+# group/subgroup/project namespace on GitLab. A GitLab project can sit at any
+# depth, so no owner/repository pair can address one and the sidecar carries
+# the whole path instead. GitLab also runs on self-hosted instances, so the
+# host is part of that identity rather than a constant. Every consumer
+# re-derives the identity from the stored URL and refuses any record whose
+# parts do not reconstruct that exact URL.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -57,6 +58,10 @@ FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
+# Consumed by bin/fm-pr-check.sh, bin/fm-watch.sh, and
+# bin/fm-pr-check-migrate.sh after the template-selection helpers below set it.
+# shellcheck disable=SC2034
+FM_PR_POLL_TASK_TEMPLATE=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -80,16 +85,17 @@ fm_task_id_creation_valid() {
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
-# github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
-# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
+# github.com and bitbucket.org are refused here even though their shapes are
+# otherwise valid: each is another forge's own host and never a GitLab
+# instance, so a URL like https://github.com/o/r/-/merge_requests/1 (a typo'd
+# or spoofed URL on that forge) would otherwise be armed as a GitLab watch
+# that can never succeed.
 fm_pr_gitlab_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
+  [ "$host" != github.com ] && [ "$host" != bitbucket.org ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -126,13 +132,15 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, Bitbucket gets its own workspace and repository-slug rules, and
+# GitLab gets its own host and namespace rules rather than a loosened GitHub
+# rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A bitbucket or
+# gitlab URL leaves them empty; the merge path refuses to merge on either
+# forge (read-only Bitbucket credential by design, GitLab merge parity not
+# implemented) rather than merging anything.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -159,6 +167,24 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  # Bitbucket Cloud is a single-host forge like GitHub, so the host is the
+  # constant bitbucket.org and the path is exactly workspace/repository.
+  # Workspace IDs are lowercase letters, digits, hyphens, and underscores;
+  # Bitbucket documents no maximum workspace-ID length anywhere, so 64 is a
+  # defensive bound. Repository slugs are ASCII alphanumerics plus "._-" and
+  # capped at 62 characters by Bitbucket. The web URL uses the hyphenated
+  # /pull-requests/ segment while the API uses /pullrequests/; neither is
+  # derived from the other by substitution anywhere in this repo.
+  pattern='^https://bitbucket\.org/([a-z0-9_-]{1,64})/([A-Za-z0-9._-]{1,62})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -179,6 +205,39 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# Map a provider to the byte-static poll template the watcher compares against
+# and executes, into FM_PR_POLL_TASK_TEMPLATE. GitHub and GitLab share
+# bin/fm-pr-poll.sh, which shells out to their credential-owning CLIs.
+# Bitbucket has no such CLI, so its poll is its own byte-static program
+# (bin/fm-bb-pr-poll.sh): it resolves a credential and parses JSON, and keeping
+# those bytes separate means a Bitbucket change can never alter the audited
+# gh/glab poll's behavior.
+fm_pr_poll_template_for_provider() {
+  local script_dir=$1 provider=$2
+  # shellcheck disable=SC2034 # consumed by the callers named at the declaration
+  FM_PR_POLL_TASK_TEMPLATE=
+  # shellcheck disable=SC2034
+  case "$provider" in
+    github|gitlab) FM_PR_POLL_TASK_TEMPLATE="$script_dir/fm-pr-poll.sh" ;;
+    bitbucket) FM_PR_POLL_TASK_TEMPLATE="$script_dir/fm-bb-pr-poll.sh" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Select the poll template for an armed task from its registration's provider
+# tag, into FM_PR_POLL_TASK_TEMPLATE. Selection only chooses WHICH byte
+# comparison fm_pr_poll_artifacts_valid attempts; every trust property still
+# rests on that validation, so a doctored provider tag can at worst select a
+# template the published check's bytes then fail to match.
+fm_pr_poll_task_template() {
+  local state=$1 id=$2 script_dir=$3
+  # shellcheck disable=SC2034 # consumed by the callers named at the declaration
+  FM_PR_POLL_TASK_TEMPLATE=
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_registration_parse "$state/$id.pr-poll-registration" || return 1
+  fm_pr_poll_template_for_provider "$script_dir" "$FM_PR_REG_PROVIDER"
 }
 
 fm_pr_file_mode() {

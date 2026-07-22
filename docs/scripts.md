@@ -71,7 +71,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-forge-credential.sh` | Resolve firstmate's own read-only forge credential from the login keychain and make read-only forge API calls with it |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll and provenance publication |
-| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
+| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated GitHub/GitLab poll sidecars   |
+| `fm-bb-pr-poll.sh`       | Provide the byte-static watcher program for validated Bitbucket poll sidecars       |
+| `fm-bb-build-status.sh`  | Read a Bitbucket pull request's build verdict (green, red, pending, or none)        |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
