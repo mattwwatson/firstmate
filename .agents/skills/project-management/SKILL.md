@@ -43,6 +43,7 @@ Destructive, irreversible, and security-sensitive decisions still require captai
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Between cloning and adding that entry, confirm the git identity suits the remote (see "Check the git identity suits the remote").
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -52,10 +53,18 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
+After remote creation succeeds, clone it locally, confirm the git identity suits the remote (see "Check the git identity suits the remote"), add the registry entry, and initialize it according to its delivery mode.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+
+## Check the git identity suits the remote
+
+A clone under `projects/` does not inherit any `includeIf gitdir:` identity the captain's global config scopes to their own work trees, so a repo enrolled here can resolve to the wrong identity: misattributed commits and a push signed by the wrong key, with nothing reporting it until it surfaces in a commit log or a rejected push long after the work is done.
+After cloning and before adding the registry entry, run `bin/fm-identity-check.sh projects/<name>`; its header owns the exit codes and mechanics.
+A non-zero result is a refusal to enrol, not an obstacle to bypass: relay the concrete mismatch it reports - the email that resolved, the remote, and the identity the captain probably wanted - and get the captain's decision.
+Only on the captain's explicit word, apply the offered fix with `bin/fm-identity-check.sh --apply projects/<name>`, which writes the per-repo identity into that one clone; never write it silently.
+This guards enrolment only; it never audits already-enrolled projects and never rewrites an existing project's identity as a side effect.
 
 ## Initialize
 
