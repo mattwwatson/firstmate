@@ -67,7 +67,8 @@ test_project_management_owner_covers_guarded_operations() {
     '`no-mistakes`' \
     '`direct-PR`' \
     '`local-only`' \
-    'Default it off' \
+    'default them all off' \
+    'granted independently' \
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
     'Never issue a raw removal command from Firstmate.' \

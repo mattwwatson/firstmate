@@ -1,24 +1,43 @@
 #!/usr/bin/env bash
-# Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
-# Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# Resolve a project's delivery mode and autonomy grants from the data/projects.md registry.
+# Prints two words to stdout: "<mode> <grants>" where mode is one of
+# no-mistakes|direct-PR|local-only and grants is a canonically ordered comma list
+# of the granted names, or "none".
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
-#   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
-#   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> - <desc> (added <date>)                    -> no-mistakes none  (legacy default)
+#   - <name> [<mode>] - <desc> (added <date>)            -> <mode> none
+#   - <name> [<mode> +yolo] - <desc> (added <date>)      -> <mode> findings,merge,local-merge
+#   - <name> [<mode> +yolo:<g>[,<g>]] - <desc> (added ..)-> <mode> <those grants only>
 #
 # mode = how a finished change reaches main:
-#   no-mistakes  full pipeline -> PR -> captain merge (default)
-#   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
-#   local-only   local branch, no remote/PR -> captain approve -> guarded local merge
-# yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
-#   ask-user findings, local-only merge approval) without checking the captain - except
-#   anything destructive/irreversible/security-sensitive, which still escalates.
+#   no-mistakes  full pipeline -> PR -> merge by the configured authority (default)
+#   direct-PR    push + PR via gh-axi, no pipeline -> merge by the configured authority
+#   local-only   local branch, no remote/PR -> approval -> guarded local merge
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
-# to stderr, so a typo never silently drops the gate.
+# grants (orthogonal to mode) = which routine approvals firstmate may make itself,
+# without checking the captain. They are INDEPENDENT: holding one never implies another.
+#   findings      answer no-mistakes ask-user/review findings
+#   merge         merge a green PR
+#   local-merge   approve a local-only branch for the guarded local merge
+# Bare `+yolo` is shorthand for all three, so every registry line written before
+# grants were split keeps exactly the meaning it had. Repeat the flag
+# (`+yolo:merge +yolo:findings`) or use a comma list (`+yolo:merge,findings`).
+#
+# No grant ever covers destructive, irreversible, or security-sensitive decisions,
+# and `merge` never covers a red PR; both always escalate to the captain.
+#
+# Everything unrecognised resolves to the LEAST permission and warns to stderr: a
+# missing registry, an absent project, an unknown mode, and an unknown grant name
+# all grant nothing, so a typo can never widen authority.
+#
 # Usage: fm-project-mode.sh <project-name>
+#        fm-project-mode.sh <project-name> --grant <findings|merge|local-merge>
+#
+# --grant is the interface for asking a permission question: it prints nothing and
+# exits 0 when the grant is held, 1 when it is not, and 2 on a usage error or an
+# unknown grant name. Both non-zero exits mean "not granted", so `if ... ; then`
+# denies by default on any mistake.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,41 +45,143 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
-NAME=${1:?usage: fm-project-mode.sh <project-name>}
 
-if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
-  exit 0
+NAME=
+QUERY=
+# Whether --grant was supplied at all, tracked apart from its value: an empty
+# grant name is a caller mistake and must be refused, not read as "no query".
+QUERY_SET=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --grant)
+      [ $# -ge 2 ] || { echo "usage: fm-project-mode.sh <project-name> [--grant <name>]" >&2; exit 2; }
+      QUERY=$2
+      QUERY_SET=1
+      shift 2
+      ;;
+    -*) echo "error: unknown option \"$1\"" >&2; exit 2 ;;
+    *)
+      [ -z "$NAME" ] || { echo "error: unexpected argument \"$1\"" >&2; exit 2; }
+      NAME=$1
+      shift
+      ;;
+  esac
+done
+[ -n "$NAME" ] || { echo "usage: fm-project-mode.sh <project-name> [--grant <name>]" >&2; exit 2; }
+
+# An unknown grant name is a caller mistake, not a denial: refuse it loudly with
+# its own exit code so it can never be mistaken for a resolved "not granted".
+if [ "$QUERY_SET" = 1 ]; then
+  case "$QUERY" in
+    findings|merge|local-merge) ;;
+    *) echo "error: unknown grant \"$QUERY\"; expected findings, merge, or local-merge" >&2; exit 2 ;;
+  esac
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+G_FINDINGS=off
+G_MERGE=off
+G_LOCAL_MERGE=off
+
+# grant_apply <name> -> enables one grant, or returns 1 if the name is not one.
+grant_apply() {
+  case "$1" in
+    findings) G_FINDINGS=on ;;
+    merge) G_MERGE=on ;;
+    local-merge) G_LOCAL_MERGE=on ;;
+    *) return 1 ;;
+  esac
+}
+
+# emit <mode> -> prints the resolved line, or answers a --grant query.
+emit() {
+  local mode=$1 grants=""
+  if [ "$G_FINDINGS" = on ]; then grants="findings"; fi
+  if [ "$G_MERGE" = on ]; then grants="${grants:+$grants,}merge"; fi
+  if [ "$G_LOCAL_MERGE" = on ]; then grants="${grants:+$grants,}local-merge"; fi
+  [ -n "$grants" ] || grants=none
+
+  if [ "$QUERY_SET" = 1 ]; then
+    case "$QUERY" in
+      findings) [ "$G_FINDINGS" = on ] || exit 1 ;;
+      merge) [ "$G_MERGE" = on ] || exit 1 ;;
+      local-merge) [ "$G_LOCAL_MERGE" = on ] || exit 1 ;;
+    esac
+    exit 0
+  fi
+  echo "$mode $grants"
+  exit 0
+}
+
+if [ ! -f "$REG" ]; then
+  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes with no grants" >&2
+  emit no-mistakes
+fi
+
+# awk emits "<mode><TAB><flag tokens>" (one line) or nothing if the project is absent.
+# Only the first bracket word can name the mode; every "+" word is a flag token.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="no-mistakes"; toks="";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      for (j=1; j<=k; j++) {
+        if (a[j] == "") continue;
+        if (substr(a[j], 1, 1) == "+") { toks = toks (toks==""?"":" ") a[j]; continue }
+        if (j == 1) mode = a[j];
+      }
     }
-    print mode, yolo; exit
+    printf "%s\t%s\n", mode, toks; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
-  exit 0
+  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes with no grants" >&2
+  emit no-mistakes
 fi
 
-mode=${parsed%% *}
-yolo=${parsed##* }
+mode=${parsed%%	*}
+toks=${parsed#*	}
 case "$mode" in
   no-mistakes|direct-PR|local-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  *)
+    echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes with no grants" >&2
+    emit no-mistakes
+    ;;
 esac
-case "$yolo" in on|off) ;; *) yolo=off ;; esac
-echo "$mode $yolo"
+
+# Walk the flag tokens. An unrecognised token or grant name is dropped with a
+# warning: it never widens permission, and it never voids a valid sibling.
+# Word splitting is wanted here; globbing is not, or a malformed flag holding a
+# "*" would expand against the working directory instead of being reported.
+set -f
+for tok in $toks; do
+  case "$tok" in
+    +yolo)
+      grant_apply findings
+      grant_apply merge
+      grant_apply local-merge
+      ;;
+    +yolo:*)
+      rest=${tok#+yolo:}
+      if [ -z "$rest" ]; then
+        echo "warn: empty grant list in \"$tok\" for $NAME; granting nothing from it" >&2
+        continue
+      fi
+      while [ -n "$rest" ]; do
+        one=${rest%%,*}
+        if [ "$one" = "$rest" ]; then rest=""; else rest=${rest#*,}; fi
+        if [ -z "$one" ]; then continue; fi
+        grant_apply "$one" || echo "warn: unknown autonomy grant \"$one\" for $NAME; granting nothing from it" >&2
+      done
+      ;;
+    *)
+      echo "warn: unknown registry flag \"$tok\" for $NAME; granting nothing from it" >&2
+      ;;
+  esac
+done
+set +f
+
+emit "$mode"

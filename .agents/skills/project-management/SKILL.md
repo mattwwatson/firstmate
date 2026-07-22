@@ -34,9 +34,10 @@ Choose the delivery mode when adding or creating the project:
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
-The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
-Default it off, and enable it only on the captain's explicit instruction.
-Destructive, irreversible, and security-sensitive decisions still require captain approval when it is on.
+The optional autonomy grants change routine approval authority but do not change the delivery mode.
+`findings`, `merge`, and `local-merge` are granted independently, so a captain who delegates one keeps the others; bare `+yolo` grants all three.
+Confirm which grants the captain intends rather than assuming a single posture, default them all off, and add them only on the captain's explicit instruction.
+Destructive, irreversible, and security-sensitive decisions still require captain approval under every combination of grants.
 
 ## Add or clone an existing project
 
