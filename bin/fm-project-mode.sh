@@ -19,7 +19,9 @@
 # never grants. The path must be absolute or start with "~/" (expanded to $HOME)
 # and cannot contain whitespace (the registry line is whitespace-tokenized); a
 # path that is neither is ignored with a warning, so it can never resolve
-# against an accidental working directory. It combines freely with the other
+# against an accidental working directory. A line carrying more than one usable
+# +path token resolves to NO registered path with a warning - the resolver
+# refuses to guess which path was meant. It combines freely with the other
 # bracket tokens.
 #
 # mode = how a finished change reaches main:
@@ -235,12 +237,13 @@ emit() {
 # resolve_name <name> -> parses the entry, setting MODE, the G_* grants,
 # PERSONA, and REG_PATH. Returns 1 when the project is absent from the registry.
 resolve_name() {
-  local n=$1 parsed mode toks tok rest one p rawp expanded
+  local n=$1 parsed mode toks tok rest one p rawp expanded path_voided
   G_FINDINGS=off
   G_MERGE=off
   G_LOCAL_MERGE=off
   PERSONA=none
   REG_PATH=
+  path_voided=0
   MODE=no-mistakes
 
   # awk emits "<mode><TAB><flag tokens>" (one line) or nothing if the project is
@@ -338,8 +341,10 @@ resolve_name() {
           echo "warn: registered path \"$rawp\" for $n is not absolute; ignoring it" >&2
           continue
         fi
-        if [ -n "$REG_PATH" ]; then
-          echo "warn: duplicate +path token \"$tok\" for $n; keeping the first path" >&2
+        if [ "$path_voided" = 1 ] || [ -n "$REG_PATH" ]; then
+          echo "warn: duplicate +path token \"$tok\" for $n; refusing to guess which path was meant - using no registered path" >&2
+          REG_PATH=
+          path_voided=1
           continue
         fi
         REG_PATH=$expanded

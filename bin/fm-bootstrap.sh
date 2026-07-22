@@ -145,10 +145,8 @@ fleet_sync_origin_backed_project_count() {
     [ -n "$path" ] || continue
     [ -d "$path" ] || continue
     path_phys=$(cd "$path" && pwd -P) || path_phys=$path
-    if [ -n "$projects_phys" ]; then
-      case "$path_phys" in
-        "$projects_phys"/*) continue ;;
-      esac
+    if [ -n "$projects_phys" ] && [ "${path_phys%/*}" = "$projects_phys" ]; then
+      continue
     fi
     git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
     git -C "$path" remote get-url origin >/dev/null 2>&1 || continue

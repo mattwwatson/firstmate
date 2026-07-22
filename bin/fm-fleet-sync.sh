@@ -453,10 +453,13 @@ fi
 
 # Registered projects living OUTSIDE the projects dir: follow every registry
 # entry carrying an explicit +path (bin/fm-project-mode.sh owns the grammar).
-# A path that physically resolves under the projects dir was already covered by
-# the clone loop above, so it is skipped rather than processed twice. A missing
-# path gets its own loud per-project diagnostic; everything else goes through
-# the same fast-forward-only sync_project as a clone.
+# A path that physically resolves to a DIRECT child of the projects dir was
+# already covered by the clone loop above (which iterates direct children
+# only), so it is skipped rather than processed twice; a path nested deeper
+# under the projects dir is NOT reached by that loop, so it is followed here
+# like any other registered path. A missing path gets its own loud per-project
+# diagnostic; everything else goes through the same fast-forward-only
+# sync_project as a clone.
 projects_phys=""
 if [ -d "$PROJECTS" ]; then
   projects_phys=$(cd "$PROJECTS" && pwd -P) || projects_phys=""
@@ -469,10 +472,8 @@ while IFS='	' read -r name path; do
     continue
   fi
   path_phys=$(cd "$path" && pwd -P) || path_phys=$path
-  if [ -n "$projects_phys" ]; then
-    case "$path_phys" in
-      "$projects_phys"/*) continue ;;
-    esac
+  if [ -n "$projects_phys" ] && [ "${path_phys%/*}" = "$projects_phys" ]; then
+    continue
   fi
   sync_project "$path" "$name"
 done < <("$FM_ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null || true)

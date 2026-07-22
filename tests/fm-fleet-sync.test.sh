@@ -556,6 +556,29 @@ test_registered_path_inside_projects_not_double_synced() {
   pass "a registered path inside projects/ is not processed twice"
 }
 
+test_registered_nested_path_under_projects_syncs() {
+  local home nested out
+  home=$(new_home)
+  nested=$(build_pair_at "$home" nested "$home/projects/group/nested")
+  advance_origin "$home" nested C1
+  build_pair "$home" direct >/dev/null
+  advance_origin "$home" direct C1
+  register_line "$home" \
+    "- nested [no-mistakes +path:$home/projects/group/nested] - nested (added 2026-07-23)" \
+    "- direct [no-mistakes +path:$home/projects/direct] - direct child (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "nested: synced" \
+    "a path registered deeper under projects/ must be refreshed by the registered sweep"
+  [ "$(head_sha "$nested")" = "$(git -C "$nested" rev-parse origin/main)" ] \
+    || fail "nested registered clone was not fast-forwarded"
+  [ "$(printf '%s\n' "$out" | grep -c '^direct:')" = "1" ] \
+    || fail "a direct-child registered path must still not be processed twice, got: $out"
+  assert_contains "$out" "direct: synced" "the direct-child clone still syncs once"
+  pass "a registered path deeper under projects/ is followed; direct children still sync once"
+}
+
 test_external_sweep_runs_without_projects_dir() {
   local home clone out
   # Deliberately NOT new_home: this home must have no projects/ dir at all.
@@ -600,6 +623,26 @@ test_bootstrap_relays_external_outcomes() {
   assert_contains "$out" "FLEET_SYNC: extgone: skipped: registered path" \
     "bootstrap relays a missing external path diagnostic"
   pass "bootstrap relays registered-external fleet-sync outcomes"
+}
+
+test_bootstrap_relays_external_outcomes_without_projects_dir() {
+  local home clone out
+  # Deliberately NOT new_home: this home must have no projects/ dir at all.
+  home="$TMP_ROOT/home-boot-no-projects-dir"
+  mkdir -p "$home"
+  clone=$(build_pair_at "$home" bootsolo "$home/elsewhere/bootsolo")
+  advance_origin "$home" bootsolo C1
+  printf 'dirty\n' >> "$clone/file.txt"
+  register_line "$home" "- bootsolo [no-mistakes +path:$home/elsewhere/bootsolo] - dirty external (added 2026-07-23)"
+  register_line "$home" "- bootgone [no-mistakes +path:$home/elsewhere/bootgone] - missing external (added 2026-07-23)"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: bootsolo: STUCK:" \
+    "bootstrap must run the fleet refresh in a home with no clones dir"
+  assert_contains "$out" "FLEET_SYNC: bootgone: skipped: registered path" \
+    "bootstrap relays the missing-path diagnostic with no clones dir"
+  pass "bootstrap runs and relays the fleet refresh with no clones dir but registered paths"
 }
 
 test_bootstrap_relays_recovered_and_stuck() {
@@ -777,10 +820,12 @@ test_registered_external_non_repo_diagnosed
 test_registered_external_dirty_is_stuck_untouched
 test_registered_external_no_origin_skipped
 test_registered_path_inside_projects_not_double_synced
+test_registered_nested_path_under_projects_syncs
 test_external_sweep_runs_without_projects_dir
 test_single_project_by_registered_external_name_resolves
 test_bootstrap_relays_recovered_and_stuck
 test_bootstrap_relays_external_outcomes
+test_bootstrap_relays_external_outcomes_without_projects_dir
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal

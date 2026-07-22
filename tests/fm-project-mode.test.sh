@@ -370,6 +370,21 @@ test_unknown_mode_drops_the_path_too() {
   pass "an unrecognised mode resolves to least permission, path included"
 }
 
+test_duplicate_path_tokens_void_the_path() {
+  local home out status err
+  home=$(registry '- dup [no-mistakes +path:/somewhere/a +path:/somewhere/b +path:/somewhere/c] - ambiguous (added 2026-07-23)')
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" dup --path 2>/dev/null) && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "duplicate +path tokens must resolve to no registered path, got exit $status"
+  [ -z "$out" ] || fail "duplicate +path tokens must print no path, got \"$out\""
+  err=$(resolve_err "$home" dup)
+  assert_contains "$err" "duplicate +path" "duplicate +path tokens must be reported"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null)
+  [ -z "$out" ] || fail "a duplicate-path entry must be absent from --list-paths, got \"$out\""
+  [ "$(resolve "$home" dup)" = "no-mistakes none" ] \
+    || fail "duplicate +path tokens must not disturb mode or grants, got: $(resolve "$home" dup)"
+  pass "duplicate +path tokens void the registered path entirely, refusing to guess"
+}
+
 test_list_paths_lists_only_usable_entries() {
   local home out
   home=$(registry \
@@ -431,6 +446,7 @@ test_path_token_expands_tilde
 test_path_query_without_a_path_exits_one_silently
 test_relative_and_empty_paths_are_dropped_with_warning
 test_unknown_mode_drops_the_path_too
+test_duplicate_path_tokens_void_the_path
 test_list_paths_lists_only_usable_entries
 test_list_paths_refuses_extra_arguments
 test_every_caller_reads_the_field_it_intends
