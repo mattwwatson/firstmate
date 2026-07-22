@@ -672,6 +672,9 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   # bash the injected failure cannot abort the spawn at all. fm-spawn.sh runs
   # under `env bash` (its shebang), so probe the same resolution and skip where
   # the abort behavior is absent instead of failing on the shell's gap.
+  # The single-quoted $1 is a positional parameter of the inner bash -c probe,
+  # deliberately not expanded by the outer shell.
+  # shellcheck disable=SC2016
   if env bash -c 'set -eu; { echo probe; } > "$1" 2>/dev/null; exit 0' probe "$TMP_ROOT" 2>/dev/null; then
     echo "skip: env bash survives a failed group-command redirection under errexit (bash 3.2 gap); the meta-write abort cannot fire"
     return 0
