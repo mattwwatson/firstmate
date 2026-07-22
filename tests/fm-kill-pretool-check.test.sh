@@ -195,6 +195,19 @@ wait_for_exit() {
   return 1
 }
 
+# A background `bash -c ... &` child only shows its marker cmdline once its
+# exec completes; until then pgrep still sees the parent script's argv. Poll
+# until the pattern matches the pid so the assertions are exec-race-free.
+wait_for_cmdline() {
+  local pattern=$1 pid=$2 i=0
+  while [ "$i" -lt 50 ]; do
+    if pgrep -f "$pattern" | grep -qx "$pid"; then return 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_e2e_incident_reproduction() {
   local marker pattern victim own out rc
   marker="fm-kill-guard-e2e-$$"
@@ -217,7 +230,7 @@ test_e2e_incident_reproduction() {
   # HAZARD PROOF: the broad name-pattern matches the victim, a process rooted
   # entirely outside the worktree. An unguarded pkill would have killed it.
   pattern="${marker}-concurrently.*dev"
-  pgrep -f "$pattern" | grep -qx "$victim" \
+  wait_for_cmdline "$pattern" "$victim" \
     || fail "hazard did not reproduce: broad pattern must match the outside victim process"
 
   # THE GUARD: the exact incident-shaped command is denied before execution.
@@ -231,6 +244,8 @@ test_e2e_incident_reproduction() {
     || fail "guard must allow kill-by-recorded-PID teardown"
   "$CHECK" --claude --worktree "$WT_FIX" --command "pkill -f '$WT_FIX/dev-server'" \
     || fail "guard must allow the worktree-scoped pattern teardown"
+  wait_for_cmdline "$WT_FIX/dev-server" "$own" \
+    || fail "own dev server's cmdline never became visible for the scoped teardown"
   pkill -f "$WT_FIX/dev-server" || true
   wait_for_exit "$own" || fail "worktree-scoped teardown did not stop the crew's own dev server"
   kill -0 "$victim" 2>/dev/null \
