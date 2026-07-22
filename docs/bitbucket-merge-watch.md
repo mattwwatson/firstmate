@@ -141,19 +141,20 @@ A read-only credential keeps the whole path dormant because the forge itself ans
 
 The protocol handling follows section 8.4 of the parity investigation and is pinned case-by-case by `tests/fm-bb-pr-merge.test.sh` against stubbed HTTP:
 
-- Success is reported ONLY on a pull-request state read back from the API as exactly `MERGED`; a 200 whose read-back is not `MERGED` is reported as a failure.
+- Success is reported ONLY on a pull-request state read back from the API as exactly `MERGED`; a 200 whose read-back is a definite state other than `MERGED` is reported as a failure, while a confirmation read-back that itself fails after a 200 or a task `SUCCESS` is a retry-later outcome, because the merge likely completed but is not confirmed.
 - A 202 validates its `Location` header down to this pull request's own `merge/task-status/{id}` endpoint on `api.bitbucket.org` and polls it (`task_status` `PENDING` until `SUCCESS`) within a bounded number of polls before the same read-back confirmation; a foreign or malformed location is never followed.
+- The resolver's curl requests run with `--globoff`, so a task id carrying raw braces polls the exact endpoint instead of being rewritten by curl's URL globbing.
 - A 409 (a ref moved underneath the merge) is reported for inspection and never retried blindly.
 - A 429 backs off using `Retry-After` when present, bounded in attempts and per-wait seconds.
 - Bitbucket's non-standard 555 (merge took too long) and an unanswered POST are settled by reading the state back: `MERGED` confirms, anything else is a retry-later outcome, never a blind retry and never an assumed failure.
 - The strategy defaults to squash, must be one of the six documented names, and is checked against the pull request's `source.branch.merge_strategies` when readable: an excluded strategy refuses naming the permitted list rather than silently switching.
-- The build gate above runs inside the merge script, so a red or pending verdict refuses even when the script is invoked directly.
+- The build gate above runs inside the merge script, so a red or pending verdict refuses even when the script is invoked directly; the pull-request state is read first, so an already-`MERGED` pull request reports success without a build read, and the gate refuses only where a real merge attempt would follow.
 
 Merge capability is detected from the credential's REAL scopes, not assumed from configuration: `bin/fm-forge-credential.sh merge-capable` reads the scope list a 403 rejection of `GET /2.0/user` names in `error.detail.granted` (the documented probe; firstmate's recommended credential deliberately lacks the account read scope, so the probe reliably 403s) and answers `yes`, `no`, or `unknown` without guessing.
 The mismatch warning fires at exactly two moments, per the capability-checked decision of 22/07/2026: session-start bootstrap prints a `FORGE_CREDENTIAL:` line naming every Bitbucket project whose `merge` grant the credential provably cannot honor, and `bin/fm-project-mode.sh` warns on a granted `--grant merge` query for such a project.
 A read-only credential with no merge grants anywhere stays silent - that is a healthy fleet shape, not a diagnostic - and an unprovable scope list warns nowhere, because the merge attempt itself still fails closed at the forge.
 
-Evidence for this stage is the stubbed suite (`bash tests/fm-bb-pr-merge.test.sh`, 24 cases, all passing on 23/07/2026, macOS bash 3.2/Python 3.9.6 toolchain as recorded above); no live merge was performed because this home's credential is read-only and the captain merges every pull request himself.
+Evidence for this stage is the stubbed suite (`bash tests/fm-bb-pr-merge.test.sh`, 26 cases, all passing on 23/07/2026, macOS bash 3.2/Python 3.9.6 toolchain as recorded above); no live merge was performed because this home's credential is read-only and the captain merges every pull request himself.
 
 ### Deferred live smoke test
 

@@ -220,6 +220,33 @@ test_200_without_merged_readback_refuses_success() {
   pass "a 200 whose read-back is not MERGED is a failure, never a success"
 }
 
+test_failed_readback_after_success_is_retry_later() {
+  local dir out rc
+  dir=$(make_case readback-failed-200)
+  set +e
+  out=$(FAKE_BB_PR_BODY_1=$(pr_body OPEN) FAKE_BB_PR_BODY_2='not json' \
+    run_with_fakes "$dir" "$BB_MERGE" "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "a 200 whose read-back failed must be retry-later, not a hard failure"
+  assert_contains "$out" 'likely completed' "the failed read-back did not say the merge likely completed"
+  assert_contains "$out" 'retry later' "the failed read-back did not say retry later"
+  assert_not_contains "$out" "merged: $BB_URL" "an unconfirmed merge was reported as merged"
+
+  dir=$(make_case readback-failed-202)
+  set +e
+  out=$(FAKE_BB_MERGE_STATUS=202 FAKE_BB_MERGE_LOCATION="$TASK_LOCATION" \
+    FAKE_BB_TASK_BODY_1='{"task_status": "SUCCESS"}' \
+    FAKE_BB_PR_BODY_1=$(pr_body OPEN) FAKE_BB_PR_BODY_2='not json' \
+    run_with_fakes "$dir" "$BB_MERGE" "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "a task SUCCESS whose read-back failed must be retry-later, not a hard failure"
+  assert_contains "$out" 'likely completed' "the failed 202 read-back did not say the merge likely completed"
+  assert_not_contains "$out" "merged: $BB_URL" "an unconfirmed async merge was reported as merged"
+  pass "a failed confirmation read-back after 200 or task SUCCESS is retry-later, never success or hard failure"
+}
+
 test_202_polls_task_status_to_merged() {
   local dir out rc
   dir=$(make_case task-poll-success)
@@ -237,6 +264,26 @@ test_202_polls_task_status_to_merged() {
     || fail "the task-status endpoint was not polled through PENDING"
   assert_no_credential_leak "$out" "the async merge output"
   pass "a 202 polls its task-status endpoint through PENDING to SUCCESS and then confirms MERGED"
+}
+
+test_202_raw_brace_task_location_polls_the_exact_endpoint() {
+  local dir out rc
+  dir=$(make_case raw-brace-location)
+  set +e
+  out=$(FAKE_BB_MERGE_STATUS=202 \
+    FAKE_BB_MERGE_LOCATION='https://api.bitbucket.org/2.0/repositories/mattw_watson/hexbattle/pullrequests/12/merge/task-status/{de305d54-75b4-431b-adb2-eb6b9e546014}' \
+    FAKE_BB_TASK_BODY_1='{"task_status": "SUCCESS"}' \
+    FAKE_BB_PR_BODY_1=$(pr_body OPEN) FAKE_BB_PR_BODY_2=$(pr_body MERGED) \
+    run_with_fakes "$dir" "$BB_MERGE" "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a raw-brace task id should poll to SUCCESS and confirm (got: $out)"
+  assert_contains "$out" "merged: $BB_URL" "the raw-brace task poll did not report the merge"
+  grep -q 'task-status/{de305d54-75b4-431b-adb2-eb6b9e546014}' "$dir/curl-argv" \
+    || fail "the raw-brace task id did not reach curl verbatim"
+  grep -q 'globoff.*task-status/{' "$dir/curl-argv" \
+    || fail "the raw-brace task poll did not turn curl globbing off"
+  pass "a raw-brace task location polls the exact endpoint with curl globbing off"
 }
 
 test_202_task_failure_reports_the_reason() {
@@ -454,12 +501,14 @@ test_already_merged_reports_without_a_request() {
   dir=$(make_case already-merged)
   set +e
   out=$(FAKE_BB_PR_BODY=$(pr_body MERGED) \
+    FAKE_BB_STATUSES_BODY='{"values": [{"key": "ci", "state": "FAILED", "updated_on": "2026-07-21T10:00:00+00:00"}]}' \
     run_with_fakes "$dir" "$BB_MERGE" "$BB_URL" 2>&1)
   rc=$?
   set -e
-  expect_code 0 "$rc" "an already-MERGED pull request is the goal state"
+  expect_code 0 "$rc" "an already-MERGED pull request is the goal state even with red builds"
   assert_contains "$out" "merged: $BB_URL" "the already-merged state was not reported as merged"
   assert_no_grep 'request POST' "$dir/curl-argv" "an already-merged pull request was merged again"
+  assert_no_grep '/statuses' "$dir/curl-argv" "an already-merged pull request still read its builds"
 
   dir=$(make_case declined)
   set +e
@@ -470,7 +519,7 @@ test_already_merged_reports_without_a_request() {
   expect_code 1 "$rc" "a DECLINED pull request must refuse"
   assert_contains "$out" 'DECLINED' "the declined refusal did not name the state"
   assert_no_grep 'request POST' "$dir/curl-argv" "a declined pull request was merged"
-  pass "MERGED short-circuits as confirmed success and DECLINED refuses, neither sending a request"
+  pass "MERGED short-circuits before the build gate and DECLINED refuses, neither sending a request"
 }
 
 # --- the resolver subcommands ------------------------------------------------
@@ -747,7 +796,9 @@ test_bootstrap_stays_silent_with_no_merge_grants() {
 
 test_200_confirms_merged_before_reporting_success
 test_200_without_merged_readback_refuses_success
+test_failed_readback_after_success_is_retry_later
 test_202_polls_task_status_to_merged
+test_202_raw_brace_task_location_polls_the_exact_endpoint
 test_202_task_failure_reports_the_reason
 test_202_still_pending_after_bound_is_retry_later
 test_202_foreign_location_is_refused

@@ -451,7 +451,7 @@ forge_get() {  # <forge> <api-path>
     return "$EX_INCONCLUSIVE"
   }
   http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
-    | curl --silent --config - \
+    | curl --silent --globoff --config - \
         --request GET \
         --header 'Accept: application/json' \
         --max-time "$REQUEST_TIMEOUT" \
@@ -523,7 +523,7 @@ forge_post_merge() {  # <forge> <api-path> <strategy>
   # The strategy was validated against the closed six-name list, so this JSON
   # literal cannot carry anything but one of those names.
   http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
-    | curl --silent --config - \
+    | curl --silent --globoff --config - \
         --request POST \
         --header 'Accept: application/json' \
         --header 'Content-Type: application/json' \
@@ -618,7 +618,7 @@ cmd_merge_capable() {  # <forge>
     return "$EX_INCONCLUSIVE"
   }
   http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
-    | curl --silent --config - \
+    | curl --silent --globoff --config - \
         --request GET \
         --header 'Accept: application/json' \
         --max-time "$REQUEST_TIMEOUT" \

@@ -13,21 +13,25 @@
 # chosen strategy must appear in it: an excluded strategy is refused naming
 # what the destination permits, never silently switched.
 #
-# Refusals that run BEFORE anything can mutate Bitbucket:
-#   - a build verdict that is not provably green: red and pending refuse with
-#     the concrete builds, an unreadable verdict refuses rather than guesses,
-#     and "none" passes because a project with no CI has no builds to be green
-#     (bin/fm-bb-build-status.sh owns the verdict).
-#   - a pull request whose state is DECLINED or SUPERSEDED, or unreadable.
+# Refusals that run BEFORE anything can mutate Bitbucket, in this order:
+#   - a pull request whose state is DECLINED or SUPERSEDED, or unreadable
+#     (the state is read first, so a pull request already in state MERGED
+#     reports success without a build read or a merge request, because the
+#     goal state is confirmed from the API and no merge attempt would follow).
+#   - a build verdict that is not provably green, consulted only once the
+#     state reads OPEN and a real merge attempt would follow: red and pending
+#     refuse with the concrete builds, an unreadable verdict refuses rather
+#     than guesses, and "none" passes because a project with no CI has no
+#     builds to be green (bin/fm-bb-build-status.sh owns the verdict).
 #   - a strategy the destination does not permit.
-# A pull request already in state MERGED reports success without a merge
-# request, because the goal state is confirmed from the API.
 #
 # The merge POST answers one of (docs/bitbucket-merge-watch.md, stage 4):
 #   200  merged synchronously - still confirmed by reading the state back;
-#        a 200 whose read-back is not MERGED is reported as a failure, never
-#        as success, because a 2xx shortcut that skips confirmation is the
-#        defect this script exists to prevent.
+#        a 200 whose read-back is a definite state other than MERGED is
+#        reported as a failure, never as success, because a 2xx shortcut that
+#        skips confirmation is the defect this script exists to prevent; a
+#        read-back that itself fails is retry-later, because the merge likely
+#        completed but is not confirmed.
 #   202  merging asynchronously - the Location header names the task-status
 #        endpoint, which is validated to be this pull request's own task on
 #        api.bitbucket.org and then polled (task_status PENDING until SUCCESS)
@@ -48,7 +52,8 @@
 #
 # Exit codes: 0 confirmed MERGED; 1 refusal or failure; 2 usage error;
 # 3 transient outcome worth a later retry (rate-limit exhausted, merge still
-# in progress, or Bitbucket's own timeout with the state not yet MERGED).
+# in progress, Bitbucket's own timeout with the state not yet MERGED, or a
+# confirmation read-back that failed after an otherwise successful merge).
 #
 # Env bounds (blank or non-numeric fall back to the default; the poll delay
 # accepts 0 so tests need no real waiting):
@@ -185,10 +190,16 @@ read_pr_state() {
   printf '%s' "$body" | json_string_field state
 }
 
+# 0 when the state reads back exactly MERGED, 1 when it reads back another
+# definite state, 2 when the read failed or the state was unreadable.
 confirm_merged() {
   local state
-  state=$(read_pr_state) || return 1
-  [ "$state" = MERGED ]
+  state=$(read_pr_state) || return 2
+  case "$state" in
+    MERGED) return 0 ;;
+    OPEN|DECLINED|SUPERSEDED) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 report_merged() {
@@ -196,11 +207,44 @@ report_merged() {
   exit 0
 }
 
+# --- pre-merge state ---------------------------------------------------------
+
+BB_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-bb-merge-err.XXXXXX") || exit 1
+trap 'rm -f -- "$BB_ERR"' EXIT
+PR_JSON=$("$RESOLVER" api-get bitbucket "$PR_API_PATH" 2>"$BB_ERR")
+status=$?
+if [ "$status" -ne 0 ]; then
+  reason=$(head -n 1 "$BB_ERR" 2>/dev/null || true)
+  echo "error: cannot read the Bitbucket pull request before merging: ${reason#error: }" >&2
+  # Resolver exit 7 is "the forge could not be reached": transient, retry-worthy.
+  [ "$status" -eq 7 ] && exit 3
+  exit 1
+fi
+
+PR_STATE=$(printf '%s' "$PR_JSON" | json_string_field state)
+case "$PR_STATE" in
+  MERGED)
+    # The goal state is already confirmed from the API; there is nothing to
+    # do, so the build verdict is never consulted.
+    report_merged
+    ;;
+  OPEN) ;;
+  DECLINED|SUPERSEDED)
+    echo "error: refusing to merge $URL: the pull request state is $PR_STATE" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: refusing to merge $URL: the pull request state could not be read" >&2
+    exit 1
+    ;;
+esac
+
 # --- build gate --------------------------------------------------------------
 
-# Red and pending builds refuse before anything can mutate Bitbucket; "none"
-# passes because a project with no CI has no builds to be green. The verdict
-# and its wording are owned by bin/fm-bb-build-status.sh.
+# The state read OPEN, so a real merge attempt would follow: red and pending
+# builds refuse before anything can mutate Bitbucket; "none" passes because a
+# project with no CI has no builds to be green. The verdict and its wording
+# are owned by bin/fm-bb-build-status.sh.
 if ! BB_BUILD=$("$SCRIPT_DIR/fm-bb-build-status.sh" "$URL"); then
   echo "error: refusing to merge $URL: its Bitbucket build verdict could not be read" >&2
   exit 1
@@ -223,36 +267,7 @@ case "$VERDICT" in
     ;;
 esac
 
-# --- pre-merge state and strategy check --------------------------------------
-
-BB_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-bb-merge-err.XXXXXX") || exit 1
-trap 'rm -f -- "$BB_ERR"' EXIT
-PR_JSON=$("$RESOLVER" api-get bitbucket "$PR_API_PATH" 2>"$BB_ERR")
-status=$?
-if [ "$status" -ne 0 ]; then
-  reason=$(head -n 1 "$BB_ERR" 2>/dev/null || true)
-  echo "error: cannot read the Bitbucket pull request before merging: ${reason#error: }" >&2
-  # Resolver exit 7 is "the forge could not be reached": transient, retry-worthy.
-  [ "$status" -eq 7 ] && exit 3
-  exit 1
-fi
-
-PR_STATE=$(printf '%s' "$PR_JSON" | json_string_field state)
-case "$PR_STATE" in
-  MERGED)
-    # The goal state is already confirmed from the API; there is nothing to do.
-    report_merged
-    ;;
-  OPEN) ;;
-  DECLINED|SUPERSEDED)
-    echo "error: refusing to merge $URL: the pull request state is $PR_STATE" >&2
-    exit 1
-    ;;
-  *)
-    echo "error: refusing to merge $URL: the pull request state could not be read" >&2
-    exit 1
-    ;;
-esac
+# --- strategy check ----------------------------------------------------------
 
 # source.branch.merge_strategies lists what the destination branch permits
 # (verified live, docs/bitbucket-merge-watch.md). An unreadable list does not
@@ -347,11 +362,17 @@ while :; do
 
   case "$HTTP" in
     200)
-      if confirm_merged; then
+      confirm_merged
+      readback=$?
+      if [ "$readback" -eq 0 ]; then
         report_merged
       fi
-      echo "error: Bitbucket answered 200 for the merge but $URL does not read back as MERGED; refusing to report success" >&2
-      exit 1
+      if [ "$readback" -eq 1 ]; then
+        echo "error: Bitbucket answered 200 for the merge but $URL does not read back as MERGED; refusing to report success" >&2
+        exit 1
+      fi
+      echo "error: Bitbucket answered 200 for the merge but the state of $URL could not be read back; the merge likely completed but is not confirmed; retry later" >&2
+      exit 3
       ;;
     202)
       if ! TASK_PATH=$(task_status_path "$LOCATION"); then
@@ -363,15 +384,21 @@ while :; do
       if [ "$poll_status" -eq 1 ]; then
         exit 1
       fi
-      if confirm_merged; then
+      confirm_merged
+      readback=$?
+      if [ "$readback" -eq 0 ]; then
         report_merged
       fi
       if [ "$poll_status" -eq 3 ]; then
         echo "error: the Bitbucket merge is still in progress after $POLL_ATTEMPTS polls and $URL does not yet read back as MERGED; retry later" >&2
         exit 3
       fi
-      echo "error: the Bitbucket merge task reported SUCCESS but $URL does not read back as MERGED; refusing to report success" >&2
-      exit 1
+      if [ "$readback" -eq 1 ]; then
+        echo "error: the Bitbucket merge task reported SUCCESS but $URL does not read back as MERGED; refusing to report success" >&2
+        exit 1
+      fi
+      echo "error: the Bitbucket merge task reported SUCCESS but the state of $URL could not be read back; the merge likely completed but is not confirmed; retry later" >&2
+      exit 3
       ;;
     409)
       MESSAGE=$(printf '%s' "$BODY" | json_error_message)
