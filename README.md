@@ -89,6 +89,9 @@ Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 claude
 ```
 
+For Claude Code, `bin/fm-up.sh` starts a session with one command from anywhere, launching from the repo root with the captain-confirmed permission mode and an initial fire-up prompt.
+The script's header owns the exact mechanics and argument pass-through behaviour.
+
 **Grok**
 
 ```sh
