@@ -26,7 +26,10 @@
 //                             unscoped pgrep output (substitution, tainted
 //                             variable, or pipeline into xargs kill - even
 //                             when the pgrep stage is group-wrapped),
-//                             or a literal nested shell/eval payload doing so.
+//                             or a literal nested shell/eval payload doing so -
+//                             including a shell run AS the xargs utility, whose
+//                             literal -c payload is classified recursively and
+//                             whose executed kill consumes a pgrep-fed pipe.
 //   DENY  unclassifiable-kill unsupported or untokenizable syntax whose raw
 //                             bytes carry a name-pattern kill verb.
 //   ALLOW everything else     kill-by-PID, worktree-scoped patterns
@@ -140,18 +143,18 @@ function evalPayload(position) {
 function xargsUtility(args) {
   for (let i = 0; i < args.length; i += 1) {
     const value = args[i].value;
-    if (value == null) return { word: null, ambiguous: true };
-    if (value === "--") return { word: args[i + 1] || null, ambiguous: false };
-    if (!value.startsWith("-")) return { word: args[i], ambiguous: false };
+    if (value == null) return { word: null, index: -1, ambiguous: true };
+    if (value === "--") return { word: args[i + 1] || null, index: i + 1, ambiguous: false };
+    if (!value.startsWith("-")) return { word: args[i], index: i, ambiguous: false };
     if (/^-[0prtxo]+$/.test(value)) continue;
     const valued = value.match(/^-[0prtxo]*([nLPsIEJRSdail])(.*)$/);
     if (valued) {
       if (valued[2] === "" && !"il".includes(valued[1])) i += 1;
       continue;
     }
-    return { word: null, ambiguous: true };
+    return { word: null, index: -1, ambiguous: true };
   }
-  return { word: null, ambiguous: false };
+  return { word: null, index: -1, ambiguous: false };
 }
 
 // The argument sequence xargsUtility scans, rebuilt from the node's raw token
@@ -199,19 +202,27 @@ function isPipe(separator) {
 //   broadKill      an executed broad kill was proven somewhere in the program
 //   unscopedPgrep  the program executes a pgrep not scoped to the worktree
 //                  (its output is a machine-wide PID list)
+//   executesKill   the program executes ANY kill verb (kill/pkill/killall),
+//                  used by a pgrep-fed xargs shell payload where the pipe
+//                  supplies the victims
 //   unsupported    grammar this classifier does not model was seen
 //   error          the lexer could not tokenize the program
+function rawMentionsAnyKill(command) {
+  return /\b(?:kill|pkill|killall)\b/.test(normalizeLineContinuations(command));
+}
+
 function analyzeProgram(command, worktree, taintedVars, depth = 0) {
   if (depth > 12) {
-    return { broadKill: rawMentionsNameKill(command), unscopedPgrep: false, unsupported: true, error: "recursion limit" };
+    return { broadKill: rawMentionsNameKill(command), unscopedPgrep: false, executesKill: rawMentionsAnyKill(command), unsupported: true, error: "recursion limit" };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { broadKill: false, unscopedPgrep: false, unsupported: true, error: lexed.error };
+    return { broadKill: false, unscopedPgrep: false, executesKill: rawMentionsAnyKill(command), unsupported: true, error: lexed.error };
   }
   const { nodes, separators } = splitProgram(lexed.tokens);
   let broadKill = false;
   let unscopedPgrep = false;
+  let executesKill = false;
   let unsupported = false;
   // Assignment taint: NAME=$(pgrep -f dev) marks NAME, so a later `kill $NAME`
   // is recognized as consuming pattern-matched PIDs. A clean reassignment
@@ -241,6 +252,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
         const nested = analyzeProgram(token.content, worktree, tainted, depth + 1);
         broadKill ||= nested.broadKill;
         unscopedPgrep ||= nested.unscopedPgrep;
+        executesKill ||= nested.executesKill;
         nodeEmitsPgrep ||= nested.unscopedPgrep;
         if ((nested.error || nested.unsupported) && rawMentionsNameKill(token.content)) unsupported = true;
       }
@@ -267,6 +279,8 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
     const args = position.words.slice(position.index + 1);
     const scoped = args.some((word) => wordIsScoped(word, worktree));
 
+    if (["kill", "pkill", "killall"].includes(commandName)) executesKill = true;
+
     if (NAME_KILLS.has(commandName) && !scoped) broadKill = true;
 
     if (commandName === "pgrep" && !scoped) unscopedPgrep = true;
@@ -289,13 +303,31 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
     // hides which word runs: with a kill verb present that falls back to the
     // fail-closed unclassifiable backstop.
     if (commandName === "xargs") {
-      const utility = xargsUtility(xargsScanItems(tokens, position.command));
+      const items = xargsScanItems(tokens, position.command);
+      const utility = xargsUtility(items);
       const utilityName = utility.word ? basename(utility.word.value) : "";
       if (utility.ambiguous && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) {
         unsupported = true;
       }
       if (NAME_KILLS.has(utilityName) && !scoped && !pipeCarriesScoped) broadKill = true;
       if (pipeCarriesPgrep && ["kill", "pkill", "killall"].includes(utilityName)) broadKill = true;
+      // A shell run AS the xargs utility must not launder a kill the direct
+      // form would deny (captain decision, 2026-07-23): recursively classify a
+      // literal -c payload exactly like the top-level shell case, and when the
+      // pipe carries unscoped pgrep output, any executed kill verb inside the
+      // payload consumes it (`pgrep -f dev | xargs -I{} bash -c "kill {}"`).
+      // Dynamic payloads stay out of scope like the direct case.
+      if (["sh", "bash", "zsh"].includes(utilityName) && utility.index >= 0) {
+        const payload = shellCommandPayload({ command: utility.word, words: items, index: utility.index });
+        if (payload !== null) {
+          const nested = analyzeProgram(payload, worktree, tainted, depth + 1);
+          broadKill ||= nested.broadKill;
+          unscopedPgrep ||= nested.unscopedPgrep;
+          nodeEmitsPgrep ||= nested.unscopedPgrep;
+          if (pipeCarriesPgrep && nested.executesKill) broadKill = true;
+          if ((nested.error || nested.unsupported) && rawMentionsNameKill(payload)) unsupported = true;
+        }
+      }
     }
 
     // Literal nested shell and eval payloads are recursively classified.
@@ -304,6 +336,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       const nested = analyzeProgram(payload, worktree, tainted, depth + 1);
       broadKill ||= nested.broadKill;
       unscopedPgrep ||= nested.unscopedPgrep;
+      executesKill ||= nested.executesKill;
       nodeEmitsPgrep ||= nested.unscopedPgrep;
       if ((nested.error || nested.unsupported) && rawMentionsNameKill(payload)) unsupported = true;
     }
@@ -318,7 +351,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
     }
   }
 
-  return { broadKill, unscopedPgrep, unsupported, error: "" };
+  return { broadKill, unscopedPgrep, executesKill, unsupported, error: "" };
 }
 
 function deny(code, worktree) {

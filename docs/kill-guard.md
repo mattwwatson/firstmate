@@ -62,6 +62,7 @@ The guard **blocks**, with reason code `broad-kill`:
 - An executed `pkill` or `killall` whose arguments never reference the worktree path: `pkill -f 'concurrently.*dev'` (the incident command), `killall node`, `pkill -u "$USER"`, `sudo pkill -f dev`, `command pkill -f dev`, and quote-split spellings such as `p"kill" -f dev`. Running the name-kill through `xargs` changes nothing - the check keys on the utility word xargs executes (skipping xargs's own options, including attached `-I{}` and separate `-I {}` replstr values, so `echo dev | xargs pkill -f` and `echo dev | xargs -I {} pkill -f {}` are denied unless the worktree path appears in the xargs arguments or the pipe source), which is what keeps xargs-fed data mentions allowed.
 - An executed `kill` consuming pattern-matched PIDs: `kill $(pgrep -f vite)`, the assignment-tainted `PIDS=$(pgrep -f dev); kill $PIDS`, and the pipeline `pgrep -f dev | xargs kill` - including group-wrapped pgrep stages such as `(pgrep -f dev) | xargs kill` and `{ pgrep -f dev; } | xargs kill`.
 - A literal nested payload doing either: `bash -c 'pkill -f dev'`, `eval "pkill -f dev"`, `(pkill -f dev)`, and a broad kill anywhere in a command list such as `cd apps && pkill -f dev`.
+- A shell run AS the xargs utility carrying a literal `-c` payload that does either (captain decision, 23/07/2026: an executed kill must not launder through that wrapper): `echo x | xargs bash -c "pkill -f dev"` and `echo x | xargs -0 sh -c "killall node"` are classified recursively like the direct form, and when the pipe carries unscoped pgrep output any executed kill verb inside the payload consumes it, so `pgrep -f dev | xargs -I{} bash -c "kill {}"` is denied.
 
 The guard **blocks**, with reason code `unclassifiable-kill`, unsupported grammar (a loop, `case`, `if`, or other construct the classifier does not model, or an unrecognized xargs option that hides which word xargs would execute) whose raw bytes carry `pkill`/`killall`, or both `kill` and `pgrep`.
 This mirrors the watcher-arm seatbelt's fail-closed backstop: when the classifier cannot prove which command position the kill occupies, it refuses rather than allowing, and the reason tells the agent to run the kill as a plain single command.
@@ -72,6 +73,7 @@ The guard **allows** everything else, including the legitimate teardown shapes i
 - Worktree-scoped patterns: `pkill -f '<worktree>/dev-server'`, `kill $(pgrep -f '<worktree>/vite')`, `pgrep -f '<worktree>' | xargs kill`, `echo '<worktree>/dev' | xargs pkill -f`, and the byte-visible cwd forms `pkill -f "$PWD/..."` and `pkill -f "$(pwd)/..."` (crew rules pin the shell inside the worktree; the classifier matches bytes, never expands).
 - Read-only process inspection: a standalone `pgrep`, `pgrep -fl dev || true`.
 - Every data mention: `echo "pkill -f dev"`, `git commit -m "add pkill guard"`, `grep -rn pkill bin/`, `printf '%s\n' 'killall node'`, kill verbs fed as data to another xargs-executed utility (`git ls-files | xargs grep -n pkill`, `ls | xargs echo killall`), and words that merely contain the bytes (`.agents/skills`).
+- An xargs shell payload that is itself safe: worktree-scoped (`echo x | xargs bash -c 'pkill -f "<worktree>/dev"'`), data-only (`ls | xargs bash -c "echo pkill"`), PID-only with no pgrep-fed pipe (`echo x | xargs bash -c "kill 123"`), or fed by a worktree-scoped pgrep (`pgrep -f '<worktree>' | xargs -I{} bash -c 'kill {}'`).
 - Starting servers and recording PIDs: `npm run dev & echo $! > .fm-dev.pid`.
 
 ### Accepted non-goals
@@ -124,7 +126,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 ## Shared classifier ownership
 
 `bin/fm-kill-command-policy.mjs` imports the shell tokenizer and command-position analysis (`Lexer`, `splitProgram`, `commandPosition`) from `bin/fm-arm-command-policy.mjs`, the sole owner of firstmate's shell classification.
-It adds only the kill-specific decision: name-kill detection, worktree scoping, pgrep-consumption tracking (substitution, assignment taint, and pipeline-into-xargs), and the unsupported-grammar backstop.
+It adds only the kill-specific decision: name-kill detection, worktree scoping, pgrep-consumption tracking (substitution, assignment taint, and pipeline-into-xargs), recursive classification of literal shell payloads including a shell run as the xargs utility, and the unsupported-grammar backstop.
 `bin/fm-arm-command-policy.mjs` runs its own CLI only when invoked directly, never on import, so the policies stay independent CLIs over one parser.
 
 ## Live validation record, 2026-07-22

@@ -78,6 +78,11 @@ matrix_case K19 broad-kill '(pgrep -f dev) | xargs kill'
 matrix_case K20 broad-kill '{ pgrep -f dev; } | xargs kill'
 matrix_case K21 broad-kill 'echo dev | xargs -I{} pkill -f {}'
 matrix_case K22 broad-kill 'echo dev | xargs -I {} pkill -f {}'
+# K23-K25: a shell run AS the xargs utility cannot launder a kill the direct
+# form would deny (captain decision, 2026-07-23).
+matrix_case K23 broad-kill 'echo x | xargs bash -c "pkill -f dev"'
+matrix_case K24 broad-kill 'pgrep -f dev | xargs -I{} bash -c "kill {}"'
+matrix_case K25 broad-kill 'echo x | xargs -0 sh -c "killall node"'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
@@ -113,6 +118,12 @@ matrix_case A21 allow "echo 'WTFIX/dev' | xargs pkill -f"
 matrix_case A22 allow 'git ls-files | xargs grep -n pkill'
 matrix_case A23 allow 'ls | xargs echo killall'
 matrix_case A24 allow 'ls | xargs -I {} echo killall {}'
+# A25-A28: xargs shell payloads that are scoped, data-only, PID-only, or fed
+# by a worktree-scoped pgrep stay allowed under the recursive classification.
+matrix_case A25 allow "echo x | xargs bash -c 'pkill -f \"WTFIX/dev\"'"
+matrix_case A26 allow 'ls | xargs bash -c "echo pkill"'
+matrix_case A27 allow 'echo x | xargs bash -c "kill 123"'
+matrix_case A28 allow "pgrep -f 'WTFIX' | xargs -I{} bash -c 'kill {}'"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
