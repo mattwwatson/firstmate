@@ -63,7 +63,7 @@ fm_identity_run() {
   shift
   OUT=$(HOME="$home" env -u XDG_CONFIG_HOME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_EMAIL \
     -u GIT_AUTHOR_NAME -u GIT_COMMITTER_NAME -u GIT_CONFIG_GLOBAL \
-    "$CHECK" "$@" 2>&1)
+    GIT_CONFIG_NOSYSTEM=1 "$CHECK" "$@" 2>&1)
   CODE=$?
   return 0
 }
@@ -77,18 +77,18 @@ test_reproduces_silent_wrong_identity() {
 
   # Same remote, two locations, two identities: this is the defect.
   local blessed fleet
-  blessed=$(HOME="$home" env -u XDG_CONFIG_HOME git -C "$home/work/moroku/pay-api" config --get user.email)
-  fleet=$(HOME="$home" env -u XDG_CONFIG_HOME git -C "$repo" config --get user.email)
+  blessed=$(HOME="$home" env -u XDG_CONFIG_HOME GIT_CONFIG_NOSYSTEM=1 git -C "$home/work/moroku/pay-api" config --get user.email)
+  fleet=$(HOME="$home" env -u XDG_CONFIG_HOME GIT_CONFIG_NOSYSTEM=1 git -C "$repo" config --get user.email)
   [ "$blessed" = "mattw@moroku.com" ] || fail "fixture broken: blessed location resolved '$blessed'"
   [ "$fleet" = "mattw.watson@gmail.com" ] || fail "fixture broken: fleet clone resolved '$fleet'"
 
   # A crewmate commits in the fleet clone and git says nothing at all.
   printf 'work\n' > "$repo/f.txt"
   HOME="$home" env -u XDG_CONFIG_HOME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_EMAIL \
-    -u GIT_AUTHOR_NAME -u GIT_COMMITTER_NAME git -C "$repo" add f.txt
+    -u GIT_AUTHOR_NAME -u GIT_COMMITTER_NAME GIT_CONFIG_NOSYSTEM=1 git -C "$repo" add f.txt
   HOME="$home" env -u XDG_CONFIG_HOME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_EMAIL \
-    -u GIT_AUTHOR_NAME -u GIT_COMMITTER_NAME git -C "$repo" commit -qm "fix: something"
-  author=$(HOME="$home" env -u XDG_CONFIG_HOME git -C "$repo" log -1 --pretty='%ae')
+    -u GIT_AUTHOR_NAME -u GIT_COMMITTER_NAME GIT_CONFIG_NOSYSTEM=1 git -C "$repo" commit -qm "fix: something"
+  author=$(HOME="$home" env -u XDG_CONFIG_HOME GIT_CONFIG_NOSYSTEM=1 git -C "$repo" log -1 --pretty='%ae')
   [ "$author" = "mattw.watson@gmail.com" ] || fail "fixture broken: commit authored as '$author'"
 
   # The guard is what makes that failure loud at enrolment.
@@ -167,6 +167,78 @@ test_remoteless_repo_proceeds() {
   expect_code 0 "$CODE" "guard refused a local-only project with no remote"
   assert_contains "$OUT" "ok:" "verdict line missing"
   pass "fm-identity-check.sh: a local-only project with no remote proceeds"
+}
+
+test_no_trailing_slash_condition_scopes_to_its_own_subtree() {
+  local home repo
+  home=$(fm_identity_fixture noslash)
+  # The same arrangement, but the condition has no trailing slash. It still names
+  # ~/work/moroku itself, never its parent.
+  cat > "$home/.gitconfig" <<EOF
+[user]
+	name = Matthew Watson
+	email = mattw.watson@gmail.com
+[includeIf "gitdir:~/work/moroku"]
+	path = ~/work/moroku/.gitconfig-moroku
+EOF
+  # A personal repo in a SIBLING directory of the condition's subtree: it must
+  # not become evidence tying the work identity to the personal remote owner.
+  git init -q "$home/work/blog"
+  git -C "$home/work/blog" remote add origin git@github.com:mattwwatson/blog.git
+
+  repo=$(fm_identity_clone "$home" blog git@github.com:mattwwatson/blog.git)
+  fm_identity_run "$home" "$repo"
+  expect_code 0 "$CODE" "guard bound the work identity to a sibling outside the condition's subtree"
+  assert_contains "$OUT" "ok:" "verdict line missing"
+
+  repo=$(fm_identity_clone "$home" pay-clone git@bitbucket.org:moroku/pay-clone.git)
+  fm_identity_run "$home" "$repo"
+  expect_code 2 "$CODE" "guard did not scope a no-trailing-slash condition to its own subtree"
+  pass "fm-identity-check.sh: a condition without a trailing slash scopes to its own directory, not its parent"
+}
+
+test_spaced_condition_is_parsed_intact() {
+  local home repo
+  home="$TMP_ROOT/spaced"
+  mkdir -p "$home/My Work/acme" "$home/fm/projects"
+  cat > "$home/.gitconfig" <<EOF
+[user]
+	name = Matthew Watson
+	email = mattw.watson@gmail.com
+[includeIf "gitdir:~/My Work/"]
+	path = ~/My Work/.gitconfig-acme
+EOF
+  cat > "$home/My Work/.gitconfig-acme" <<'EOF'
+[user]
+	email = mattw@acme.example
+EOF
+  git init -q "$home/My Work/acme/api"
+  git -C "$home/My Work/acme/api" remote add origin git@bitbucket.org:acme/api.git
+
+  repo=$(fm_identity_clone "$home" acme-api git@bitbucket.org:acme/acme-api.git)
+  fm_identity_run "$home" "$repo"
+  expect_code 2 "$CODE" "guard did not resolve a condition whose path contains a space"
+  assert_contains "$OUT" "mattw@acme.example" "does not name the identity from the spaced-condition config"
+  pass "fm-identity-check.sh: a condition containing spaces is parsed intact, not split at the first space"
+}
+
+test_truncated_scan_prints_caution() {
+  local home repo
+  home=$(fm_identity_fixture truncated)
+  # A second repo under the governed subtree, so a bound of one cannot cover it.
+  git init -q "$home/work/moroku/extra-api"
+  git -C "$home/work/moroku/extra-api" remote add origin git@bitbucket.org:moroku/extra-api.git
+
+  repo=$(fm_identity_clone "$home" side git@github.com:mattwwatson/side.git)
+  export FM_IDENTITY_MAX_REPOS=1
+  fm_identity_run "$home" "$repo"
+  unset FM_IDENTITY_MAX_REPOS
+  expect_code 0 "$CODE" "guard refused a clean clone instead of cautioning about the truncated scan"
+  assert_contains "$OUT" "ok:" "verdict line missing"
+  assert_contains "$OUT" "stopped scanning $home/work/moroku after 1 repositories (FM_IDENTITY_MAX_REPOS)" \
+    "does not report the subtree whose scan was truncated"
+  assert_contains "$OUT" "may not reflect every repo there" "does not warn that the clean verdict is partial"
+  pass "fm-identity-check.sh: a scan stopped at the repo bound cautions instead of reading as full coverage"
 }
 
 # --- absent or unreadable identity data refuses -----------------------------
@@ -255,6 +327,9 @@ test_wrong_ssh_key_is_a_mismatch
 test_ungoverned_remote_proceeds
 test_correct_per_repo_identity_proceeds
 test_remoteless_repo_proceeds
+test_no_trailing_slash_condition_scopes_to_its_own_subtree
+test_spaced_condition_is_parsed_intact
+test_truncated_scan_prints_caution
 test_missing_identity_refuses
 test_unreadable_include_refuses
 test_non_repo_errors

@@ -148,19 +148,22 @@ fi
 RULES=""
 # Conditions whose subtree could not be resolved, so their identity is unscoped.
 UNSCOPED=""
+# Subtrees whose scan stopped at the repo bound, so their coverage is partial.
+TRUNCATED=""
 
 # identity_include_entries: print "<condition>\t<config-path>\t<including-file>"
 # for every `includeIf ....path` entry in the global config. --type=path expands a
 # leading ~ in the value; the condition keeps its literal text and is expanded here.
 identity_include_entries() {
-  git config --global --show-origin --type=path --get-regexp '^includeif\..*\.path$' 2>/dev/null |
-    while IFS=$'\t' read -r origin kv; do
-      local key=${kv%% *} value=${kv#* } cond
-      [ "$key" != "$kv" ] || continue
-      cond=${key#includeif.}
-      cond=${cond%.path}
-      printf '%s\t%s\t%s\n' "$cond" "$value" "${origin#file:}"
-    done
+  local origin kv key value cond
+  while IFS= read -r -d '' origin && IFS= read -r -d '' kv; do
+    key=${kv%%$'\n'*}
+    value=${kv#*$'\n'}
+    [ "$key" != "$kv" ] || continue
+    cond=${key#includeif.}
+    cond=${cond%.path}
+    printf '%s\t%s\t%s\n' "$cond" "$value" "${origin#file:}"
+  done < <(git config -z --global --show-origin --type=path --get-regexp '^includeif\..*\.path$' 2>/dev/null)
 }
 
 # identity_condition_dir <condition> <including-file>: print the directory a
@@ -172,7 +175,7 @@ identity_condition_dir() {
     gitdir/i:*) path=${cond#gitdir/i:} ;;
     *) return 0 ;;
   esac
-  path=${path%/**}
+  path=${path%'/**'}
   # A literal leading ~/ or ./ must be matched, never tilde-expanded: the
   # backslash keeps the tilde literal in both the pattern and the strip.
   case "$path" in
@@ -219,6 +222,8 @@ while IFS=$'\t' read -r cond include_file including; do
     [ -n "$gitpath" ] || continue
     count=$((count + 1))
     if [ "$count" -gt "$FM_IDENTITY_MAX_REPOS" ]; then
+      TRUNCATED="$TRUNCATED$dir
+"
       break
     fi
     found_repo=${gitpath%/.git}
@@ -303,6 +308,17 @@ print_caution() {
   done
 }
 
+# print_truncation: report subtrees whose scan hit the repo bound, so a clean
+# verdict does not read as full coverage of a partially scanned subtree.
+print_truncation() {
+  [ -n "$TRUNCATED" ] || return 0
+  printf '%s' "$TRUNCATED" | while IFS= read -r subtree; do
+    [ -n "$subtree" ] || continue
+    echo "  caution:  stopped scanning $subtree after $FM_IDENTITY_MAX_REPOS repositories (FM_IDENTITY_MAX_REPOS);"
+    echo "            a clean identity verdict may not reflect every repo there."
+  done
+}
+
 describe_ssh() {
   if [ -n "$RESOLVED_SSH" ]; then
     printf '%s\n' "$RESOLVED_SSH"
@@ -346,4 +362,5 @@ else
   echo "ok: $REPO_ABS will commit as $RESOLVED_EMAIL; no identity rule covers $REMOTE_KEY"
 fi
 print_caution
+print_truncation
 exit 0
