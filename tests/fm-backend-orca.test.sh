@@ -666,6 +666,16 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state config id out status
+  # This scenario injects the metadata-write failure as a redirection error on
+  # fm-spawn's { ...; } > "$STATE/$ID.meta" group. bash 3.2 (macOS /bin/bash)
+  # does not fire errexit on a failed group-command redirection, so under that
+  # bash the injected failure cannot abort the spawn at all. fm-spawn.sh runs
+  # under `env bash` (its shebang), so probe the same resolution and skip where
+  # the abort behavior is absent instead of failing on the shell's gap.
+  if env bash -c 'set -eu; { echo probe; } > "$1" 2>/dev/null; exit 0' probe "$TMP_ROOT" 2>/dev/null; then
+    echo "skip: env bash survives a failed group-command redirection under errexit (bash 3.2 gap); the meta-write abort cannot fire"
+    return 0
+  fi
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
   wt="$TMP_ROOT/meta-fail-wt"
