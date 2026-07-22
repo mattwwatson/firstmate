@@ -3,7 +3,7 @@ name: project-management
 description: >-
   Agent-only procedure for Firstmate project management.
   Use before adding, creating, removing, or initializing a project.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
+  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, persona, and outward-consent decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -41,9 +41,10 @@ Destructive, irreversible, and security-sensitive decisions still require captai
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery mode, and autonomy posture.
+Confirm the source URL, local project name, delivery mode, autonomy posture, and persona.
+Ask the persona question before cloning (see "Choose the project's persona"): the choice depends only on the captain and the detected personas, never on a local checkout, so a project registered from a bare GitHub or Bitbucket slug gets its persona the same way.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
-Between cloning and adding that entry, confirm the git identity suits the remote (see "Check the git identity suits the remote").
+Between cloning and adding that entry, apply and verify the chosen persona on the clone.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -51,20 +52,32 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, delivery mode, and persona, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, confirm the git identity suits the remote (see "Check the git identity suits the remote"), add the registry entry, and initialize it according to its delivery mode.
+After remote creation succeeds, clone it locally, apply and verify the chosen persona on the clone (see "Choose the project's persona"), add the registry entry, and initialize it according to its delivery mode.
 
-For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, choose and apply the persona, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
-## Check the git identity suits the remote
+## Choose the project's persona
 
 A clone under `projects/` does not inherit any `includeIf gitdir:` identity the captain's global config scopes to their own work trees, so a repo enrolled here can resolve to the wrong identity: misattributed commits and a push signed by the wrong key, with nothing reporting it until it surfaces in a commit log or a rejected push long after the work is done.
-After cloning and before adding the registry entry, run `bin/fm-identity-check.sh projects/<name>`; its header owns the exit codes and mechanics.
-A non-zero result is a refusal to enrol, not an obstacle to bypass: relay the concrete mismatch it reports - the email that resolved, the remote, and the identity the captain probably wanted - and get the captain's decision.
-Only on the captain's explicit word, apply the offered fix with `bin/fm-identity-check.sh --apply projects/<name>`, which writes the per-repo identity into that one clone; never write it silently.
-This guards enrolment only; it never audits already-enrolled projects and never rewrites an existing project's identity as a side effect.
+The persona registry closes that gap by recording the captain's explicit choice instead of inferring an identity from disk location.
+`bin/fm-persona.sh` owns persona detection, application, and verification; its header owns the exit codes and mechanics.
+
+At every registration:
+
+1. Run `bin/fm-persona.sh list` and present the detected personas to the captain with each one's email and key.
+2. Ask which persona this project uses; when only one persona exists, confirm it in the same breath rather than asking an empty question.
+3. Record the answer as a `@<slug>` token in the project's registry line, using the grammar owned by the header of `bin/fm-project-mode.sh`.
+4. After the clone exists, run `bin/fm-persona.sh apply <slug> projects/<name>`, then `bin/fm-persona.sh check <slug> projects/<name>`.
+
+The captain's persona answer at registration is the authorization to apply it; do not ask a second time.
+Applying writes only that one clone's local config, and every task worktree inherits it because worktrees share the parent clone's config.
+A check refusal at any later point is a stop-and-investigate result, never an obstacle to bypass: relay the concrete mismatch - the email that resolved and the persona the registry records - and get the captain's decision before touching the clone's identity.
+
+Migrate an existing registered project on next touch: when this skill loads for a project whose `bin/fm-project-mode.sh <name> --persona` reports `none`, run `bin/fm-persona.sh match projects/<name>` to see which persona the clone already resolves, confirm that answer with the captain, then record and apply it as above.
+Do not sweep every registered project in one pass; migration rides the operations that were already touching the project.
 
 ## Initialize
 
