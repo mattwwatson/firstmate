@@ -19,11 +19,18 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# The no-arg sweep covers every REGISTERED project: the union of clones under
+# the projects dir and data/projects.md entries carrying an explicit +path
+# (see bin/fm-project-mode.sh, the grammar owner), so a project living outside
+# the clones dir is refreshed with the same fast-forward-only safety. A
+# registered path that is missing, not a repo, origin-less, or holding unlanded
+# work degrades to the same per-project skipped/STUCK diagnostics as a clone.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# Bare names and "projects/<name>" forms prefer this home's projects dir before
+# Bare names and "projects/<name>" forms prefer this home's projects dir, then
+# a bare name falls back to the registry's +path entry for that name, before
 # falling back to an explicit path. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
 # passing its full projects/dotfiles-private path.
@@ -72,39 +79,48 @@ project_label() {
   esac
 }
 
+# registered_path <name>: the registry's +path for <name>, or nothing. The
+# grammar and its validation live with bin/fm-project-mode.sh.
+registered_path() {
+  "$FM_ROOT/bin/fm-project-mode.sh" "$1" --path 2>/dev/null || true
+}
+
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
-# or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
-# back to the original argument unresolved so a genuinely bad path still hits
-# sync_project's existing "not a directory" skip.
+# or a bare/"projects/<name>" project name, resolved against $PROJECTS and then
+# the registry's +path entries. Sets RESOLVED_PATH, falling back to the original
+# argument unresolved so a genuinely bad path still hits sync_project's existing
+# "not a directory" skip, and RESOLVED_LABEL to the registry name when the
+# registry fallback was used, empty otherwise.
 resolve_project_arg() {
-  local arg=$1 candidate
+  local arg=$1 candidate reg
+  RESOLVED_LABEL=""
+  RESOLVED_PATH=$arg
   case "$arg" in
     projects/*)
       candidate="$PROJECTS/${arg#projects/}"
       if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
+        RESOLVED_PATH=$candidate
       fi
       ;;
     */*)
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
       ;;
     *)
       candidate="$PROJECTS/$arg"
       if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
+        RESOLVED_PATH=$candidate
+        return 0
+      fi
+      reg=$(registered_path "$arg")
+      if [ -n "$reg" ]; then
+        RESOLVED_LABEL=$arg
+        RESOLVED_PATH=$reg
         return 0
       fi
       if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
+        RESOLVED_PATH=$arg
       fi
       ;;
   esac
-  printf '%s\n' "$arg"
 }
 
 default_branch() {
@@ -289,9 +305,13 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# sync_project <dir> [<label>]: refresh one project. The label defaults to the
+# directory-derived one; a registered external project passes its registry name
+# so diagnostics and the delivery-mode lookup use the name the captain knows.
 sync_project() {
   PROJ=$1
-  label=$(project_label)
+  label=${2:-}
+  [ -n "$label" ] || label=$(project_label)
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -418,13 +438,41 @@ sync_project() {
 }
 
 if [ $# -eq 1 ]; then
-  sync_project "$(resolve_project_arg "$1")"
+  resolve_project_arg "$1"
+  sync_project "$RESOLVED_PATH" "$RESOLVED_LABEL"
   exit 0
 fi
 
-[ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
-  [ -e "$proj" ] || continue
-  [ -d "$proj" ] || continue
-  sync_project "$proj"
-done
+if [ -d "$PROJECTS" ]; then
+  for proj in "$PROJECTS"/*; do
+    [ -e "$proj" ] || continue
+    [ -d "$proj" ] || continue
+    sync_project "$proj"
+  done
+fi
+
+# Registered projects living OUTSIDE the projects dir: follow every registry
+# entry carrying an explicit +path (bin/fm-project-mode.sh owns the grammar).
+# A path that physically resolves under the projects dir was already covered by
+# the clone loop above, so it is skipped rather than processed twice. A missing
+# path gets its own loud per-project diagnostic; everything else goes through
+# the same fast-forward-only sync_project as a clone.
+projects_phys=""
+if [ -d "$PROJECTS" ]; then
+  projects_phys=$(cd "$PROJECTS" && pwd -P) || projects_phys=""
+fi
+while IFS='	' read -r name path; do
+  [ -n "$name" ] || continue
+  [ -n "$path" ] || continue
+  if [ ! -d "$path" ]; then
+    echo "$name: skipped: registered path $path does not exist"
+    continue
+  fi
+  path_phys=$(cd "$path" && pwd -P) || path_phys=$path
+  if [ -n "$projects_phys" ]; then
+    case "$path_phys" in
+      "$projects_phys"/*) continue ;;
+    esac
+  fi
+  sync_project "$path" "$name"
+done < <("$FM_ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null || true)

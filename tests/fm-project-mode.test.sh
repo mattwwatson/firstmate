@@ -303,12 +303,99 @@ test_every_caller_reads_the_field_it_intends() {
         *'read -r MODE GRANTS'*) ;;                             # mode and grants
         *'--grant '*) ;;                                        # exit-code query, reads no field
         *'--persona'*) ;;                                       # the one-word persona query
+        *'--path'*|*'--list-paths'*) ;;                         # path queries: no mode/grants field read
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
     done < <(grep -n 'fm-project-mode\.sh' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
   done < <(grep -rl 'fm-project-mode\.sh' "$ROOT/bin")
   [ "$callers" -ge 6 ] || fail "expected at least 6 resolver call sites in bin/, found $callers"
   pass "every fm-project-mode.sh caller in bin/ reads the field it intends ($callers sites)"
+}
+
+# --- registered external paths (+path) ---------------------------------------
+
+test_path_token_resolves_and_never_grants() {
+  local home
+  home=$(registry '- ext [direct-PR +path:/somewhere/ext +yolo:findings] - x (added 2026-07-23)')
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" ext --path 2>/dev/null)" = "/somewhere/ext" ] \
+    || fail "--path must print the registered path"
+  [ "$(resolve "$home" ext)" = "direct-PR findings" ] \
+    || fail "+path must not disturb mode or grant resolution, got: $(resolve "$home" ext)"
+  granted "$home" ext merge && fail "+path must never widen permission"
+  pass "+path resolves via --path and never affects mode or grants"
+}
+
+test_path_token_expands_tilde() {
+  local home
+  home=$(registry '- ext [no-mistakes +path:~/work/ext] - x (added 2026-07-23)')
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" ext --path 2>/dev/null)" = "$HOME/work/ext" ] \
+    || fail "a leading ~/ must expand to \$HOME"
+  pass "a ~/ registered path expands to the captain's home"
+}
+
+test_path_query_without_a_path_exits_one_silently() {
+  local home out status
+  home=$(registry '- app [no-mistakes] - no path (added 2026-07-23)')
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --path 2>/dev/null) && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "--path on a path-less project must exit 1, got $status"
+  [ -z "$out" ] || fail "--path on a path-less project must print nothing, got \"$out\""
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" ghost --path 2>/dev/null) && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "--path on an unregistered project must exit 1, got $status"
+  [ -z "$out" ] || fail "--path on an unregistered project must print nothing"
+  pass "--path answers no-registered-path with a silent exit 1"
+}
+
+test_relative_and_empty_paths_are_dropped_with_warning() {
+  local home err status
+  home=$(registry \
+    '- rel [no-mistakes +path:work/rel] - relative (added 2026-07-23)' \
+    '- empty [no-mistakes +path:] - empty (added 2026-07-23)')
+  FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" rel --path >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "a relative path must resolve to no path, got exit $status"
+  err=$({ FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" rel >/dev/null; } 2>&1)
+  assert_contains "$err" "not absolute" "a relative path must be reported"
+  FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" empty --path >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "an empty path must resolve to no path, got exit $status"
+  [ "$(resolve "$home" rel)" = "no-mistakes none" ] \
+    || fail "a bad path token must leave the rest of the line at least permission"
+  pass "relative and empty registered paths are dropped with a warning, never used"
+}
+
+test_unknown_mode_drops_the_path_too() {
+  local home status
+  home=$(registry '- app [bogus-mode +path:/somewhere/app] - x (added 2026-07-23)')
+  FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --path >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "an unknown mode must drop the whole flag list including +path"
+  pass "an unrecognised mode resolves to least permission, path included"
+}
+
+test_list_paths_lists_only_usable_entries() {
+  local home out
+  home=$(registry \
+    '- plain - no brackets (added 2026-06-01)' \
+    '- clone [no-mistakes +yolo] - no path (added 2026-07-23)' \
+    '- ext [direct-PR +path:/somewhere/ext] - external (added 2026-07-23)' \
+    '- tilde [no-mistakes +path:~/work/tilde] - external (added 2026-07-23)' \
+    '- rel [no-mistakes +path:work/rel] - unusable (added 2026-07-23)')
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null)
+  [ "$out" = "$(printf 'ext\t/somewhere/ext\ntilde\t%s/work/tilde' "$HOME")" ] \
+    || fail "--list-paths must list exactly the usable path entries, got: $out"
+
+  home=$(mktemp -d "$TMP_ROOT/empty.XXXXXX")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null) \
+    || fail "--list-paths on a registry-less home must exit 0"
+  [ -z "$out" ] || fail "--list-paths on a registry-less home must print nothing"
+  pass "--list-paths emits name<TAB>path for usable entries only"
+}
+
+test_list_paths_refuses_extra_arguments() {
+  local status
+  FM_HOME=/nonexistent "$ROOT/bin/fm-project-mode.sh" --list-paths app >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" -eq 2 ] || fail "--list-paths with a project name must be a usage error, got $status"
+  FM_HOME=/nonexistent "$ROOT/bin/fm-project-mode.sh" app --path --grant merge >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" -eq 2 ] || fail "--path combined with --grant must be a usage error, got $status"
+  pass "query shapes are mutually exclusive and refused loudly"
 }
 
 test_spawn_records_grants_in_task_metadata() {
@@ -339,6 +426,13 @@ test_malformed_persona_resolves_to_none_and_reports
 test_duplicate_persona_first_wins_and_reports
 test_persona_and_grant_queries_are_mutually_exclusive
 test_second_field_can_never_be_read_as_the_old_boolean
+test_path_token_resolves_and_never_grants
+test_path_token_expands_tilde
+test_path_query_without_a_path_exits_one_silently
+test_relative_and_empty_paths_are_dropped_with_warning
+test_unknown_mode_drops_the_path_too
+test_list_paths_lists_only_usable_entries
+test_list_paths_refuses_extra_arguments
 test_every_caller_reads_the_field_it_intends
 test_spawn_records_grants_in_task_metadata
 

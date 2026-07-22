@@ -122,16 +122,38 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
+# Count every REGISTERED origin-backed project the fleet refresh will follow:
+# clones under the projects dir plus data/projects.md entries carrying an
+# explicit +path outside it (bin/fm-project-mode.sh owns that grammar), so the
+# refresh timeout scales with the real sweep, not the clones dir alone.
 fleet_sync_origin_backed_project_count() {
-  local count proj
+  local count proj projects_phys name path path_phys
   count=0
-  [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
-    [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+  if [ -d "$PROJECTS" ]; then
+    for proj in "$PROJECTS"/*; do
+      [ -d "$proj" ] || continue
+      git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+      git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+      count=$((count + 1))
+    done
+    projects_phys=$(cd "$PROJECTS" && pwd -P) || projects_phys=""
+  else
+    projects_phys=""
+  fi
+  while IFS='	' read -r name path; do
+    [ -n "$name" ] || continue
+    [ -n "$path" ] || continue
+    [ -d "$path" ] || continue
+    path_phys=$(cd "$path" && pwd -P) || path_phys=$path
+    if [ -n "$projects_phys" ]; then
+      case "$path_phys" in
+        "$projects_phys"/*) continue ;;
+      esac
+    fi
+    git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    git -C "$path" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
-  done
+  done < <("$FM_ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null || true)
   echo "$count"
 }
 
@@ -174,7 +196,11 @@ fleet_sync_relay_all_output() {
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
+  # Run when there is anything to refresh: a clones dir OR registered projects
+  # with explicit external paths (which exist even in a home with no clones).
+  if [ ! -d "$PROJECTS" ]; then
+    [ -n "$("$FM_ROOT/bin/fm-project-mode.sh" --list-paths 2>/dev/null)" ] || return 0
+  fi
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
   timeout=$(fleet_sync_bootstrap_timeout)

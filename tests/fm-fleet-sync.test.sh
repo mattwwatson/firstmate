@@ -53,10 +53,15 @@ commit_file() {
 # with one commit on main, plus a side "work-<name>" repo wired to that origin for
 # advancing it later. Portable branch naming (no init -b) for older git.
 build_pair() {
-  local home=$1 name=$2 work remote clone remote_abs
+  build_pair_at "$1" "$2" "$1/projects/$2"
+}
+
+# build_pair_at <home> <name> <clone-path>: build_pair with an explicit clone
+# destination, for registered projects living OUTSIDE the home's projects dir.
+build_pair_at() {
+  local home=$1 name=$2 clone=$3 work remote remote_abs
   work="$home/work-$name"
   remote="$home/remotes/$name.git"
-  clone="$home/projects/$name"
   mkdir -p "$home/remotes"
 
   git init -q "$work"
@@ -450,6 +455,153 @@ test_whole_fleet_form() {
   pass "whole-fleet form processes every clone under projects/"
 }
 
+# register_line <home> <line>...: append registry lines to the home's data/projects.md.
+register_line() {
+  local home=$1
+  shift
+  mkdir -p "$home/data"
+  printf '%s\n' "$@" >> "$home/data/projects.md"
+}
+
+# --- registered external project paths ---------------------------------------
+#
+# The regression this block exists for: the no-arg sweep iterated projects/*
+# alone, so a project registered with an explicit external path was NEVER
+# refreshed at session start and workers branched off stale code silently.
+
+test_registered_external_path_syncs() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair_at "$home" extproj "$home/elsewhere/extproj")
+  advance_origin "$home" extproj C1
+  register_line "$home" "- extproj [no-mistakes +path:$home/elsewhere/extproj] - external (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "extproj: synced" "sweep must refresh a registered external project"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "external clone was not fast-forwarded"
+  pass "a registered external project is refreshed by the no-arg sweep"
+}
+
+test_registered_external_missing_path_diagnosed() {
+  local home out
+  home=$(new_home)
+  register_line "$home" "- ghost [no-mistakes +path:$home/elsewhere/ghost] - gone (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "ghost: skipped: registered path $home/elsewhere/ghost does not exist" \
+    "a missing registered path must be diagnosed per project"
+  pass "a missing registered external path degrades to a clear diagnostic"
+}
+
+test_registered_external_non_repo_diagnosed() {
+  local home out
+  home=$(new_home)
+  mkdir -p "$home/elsewhere/plain"
+  register_line "$home" "- plain [no-mistakes +path:$home/elsewhere/plain] - not a repo (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "plain: skipped: not a git repo" \
+    "a non-repo registered path must be diagnosed, never operated on"
+  pass "a registered external path that is not a git repo is diagnosed"
+}
+
+test_registered_external_dirty_is_stuck_untouched() {
+  local home clone before out
+  home=$(new_home)
+  clone=$(build_pair_at "$home" extdirty "$home/elsewhere/extdirty")
+  advance_origin "$home" extdirty C1
+  printf 'unlanded\n' >> "$clone/file.txt"
+  before=$(head_sha "$clone")
+  register_line "$home" "- extdirty [no-mistakes +path:$home/elsewhere/extdirty] - dirty (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "extdirty: STUCK:" "unlanded work in an external project must report STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "external clone with unlanded work was moved"
+  grep -q unlanded "$clone/file.txt" || fail "uncommitted change was lost"
+  pass "unlanded work in a registered external project is left untouched"
+}
+
+test_registered_external_no_origin_skipped() {
+  local home out
+  home=$(new_home)
+  git init -q "$home/elsewhere/noorigin"
+  git -C "$home/elsewhere/noorigin" symbolic-ref HEAD refs/heads/main
+  commit_file "$home/elsewhere/noorigin" file.txt v0 C0
+  register_line "$home" "- noorigin [no-mistakes +path:$home/elsewhere/noorigin] - local (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "noorigin: skipped: no origin remote" \
+    "an origin-less registered path is skipped benignly"
+  pass "a registered external path without an origin is skipped, never synced"
+}
+
+test_registered_path_inside_projects_not_double_synced() {
+  local home out
+  home=$(new_home)
+  build_pair "$home" dupe >/dev/null
+  advance_origin "$home" dupe C1
+  register_line "$home" "- dupe [no-mistakes +path:$home/projects/dupe] - redundant path (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  [ "$(printf '%s\n' "$out" | grep -c '^dupe:')" = "1" ] \
+    || fail "a registered path inside projects/ must not be processed twice, got: $out"
+  assert_contains "$out" "dupe: synced" "the clone itself still syncs once"
+  pass "a registered path inside projects/ is not processed twice"
+}
+
+test_external_sweep_runs_without_projects_dir() {
+  local home clone out
+  # Deliberately NOT new_home: this home must have no projects/ dir at all.
+  home="$TMP_ROOT/home-no-projects-dir"
+  mkdir -p "$home"
+  clone=$(build_pair_at "$home" solo "$home/elsewhere/solo")
+  advance_origin "$home" solo C1
+  register_line "$home" "- solo [no-mistakes +path:$home/elsewhere/solo] - external only (added 2026-07-23)"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "solo: synced" "external sweep must run even with no projects dir"
+  : "$clone"
+  pass "registered external projects sync even when the home has no clones dir"
+}
+
+test_single_project_by_registered_external_name_resolves() {
+  local home out
+  home=$(new_home)
+  build_pair_at "$home" extone "$home/elsewhere/extone" >/dev/null
+  advance_origin "$home" extone C1
+  register_line "$home" "- extone [no-mistakes +path:$home/elsewhere/extone] - external (added 2026-07-23)"
+
+  out=$(run_sync "$home" "extone")
+
+  assert_contains "$out" "extone: synced" "bare name must resolve through the registry path"
+  pass "single-project form resolves a registered external name"
+}
+
+test_bootstrap_relays_external_outcomes() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair_at "$home" extboot "$home/elsewhere/extboot")
+  advance_origin "$home" extboot C1
+  printf 'dirty\n' >> "$clone/file.txt"
+  register_line "$home" "- extboot [no-mistakes +path:$home/elsewhere/extboot] - dirty external (added 2026-07-23)"
+  register_line "$home" "- extgone [no-mistakes +path:$home/elsewhere/extgone] - missing external (added 2026-07-23)"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: extboot: STUCK:" "bootstrap relays an external STUCK outcome"
+  assert_contains "$out" "FLEET_SYNC: extgone: skipped: registered path" \
+    "bootstrap relays a missing external path diagnostic"
+  pass "bootstrap relays registered-external fleet-sync outcomes"
+}
+
 test_bootstrap_relays_recovered_and_stuck() {
   local home stuck rec out
   home=$(new_home)
@@ -619,7 +771,16 @@ test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
+test_registered_external_path_syncs
+test_registered_external_missing_path_diagnosed
+test_registered_external_non_repo_diagnosed
+test_registered_external_dirty_is_stuck_untouched
+test_registered_external_no_origin_skipped
+test_registered_path_inside_projects_not_double_synced
+test_external_sweep_runs_without_projects_dir
+test_single_project_by_registered_external_name_resolves
 test_bootstrap_relays_recovered_and_stuck
+test_bootstrap_relays_external_outcomes
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
