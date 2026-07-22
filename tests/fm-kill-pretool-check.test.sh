@@ -83,6 +83,12 @@ matrix_case K22 broad-kill 'echo dev | xargs -I {} pkill -f {}'
 matrix_case K23 broad-kill 'echo x | xargs bash -c "pkill -f dev"'
 matrix_case K24 broad-kill 'pgrep -f dev | xargs -I{} bash -c "kill {}"'
 matrix_case K25 broad-kill 'echo x | xargs -0 sh -c "killall node"'
+# K26-K28: an executed kill must not launder through one more wrapper layer -
+# a nested xargs inside the payload, a doubly-nested shell, or a direct shell
+# stage of the pgrep-fed pipeline.
+matrix_case K26 broad-kill 'pgrep -f dev | xargs -I{} bash -c "echo {} | xargs kill"'
+matrix_case K27 broad-kill 'pgrep -f dev | xargs -I{} bash -c "echo x | xargs sh -c \"kill {}\""'
+matrix_case K28 broad-kill 'pgrep -f dev | bash -c "xargs kill"'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
@@ -124,6 +130,10 @@ matrix_case A25 allow "echo x | xargs bash -c 'pkill -f \"WTFIX/dev\"'"
 matrix_case A26 allow 'ls | xargs bash -c "echo pkill"'
 matrix_case A27 allow 'echo x | xargs bash -c "kill 123"'
 matrix_case A28 allow "pgrep -f 'WTFIX' | xargs -I{} bash -c 'kill {}'"
+# A29-A30: a direct shell stage stays allowed when its pipe carries no
+# unscoped pgrep output or the pgrep is worktree-scoped.
+matrix_case A29 allow 'echo x | bash -c "kill 123"'
+matrix_case A30 allow "pgrep -f 'WTFIX' | bash -c 'xargs kill'"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

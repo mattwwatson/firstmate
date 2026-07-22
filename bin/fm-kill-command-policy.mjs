@@ -27,9 +27,11 @@
 //                             variable, or pipeline into xargs kill - even
 //                             when the pgrep stage is group-wrapped),
 //                             or a literal nested shell/eval payload doing so -
-//                             including a shell run AS the xargs utility, whose
-//                             literal -c payload is classified recursively and
-//                             whose executed kill consumes a pgrep-fed pipe.
+//                             including a shell run AS the xargs utility or as
+//                             a direct pipeline stage, whose literal -c payload
+//                             is classified recursively (through nested xargs
+//                             layers) and whose executed kill consumes a
+//                             pgrep-fed pipe.
 //   DENY  unclassifiable-kill unsupported or untokenizable syntax whose raw
 //                             bytes carry a name-pattern kill verb.
 //   ALLOW everything else     kill-by-PID, worktree-scoped patterns
@@ -306,6 +308,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       const items = xargsScanItems(tokens, position.command);
       const utility = xargsUtility(items);
       const utilityName = utility.word ? basename(utility.word.value) : "";
+      if (["kill", "pkill", "killall"].includes(utilityName)) executesKill = true;
       if (utility.ambiguous && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) {
         unsupported = true;
       }
@@ -323,6 +326,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
           const nested = analyzeProgram(payload, worktree, tainted, depth + 1);
           broadKill ||= nested.broadKill;
           unscopedPgrep ||= nested.unscopedPgrep;
+          executesKill ||= nested.executesKill;
           nodeEmitsPgrep ||= nested.unscopedPgrep;
           if (pipeCarriesPgrep && nested.executesKill) broadKill = true;
           if ((nested.error || nested.unsupported) && rawMentionsNameKill(payload)) unsupported = true;
@@ -338,6 +342,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
       unscopedPgrep ||= nested.unscopedPgrep;
       executesKill ||= nested.executesKill;
       nodeEmitsPgrep ||= nested.unscopedPgrep;
+      if (pipeCarriesPgrep && nested.executesKill) broadKill = true;
       if ((nested.error || nested.unsupported) && rawMentionsNameKill(payload)) unsupported = true;
     }
 
