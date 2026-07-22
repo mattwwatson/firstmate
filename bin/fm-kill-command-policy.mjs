@@ -140,6 +140,7 @@ function evalPayload(position) {
 function xargsUtility(args) {
   for (let i = 0; i < args.length; i += 1) {
     const value = args[i].value;
+    if (value == null) return { word: null, ambiguous: true };
     if (value === "--") return { word: args[i + 1] || null, ambiguous: false };
     if (!value.startsWith("-")) return { word: args[i], ambiguous: false };
     if (/^-[0prtxo]+$/.test(value)) continue;
@@ -151,6 +152,38 @@ function xargsUtility(args) {
     return { word: null, ambiguous: true };
   }
   return { word: null, ambiguous: false };
+}
+
+// The argument sequence xargsUtility scans, rebuilt from the node's raw token
+// order because a bare {} replstr lexes as an empty group token and is absent
+// from the word list: `xargs -I {} pkill -f {}` must let -I consume the
+// separate {} value so pkill stays the utility word. An empty group becomes
+// an opaque {} word; any other group in argument position has no utility-word
+// reading and surfaces as ambiguous. Redirections and their targets are
+// skipped the same way the shared classifier's word extraction skips them.
+function xargsScanItems(tokens, commandWord) {
+  const items = [];
+  let past = false;
+  let skipRedirectionTarget = false;
+  for (const token of tokens) {
+    if (token.type === "redir") {
+      skipRedirectionTarget = !token.inlineTarget;
+      continue;
+    }
+    if (skipRedirectionTarget && token.type === "word") {
+      skipRedirectionTarget = false;
+      continue;
+    }
+    if (token.type === "word") {
+      if (past) items.push(token);
+      else if (token === commandWord) past = true;
+      continue;
+    }
+    if (past && token.type === "group") {
+      items.push(/^\s*$/.test(token.content) ? { value: "{}", subs: [], literal: true } : { value: null });
+    }
+  }
+  return items;
 }
 
 const UNSUPPORTED_KEYWORDS = new Set([
@@ -256,7 +289,7 @@ function analyzeProgram(command, worktree, taintedVars, depth = 0) {
     // hides which word runs: with a kill verb present that falls back to the
     // fail-closed unclassifiable backstop.
     if (commandName === "xargs") {
-      const utility = xargsUtility(args);
+      const utility = xargsUtility(xargsScanItems(tokens, position.command));
       const utilityName = utility.word ? basename(utility.word.value) : "";
       if (utility.ambiguous && args.some((word) => ["kill", "pkill", "killall"].includes(basename(word.value)))) {
         unsupported = true;

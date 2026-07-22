@@ -77,6 +77,7 @@ matrix_case K18 broad-kill 'echo dev | xargs pkill -f'
 matrix_case K19 broad-kill '(pgrep -f dev) | xargs kill'
 matrix_case K20 broad-kill '{ pgrep -f dev; } | xargs kill'
 matrix_case K21 broad-kill 'echo dev | xargs -I{} pkill -f {}'
+matrix_case K22 broad-kill 'echo dev | xargs -I {} pkill -f {}'
 
 # DENY unclassifiable-kill: unsupported grammar carrying a name-pattern kill
 # verb cannot be proven safe, mirroring the arm seatbelt's fail-closed backstop.
@@ -111,6 +112,7 @@ matrix_case A20 allow 'wait $DEV_PID'
 matrix_case A21 allow "echo 'WTFIX/dev' | xargs pkill -f"
 matrix_case A22 allow 'git ls-files | xargs grep -n pkill'
 matrix_case A23 allow 'ls | xargs echo killall'
+matrix_case A24 allow 'ls | xargs -I {} echo killall {}'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-kill-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
