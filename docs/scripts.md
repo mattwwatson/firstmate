@@ -27,6 +27,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
+| `fm-cd-pretool-check.sh` | Stable PreToolUse transport for the primary cd-guard command policy (docs/cd-guard.md) |
+| `fm-cd-command-policy.mjs` | Semantic owner of the primary cd-guard PreToolUse policy (docs/cd-guard.md)        |
+| `fm-kill-pretool-check.sh` | Stable PreToolUse transport for the crew kill-guard command policy (docs/kill-guard.md) |
+| `fm-kill-command-policy.mjs` | Semantic owner of the crew kill-guard PreToolUse policy (docs/kill-guard.md)     |
 | `fm-continuity-pretool-check.sh` | Narrow Claude recovery gate when in-flight work has no live watcher lock (docs/arm-pretool-check.md) |
 | `fm-turn-pretool-stamp.sh`  | Claude PreToolUse turn-activity stamp powering the watcher's captain-wait deferral (docs/watcher-continuity.md) |
 | `fm-continuity-command-policy.mjs` | Semantic owner of Claude continuity-gate fleet-command classification (docs/arm-pretool-check.md) |

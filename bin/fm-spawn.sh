@@ -100,6 +100,10 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Where the harness has a trust-free worktree hook surface (claude, opencode, pi),
+# the same install also arms the crew kill-guard (bin/fm-kill-pretool-check.sh,
+# docs/kill-guard.md) so a broad name-pattern process kill from inside the task
+# worktree is denied before it can reach processes outside the worktree.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> grants=<list|none> window=<backend-target> worktree=<path>
 # mode/grants are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, grants=none, home=, and projects=.
@@ -1093,9 +1097,17 @@ mkdir -p "$TASK_TMP/gotmp"
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
+# The same install arms the crew kill-guard (bin/fm-kill-pretool-check.sh,
+# docs/kill-guard.md) on every harness with a trust-free worktree hook surface:
+# it denies a broad name-pattern process kill (pkill -f <name>, killall <name>)
+# from inside the task worktree, because such a kill matches by command line
+# across the whole machine and once killed the captain's own dev server in
+# another checkout. A worktree-resident hook also reaches sub-agents another
+# tool (e.g. a no-mistakes pipeline step) launches with cwd inside the worktree.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+KILLCHECK="$FM_ROOT/bin/fm-kill-pretool-check.sh"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1108,7 +1120,7 @@ if [ "$KIND" != secondmate ]; then
     claude*)
       mkdir -p "$WT/.claude"
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'$KILLCHECK' --claude --worktree '$WT'"}]}],"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -1122,6 +1134,43 @@ export const FmTurnEnd = async ({ \$ }) => ({
 })
 EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
+      # Crew kill-guard: tool.execute.before can block by throwing (the same
+      # verified mechanism as .opencode/plugins/fm-primary-cd-check.js).
+      cat > "$WT/.opencode/plugins/fm-kill-guard.js" <<EOF
+import { spawn } from "node:child_process";
+
+// Crew kill-guard; written by fm-spawn (docs/kill-guard.md).
+// bin/fm-kill-pretool-check.sh owns the decision; this adapter only forwards
+// the exact command string and blocks on exit 2 by throwing.
+const checker = "$KILLCHECK";
+const worktree = "$WT";
+
+function runChecker(command) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(checker, ["--command", command, "--worktree", worktree], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolvePromise({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolvePromise({ code: code ?? 0, stderr }));
+  });
+}
+
+export const FmKillGuard = async () => ({
+  "tool.execute.before": async (input, output) => {
+    if (input?.tool !== "bash") return;
+    const command = output?.args?.command;
+    if (!command || typeof command !== "string") return;
+    const result = await runChecker(command);
+    if (result.code !== 2) return;
+    throw new Error(result.stderr.trim() || "denied by the crew kill-guard PreToolUse seatbelt");
+  },
+});
+EOF
+      exclude_path '.opencode/plugins/fm-kill-guard.js'
       ;;
     pi*)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -1132,14 +1181,41 @@ EOF
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile } from "node:child_process";
+// The tool_call handler is the crew kill-guard (docs/kill-guard.md):
+// bin/fm-kill-pretool-check.sh owns the decision; returning {block: true}
+// prevents the bash command from running (the same verified mechanism as
+// .pi/extensions/fm-primary-turnend-guard.ts).
+import { execFile, spawn } from "node:child_process";
 export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("tool_call", async (event: any) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const command = String((event.input as { command?: unknown })?.command ?? "");
+    if (!command) return {};
+    const result = await new Promise<{ code: number; stderr: string }>((resolveResult) => {
+      const child = spawn("$KILLCHECK", ["--command", command, "--worktree", "$WT"], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+      child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    });
+    if (result.code !== 2) return {};
+    return { block: true, reason: result.stderr.trim() || "denied by the crew kill-guard PreToolUse seatbelt" };
+  });
 }
 EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      # No crew kill-guard here: codex loads a worktree .codex/hooks.json only
+      # behind its hook-trust gate, which crew launches do not bypass, and a
+      # blanket --dangerously-bypass-hook-trust would also silently trust any
+      # hooks the PROJECT repo ships - a worse trade. The brief's cleanup rule
+      # is the operative layer for codex crew (docs/kill-guard.md "Coverage").
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1156,6 +1232,10 @@ EOF
       # (gitignored, like the other harnesses' worktree hook files).
       # Result: the hook is outside the worktree, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
+      # No crew kill-guard here for the same trust reason, and a GLOBAL grok
+      # PreToolUse deny hook would fire in every grok session on the machine -
+      # far too much blast radius for a crew-scoped guard. The brief's cleanup
+      # rule is the operative layer for grok crew (docs/kill-guard.md "Coverage").
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
       mkdir -p "$GROK_AUTH_DIR"
