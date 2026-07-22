@@ -4,6 +4,9 @@
 # relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present, and refuses to clobber distinct real files or wrong symlinks.
+# A real CLAUDE.md that only includes AGENTS.md is the same convention expressed
+# without a symlink, so it is accepted and left untouched rather than refused;
+# see claude_md_is_pointer_only for exactly what still counts as real content.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
@@ -92,6 +95,39 @@ EOF
   ensure_maintenance_section
 }
 
+# Decide whether a real CLAUDE.md file is the captain's pointer-only convention
+# rather than a second competing memory file. A pointer-only CLAUDE.md carries no
+# knowledge of its own: every line is either blank or an "@AGENTS.md" include, and
+# at least one include is present.
+#
+# The rule tolerates exactly the incidental bytes an editor or a checkout adds
+# without changing meaning: a leading UTF-8 byte-order mark, CRLF line endings, a
+# missing final newline, blank lines, and leading or trailing whitespace on the
+# include line. Everything else - prose, a heading, an HTML comment, a second
+# include of another file - counts as real content and keeps the refusal, because
+# a human wrote it to be read and merging it away would lose it. Erring strict is
+# the safe direction here: the fallback is the existing explicit refusal, which
+# asks a human to reconcile, and never touches either file.
+claude_md_is_pointer_only() {
+  local line first=1 saw_include=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" -eq 1 ]; then
+      first=0
+      line=${line#$'\xef\xbb\xbf'}
+    fi
+    line=${line%$'\r'}
+    # Trim leading and trailing spaces and tabs.
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [ -n "$line" ] || continue
+    case "$line" in
+      "@$AGENTS"|"@./$AGENTS") saw_include=1 ;;
+      *) return 1 ;;
+    esac
+  done < "$CLAUDE"
+  [ "$saw_include" -eq 1 ]
+}
+
 is_correct_claude_symlink() {
   [ -L "$CLAUDE" ] || return 1
   target=$(readlink "$CLAUDE")
@@ -164,7 +200,19 @@ if [ -e "$AGENTS" ]; then
     exit 0
   fi
   if [ -f "$CLAUDE" ]; then
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
+    # A pointer-only CLAUDE.md is the convention, not a conflict: AGENTS.md holds
+    # the content and CLAUDE.md only includes it. Proceed against AGENTS.md and
+    # leave the pointer exactly as the project wrote it.
+    if claude_md_is_pointer_only; then
+      ensure_maintenance_section
+      if [ "$MAINT_INJECTED" -eq 1 ]; then
+        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR (CLAUDE.md includes AGENTS.md)"
+      else
+        echo "unchanged: AGENTS.md with CLAUDE.md including AGENTS.md in $DIR"
+      fi
+      exit 0
+    fi
+    echo "conflict: both AGENTS.md and CLAUDE.md are real files with their own content in $DIR; reconcile them manually" >&2
     exit 1
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
