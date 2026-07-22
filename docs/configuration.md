@@ -286,11 +286,14 @@ Both halves are required, because an account API token authenticates over HTTP B
 
 Three properties of this arrangement are deliberate and load-bearing.
 
-**It is read-only.** Its scopes are repository, pull request, and pipeline READ, nothing else, so an unattended reader cannot push, merge, or otherwise change a repository - it is write-incapable by construction rather than by convention.
-The accepted consequence is that firstmate can detect merges and read build results but cannot merge on Bitbucket; granting that would require pull-request write, which is a separate captain decision.
+**Its write capability is the captain's provisioning choice, checked against its real scopes.** The recommended scopes are repository, pull request, and pipeline READ, under which an unattended reader cannot push, merge, or otherwise change a repository, and the merge action stays dormant because the forge itself refuses every write.
+A captain who wants firstmate to merge on Bitbucket adds pull-request write to this same credential - one credential for both polling and merging, per the capability-checked decision of 22/07/2026 - and the system detects which shape it holds from the credential's ACTUAL scopes (`bin/fm-forge-credential.sh merge-capable`) rather than assuming either.
+The mismatch is warned exactly when merge is actually requested: at session start when a Bitbucket project carries the `merge` grant the credential provably cannot honor, and at merge-grant resolution in `bin/fm-project-mode.sh`.
+A read-only credential with no merge grants anywhere is a healthy shape and stays silent.
+The resolver's one write action is the pull-request merge POST driven by `bin/fm-bb-pr-merge.sh` (docs/bitbucket-merge-watch.md "Stage 4"); every other subcommand, including everything the unattended poller runs, performs only reads.
 
 **It is separate from no-mistakes' credential.** no-mistakes keeps its own write-capable Bitbucket credential, cached under a different service name and populated from the interactive shell path, because it pushes branches and opens pull requests.
-Firstmate must never read it. Keeping an unattended reader write-incapable is the entire point of holding two credentials instead of one.
+Firstmate must never read it. The two credentials serve different systems and rotate independently, so neither can silently stand in for the other.
 
 **It is read from the keychain directly, never from the environment.** The resolver reads the store itself, so it behaves identically whether firstmate was started from a warm interactive terminal, re-armed by a background repair path, or resumed after a reboot.
 Inheriting an exported token from a shell profile is what leaves a restarted daemon silently tokenless, and firstmate does not reproduce it.
@@ -324,6 +327,7 @@ Silencing it was rejected because a credential broken in that way would otherwis
 
 Both waits on this path are bounded, because a startup check that can hang session start is worse than the late failure it replaces.
 `FM_FORGE_CREDENTIAL_TIMEOUT` bounds the forge request and `FM_FORGE_KEYCHAIN_TIMEOUT` bounds the store read; a blank, non-numeric, or zero value falls back to the default, since zero means "no limit" to curl rather than "do not wait".
+The merge POST has its own longer bound, `FM_FORGE_MERGE_TIMEOUT`, and the merge protocol's retry and poll bounds are owned by `bin/fm-bb-pr-merge.sh`'s header.
 The store read needs its own bound because `security` has no timeout flag and blocks indefinitely when the stored item's access control makes the read raise a confirmation dialog that an unattended session can never answer.
 That stall is reported every time it happens, distinctly from every other outcome, because it is actionable: re-cache the item so an unattended read is allowed.
 

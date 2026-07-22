@@ -15,7 +15,8 @@
 # the credential value; the resolver's own value-free diagnostics pass through.
 #
 # Consumers: bin/fm-pr-check.sh surfaces the verdict when it arms a merge
-# watch, and bin/fm-pr-merge.sh refuses to act on anything not provably green.
+# watch, and bin/fm-bb-pr-merge.sh refuses to act on anything not provably
+# green.
 #
 # Mechanics worth knowing (verified against the live API, 21-22/07/2026; see
 # docs/bitbucket-merge-watch.md):
