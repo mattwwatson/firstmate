@@ -4,8 +4,14 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  type CalmPresentationState,
+  calmTranscriptClassIsVisible,
+  FIRSTMATE_CALM_PRESENTATION_EVENT,
+} from "./lib/fm-calm-visibility.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -19,6 +25,36 @@ type CloseClassification = {
   message: string;
 };
 
+type WatchToolShellState = {
+  shell?: Box;
+  call?: Component;
+  result?: Component;
+};
+
+type WatchToolRenderContext = {
+  isError: boolean;
+  isPartial: boolean;
+};
+
+function refreshWatchToolShell(
+  state: WatchToolShellState,
+  theme: Theme,
+  context: WatchToolRenderContext,
+): Box {
+  const background = context.isPartial
+    ? (text: string) => theme.bg("toolPendingBg", text)
+    : context.isError
+      ? (text: string) => theme.bg("toolErrorBg", text)
+      : (text: string) => theme.bg("toolSuccessBg", text);
+  const shell = state.shell ?? new Box(1, 1, background);
+  state.shell = shell;
+  shell.setBgFn(background);
+  shell.clear();
+  if (state.call) shell.addChild(state.call);
+  if (state.result) shell.addChild(state.result);
+  return shell;
+}
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -28,6 +64,7 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
+const operationalPrefix = "\u2063FIRSTMATE_OP: ";
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -126,6 +163,22 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
+  let calmPresentation: CalmPresentationState = {
+    active: false,
+    stockExportRendering: false,
+  };
+  pi.events?.on?.(FIRSTMATE_CALM_PRESENTATION_EVENT, (data) => {
+    const next = data as Partial<CalmPresentationState>;
+    calmPresentation = {
+      active: next.active === true,
+      stockExportRendering: next.stockExportRendering === true,
+    };
+  });
+  const calmHides = (itemClass: Parameters<typeof calmTranscriptClassIsVisible>[0]): boolean =>
+    calmPresentation.active &&
+    !calmPresentation.stockExportRendering &&
+    !calmTranscriptClassIsVisible(itemClass);
+
   function stopArm(): void {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
@@ -141,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 
   async function sendWake(message: string): Promise<void> {
     await pi.sendUserMessage(
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `${operationalPrefix}FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
       { deliverAs: "followUp" },
     );
   }
@@ -377,6 +430,32 @@ export default function (pi: ExtensionAPI) {
       "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
     ],
     parameters: Type.Object({}),
+    renderShell: "self",
+    renderCall: (_args, theme, context) => {
+      if (calmHides("assistant-tool-call")) return new Container();
+      if (calmPresentation.stockExportRendering) {
+        return new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+      }
+      const state = context.state as WatchToolShellState;
+      state.call = new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+      return refreshWatchToolShell(state, theme, context);
+    },
+    renderResult: (result, _options, theme, context) => {
+      if (calmHides("tool-result")) return new Container();
+      const output = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      if (calmPresentation.stockExportRendering) {
+        return new Text(theme.fg("toolOutput", output), 0, 0);
+      }
+      const state = context.state as WatchToolShellState;
+      state.result = output
+        ? new Text(theme.fg("toolOutput", output), 0, 0)
+        : new Container();
+      refreshWatchToolShell(state, theme, context);
+      return new Container();
+    },
     execute: async () => {
       const result = startArm();
       return {
