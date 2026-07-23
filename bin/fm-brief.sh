@@ -257,6 +257,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. If you start a dev server or any long-running process, record its PID (e.g.
+   \`npm run dev & echo \$! > .fm-dev.pid\`) and tear it down by that PID.
+   Never use a bare name-pattern kill (\`pkill -f <name>\`, \`killall <name>\`): it matches by
+   command line across the whole machine and can kill the captain's own processes outside
+   this worktree. If you must pattern-match, scope the pattern to this worktree's absolute path.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -368,6 +373,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. If you start a dev server or any long-running process, record its PID (e.g.
+   \`npm run dev & echo \$! > .fm-dev.pid\`) and tear it down by that PID.
+   Never use a bare name-pattern kill (\`pkill -f <name>\`, \`killall <name>\`): it matches by
+   command line across the whole machine and can kill the captain's own processes outside
+   this worktree. If you must pattern-match, scope the pattern to this worktree's absolute path.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
