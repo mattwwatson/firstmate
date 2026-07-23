@@ -304,6 +304,7 @@ test_every_caller_reads_the_field_it_intends() {
         *'--grant '*) ;;                                        # exit-code query, reads no field
         *'--persona'*) ;;                                       # the one-word persona query
         *'--path'*|*'--list-paths'*) ;;                         # path queries: no mode/grants field read
+        *'pure-contract-unit'*) ;;                              # fm-test-run.sh changed-file family map: filename pattern, not a call
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
     done < <(grep -n 'fm-project-mode\.sh' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
