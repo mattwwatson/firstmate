@@ -5,8 +5,8 @@ This document is the authoritative human-readable contract for the crew kill-gua
 `bin/fm-kill-pretool-check.sh` is the stable harness transport and output renderer.
 `bin/fm-spawn.sh` installs the guard as a worktree-resident hook; `bin/fm-brief.sh`'s cleanup rule is the instruction-layer companion.
 
-It is the fourth member of the family of PreToolUse seatbelts sharing the same cross-harness hook machinery: the watcher-arm seatbelt (`docs/arm-pretool-check.md`), the cd-guard (`docs/cd-guard.md`), and the Claude continuity gate (`docs/watcher-continuity.md`).
-Unlike those three, it guards CREW sessions inside task worktrees, not the primary firstmate session.
+It is a member of the family of PreToolUse seatbelts sharing the same cross-harness hook machinery: the watcher-arm seatbelt (`docs/arm-pretool-check.md`), the cd-guard (`docs/cd-guard.md`), the Claude continuity gate (`docs/watcher-continuity.md`), and the primary delegation-shape guard (`docs/subagent-guard.md`).
+Unlike those, it guards CREW sessions inside task worktrees, not the primary firstmate session.
 
 ## The incident
 
