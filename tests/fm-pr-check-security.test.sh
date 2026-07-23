@@ -2500,7 +2500,7 @@ SH
 }
 
 test_returned_custom_check_descendants_are_drained() {
-  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
+  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback deadline watcher_state
   for backend in installed-timeout fallback-timeout; do
     dir=$(make_case "returned-custom-descendant-$backend")
     state="$dir/home/state"
@@ -2554,16 +2554,31 @@ SH
       || fail "$backend watcher did not complete the direct custom check"
     child_pid=$(cat "$child_pid_file")
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
+    # Deadline-based stop wait with periodic re-signaling. The original one-shot
+    # TERM plus a 150x0.02s iteration count flaked on CI (2026-07-23): a watcher
+    # on an otherwise healthy runner outlived the single TERM past the 3s count.
+    # This test owns the descendant-drain contract (sentinel, child liveness,
+    # private state), not single-TERM promptness - the signal-cleanup test above
+    # keeps that strict - so re-sending TERM (with a CONT first, in case the
+    # process was left stopped) makes the stop deterministic without weakening
+    # what this test asserts. A genuinely wedged watcher still fails loudly at
+    # the deadline, with its process state captured for diagnosis.
+    deadline=$(( $(date +%s) + 15 ))
     i=0
-    while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 150 ]; do
-      sleep 0.02
+    while kill -0 "$watcher_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+      sleep 0.05
       i=$((i + 1))
+      if [ $((i % 20)) -eq 0 ]; then
+        kill -CONT "$watcher_pid" 2>/dev/null || true
+        kill -TERM "$watcher_pid" 2>/dev/null || true
+      fi
     done
     if kill -0 "$watcher_pid" 2>/dev/null; then
+      watcher_state=$(ps -p "$watcher_pid" -o state= -o comm= 2>/dev/null | tr -d '\n' || true)
       kill -KILL "$watcher_pid" 2>/dev/null || true
       wait "$watcher_pid" 2>/dev/null || true
       kill -KILL "$child_pid" 2>/dev/null || true
-      fail "$backend watcher did not stop after the direct check returned"
+      fail "$backend watcher did not stop after the direct check returned (ps state: ${watcher_state:-unknown})"
     fi
     rc=0
     wait "$watcher_pid" || rc=$?

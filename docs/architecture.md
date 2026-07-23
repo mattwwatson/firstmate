@@ -180,7 +180,8 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 ## Project modes are explicit
 
-`data/projects.md` records each project's delivery mode, its optional, independently settable `+yolo` autonomy grants, and its captain-recorded `@<persona>` git identity; `bin/fm-persona.sh` owns persona detection, application, and verification, and every task worktree inherits the applied persona because worktrees share the parent clone's local config.
+`data/projects.md` records each project's delivery mode, its optional, independently settable `+yolo` autonomy grants, its captain-recorded `@<persona>` git identity, and - when its clone deliberately lives outside `projects/` - its registered `+path` location; the header of `bin/fm-project-mode.sh` owns the registry grammar.
+`bin/fm-persona.sh` owns persona detection, application, and verification, and every task worktree inherits the applied persona because worktrees share the parent clone's local config.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
@@ -238,7 +239,8 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
-Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
+The refresh follows every registered project - clones under `projects/` plus registry entries whose `+path` places the clone elsewhere - and a registered path that no longer exists is reported loudly per project rather than silently skipped.
+Wake-time refreshes can target a single clone by project name, resolved against `projects/` and then the registry's `+path` entries, so the primary home also catches up when a secondmate reports a merge from its own home.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.

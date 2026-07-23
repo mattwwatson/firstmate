@@ -11,6 +11,18 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)      -> <mode> findings,merge,local-merge
 #   - <name> [<mode> +yolo:<g>[,<g>]] - <desc> (added ..)-> <mode> <those grants only>
 #   - <name> [<mode> @<persona> ...] - <desc> (added ..) -> persona <persona> recorded
+#   - <name> [<mode> +path:<path>] - <desc> (added ..)   -> <mode> none, clone lives at <path>
+#
+# +path:<path> registers where the project's clone lives when it is NOT under
+# this home's projects/ dir (e.g. a checkout kept under ~/work so per-path git
+# identity rules apply). It affects navigation and the fleet refresh reach only,
+# never grants. The path must be absolute or start with "~/" (expanded to $HOME)
+# and cannot contain whitespace (the registry line is whitespace-tokenized); a
+# path that is neither is ignored with a warning, so it can never resolve
+# against an accidental working directory. A line carrying more than one usable
+# +path token resolves to NO registered path with a warning - the resolver
+# refuses to guess which path was meant. It combines freely with the other
+# bracket tokens.
 #
 # mode = how a finished change reaches main:
 #   no-mistakes  full pipeline -> PR -> merge by the configured authority (default)
@@ -46,6 +58,8 @@
 # Usage: fm-project-mode.sh <project-name>
 #        fm-project-mode.sh <project-name> --grant <findings|merge|local-merge>
 #        fm-project-mode.sh <project-name> --persona
+#        fm-project-mode.sh <project-name> --path
+#        fm-project-mode.sh --list-paths
 #
 # --grant is the interface for asking a permission question: it prints nothing and
 # exits 0 when the grant is held, 1 when it is not, and 2 on a usage error or an
@@ -54,7 +68,16 @@
 #
 # --persona prints the recorded persona slug, or "none" when no valid persona
 # token is recorded, and exits 0 either way: absence is a normal pre-migration
-# state, not an error. It is mutually exclusive with --grant.
+# state, not an error. It is mutually exclusive with --grant and --path.
+#
+# --path prints the project's registered absolute path and exits 0, or prints
+# nothing and exits 1 when the project has no usable registered path (absent
+# project, no +path token, or a path dropped as unusable).
+#
+# --list-paths takes no project name and prints one "<name><TAB><path>" line per
+# registry entry carrying a usable +path token, for sweeps that must follow
+# registered projects living outside the projects dir. Entries without a usable
+# path are simply not listed.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,22 +87,37 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/projects.md"
 
+usage_exit() {
+  echo "usage: fm-project-mode.sh <project-name> [--grant <name> | --persona | --path] | fm-project-mode.sh --list-paths" >&2
+  exit 2
+}
+
 NAME=
 QUERY=
 # Whether --grant was supplied at all, tracked apart from its value: an empty
 # grant name is a caller mistake and must be refused, not read as "no query".
 QUERY_SET=0
 PERSONA_QUERY=0
+PATH_QUERY=0
+LIST_PATHS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --grant)
-      [ $# -ge 2 ] || { echo "usage: fm-project-mode.sh <project-name> [--grant <name>|--persona]" >&2; exit 2; }
+      [ $# -ge 2 ] || usage_exit
       QUERY=$2
       QUERY_SET=1
       shift 2
       ;;
     --persona)
       PERSONA_QUERY=1
+      shift
+      ;;
+    --path)
+      PATH_QUERY=1
+      shift
+      ;;
+    --list-paths)
+      LIST_PATHS=1
       shift
       ;;
     -*) echo "error: unknown option \"$1\"" >&2; exit 2 ;;
@@ -90,10 +128,14 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
-[ -n "$NAME" ] || { echo "usage: fm-project-mode.sh <project-name> [--grant <name>|--persona]" >&2; exit 2; }
-if [ "$QUERY_SET" = 1 ] && [ "$PERSONA_QUERY" = 1 ]; then
-  echo "error: --grant and --persona are mutually exclusive" >&2
-  exit 2
+# Exactly one query shape: a plain/--grant/--persona/--path resolve needs a
+# name, and --list-paths refuses every other argument rather than guessing what
+# was meant.
+if [ "$LIST_PATHS" = 1 ]; then
+  { [ -z "$NAME" ] && [ "$QUERY_SET" = 0 ] && [ "$PERSONA_QUERY" = 0 ] && [ "$PATH_QUERY" = 0 ]; } || usage_exit
+else
+  [ -n "$NAME" ] || usage_exit
+  [ $((QUERY_SET + PERSONA_QUERY + PATH_QUERY)) -le 1 ] || usage_exit
 fi
 
 # An unknown grant name is a caller mistake, not a denial: refuse it loudly with
@@ -109,6 +151,7 @@ G_FINDINGS=off
 G_MERGE=off
 G_LOCAL_MERGE=off
 PERSONA=none
+REG_PATH=
 
 # grant_apply <name> -> enables one grant, or returns 1 if the name is not one.
 grant_apply() {
@@ -147,6 +190,23 @@ warn_if_merge_incapable() {
   return 0
 }
 
+# expand_registry_path <path> -> prints the absolute form (a leading ~ or ~/
+# becomes $HOME) or returns 1 when the result is not absolute. A relative path
+# would silently resolve against whatever directory the caller happens to be
+# in, so it is refused here, at the single grammar owner.
+expand_registry_path() {
+  local p=$1
+  # shellcheck disable=SC2088  # matching a LITERAL leading ~ is the point; the expansion is ours
+  case "$p" in
+    '~') p=$HOME ;;
+    '~/'*) p=$HOME/${p#'~/'} ;;
+  esac
+  case "$p" in
+    /*) printf '%s\n' "$p" ;;
+    *) return 1 ;;
+  esac
+}
+
 # emit <mode> -> prints the resolved line, or answers a --grant or --persona query.
 emit() {
   local mode=$1 grants=""
@@ -174,102 +234,161 @@ emit() {
   exit 0
 }
 
-if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes with no grants" >&2
-  emit no-mistakes
-fi
+# resolve_name <name> -> parses the entry, setting MODE, the G_* grants,
+# PERSONA, and REG_PATH. Returns 1 when the project is absent from the registry.
+resolve_name() {
+  local n=$1 parsed mode toks tok rest one p rawp expanded path_voided
+  G_FINDINGS=off
+  G_MERGE=off
+  G_LOCAL_MERGE=off
+  PERSONA=none
+  REG_PATH=
+  path_voided=0
+  MODE=no-mistakes
 
-# awk emits "<mode><TAB><flag tokens>" (one line) or nothing if the project is absent.
-# Only the first bracket word can name the mode; every "+" or "@" word is a flag
-# token, so a persona-only bracket ("[@work]") keeps the default mode.
-parsed=$(awk -v n="$NAME" '
-  $1=="-" && $2==n {
-    mode="no-mistakes"; toks="";
-    if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
-      k = split(s, a, " ");
-      for (j=1; j<=k; j++) {
-        if (a[j] == "") continue;
-        c = substr(a[j], 1, 1);
-        if (c == "+" || c == "@") { toks = toks (toks==""?"":" ") a[j]; continue }
-        if (j == 1) mode = a[j];
+  # awk emits "<mode><TAB><flag tokens>" (one line) or nothing if the project is
+  # absent. Only the first bracket word can name the mode; every "+" or "@" word
+  # is a flag token, so a persona-only bracket ("[@work]") keeps the default mode.
+  parsed=$(awk -v n="$n" '
+    $1=="-" && $2==n {
+      mode="no-mistakes"; toks="";
+      if ($3 ~ /^\[/) {
+        s="";
+        for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
+        gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
+        k = split(s, a, " ");
+        for (j=1; j<=k; j++) {
+          if (a[j] == "") continue;
+          c = substr(a[j], 1, 1);
+          if (c == "+" || c == "@") { toks = toks (toks==""?"":" ") a[j]; continue }
+          if (j == 1) mode = a[j];
+        }
       }
+      printf "%s\t%s\n", mode, toks; exit
     }
-    printf "%s\t%s\n", mode, toks; exit
-  }
-' "$REG")
+  ' "$REG")
+  [ -n "$parsed" ] || return 1
 
-if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes with no grants" >&2
-  emit no-mistakes
-fi
-
-mode=${parsed%%	*}
-toks=${parsed#*	}
-case "$mode" in
-  no-mistakes|direct-PR|local-only) ;;
-  *)
-    echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes with no grants" >&2
-    emit no-mistakes
-    ;;
-esac
-
-# Walk the flag tokens. An unrecognised token, grant name, or persona token is
-# dropped with a warning: it never widens permission, and it never voids a
-# valid sibling.
-# Word splitting is wanted here; globbing is not, or a malformed flag holding a
-# "*" would expand against the working directory instead of being reported.
-set -f
-for tok in $toks; do
-  case "$tok" in
-    @*)
-      p=${tok#@}
-      case "$p" in
-        '')
-          echo "warn: empty persona token \"$tok\" for $NAME; recording no persona from it" >&2
-          ;;
-        *[!A-Za-z0-9._-]*)
-          echo "warn: malformed persona \"$p\" for $NAME; recording no persona from it" >&2
-          ;;
-        none)
-          # "none" is the reserved absent value, so a recorded @none could never
-          # be told apart from no record at all; refuse it rather than alias it.
-          echo "warn: reserved persona name \"none\" for $NAME; recording no persona from it" >&2
-          ;;
-        *)
-          if [ "$PERSONA" = none ]; then
-            PERSONA=$p
-          else
-            echo "warn: duplicate persona token \"$tok\" for $NAME; keeping \"$PERSONA\"" >&2
-          fi
-          ;;
-      esac
-      ;;
-    +yolo)
-      grant_apply findings
-      grant_apply merge
-      grant_apply local-merge
-      ;;
-    +yolo:*)
-      rest=${tok#+yolo:}
-      if [ -z "$rest" ]; then
-        echo "warn: empty grant list in \"$tok\" for $NAME; granting nothing from it" >&2
-        continue
-      fi
-      while [ -n "$rest" ]; do
-        one=${rest%%,*}
-        if [ "$one" = "$rest" ]; then rest=""; else rest=${rest#*,}; fi
-        if [ -z "$one" ]; then continue; fi
-        grant_apply "$one" || echo "warn: unknown autonomy grant \"$one\" for $NAME; granting nothing from it" >&2
-      done
-      ;;
+  mode=${parsed%%	*}
+  toks=${parsed#*	}
+  case "$mode" in
+    no-mistakes|direct-PR|local-only) MODE=$mode ;;
     *)
-      echo "warn: unknown registry flag \"$tok\" for $NAME; granting nothing from it" >&2
+      # Least permission on an unknown mode, exactly as before the path token
+      # existed: every flag on the line is dropped with it, including +path and
+      # any persona.
+      echo "warn: unknown mode \"$mode\" for $n; defaulting to no-mistakes with no grants" >&2
+      return 0
       ;;
   esac
-done
-set +f
 
-emit "$mode"
+  # Walk the flag tokens. An unrecognised token, grant name, or persona token is
+  # dropped with a warning: it never widens permission, and it never voids a
+  # valid sibling.
+  # Word splitting is wanted here; globbing is not, or a malformed flag holding a
+  # "*" would expand against the working directory instead of being reported.
+  set -f
+  for tok in $toks; do
+    case "$tok" in
+      @*)
+        p=${tok#@}
+        case "$p" in
+          '')
+            echo "warn: empty persona token \"$tok\" for $n; recording no persona from it" >&2
+            ;;
+          *[!A-Za-z0-9._-]*)
+            echo "warn: malformed persona \"$p\" for $n; recording no persona from it" >&2
+            ;;
+          none)
+            # "none" is the reserved absent value, so a recorded @none could never
+            # be told apart from no record at all; refuse it rather than alias it.
+            echo "warn: reserved persona name \"none\" for $n; recording no persona from it" >&2
+            ;;
+          *)
+            if [ "$PERSONA" = none ]; then
+              PERSONA=$p
+            else
+              echo "warn: duplicate persona token \"$tok\" for $n; keeping \"$PERSONA\"" >&2
+            fi
+            ;;
+        esac
+        ;;
+      +yolo)
+        grant_apply findings
+        grant_apply merge
+        grant_apply local-merge
+        ;;
+      +yolo:*)
+        rest=${tok#+yolo:}
+        if [ -z "$rest" ]; then
+          echo "warn: empty grant list in \"$tok\" for $n; granting nothing from it" >&2
+          continue
+        fi
+        while [ -n "$rest" ]; do
+          one=${rest%%,*}
+          if [ "$one" = "$rest" ]; then rest=""; else rest=${rest#*,}; fi
+          if [ -z "$one" ]; then continue; fi
+          grant_apply "$one" || echo "warn: unknown autonomy grant \"$one\" for $n; granting nothing from it" >&2
+        done
+        ;;
+      +path:*)
+        rawp=${tok#+path:}
+        if [ -z "$rawp" ]; then
+          echo "warn: empty path in \"$tok\" for $n; ignoring it" >&2
+          continue
+        fi
+        if ! expanded=$(expand_registry_path "$rawp"); then
+          echo "warn: registered path \"$rawp\" for $n is not absolute; ignoring it" >&2
+          continue
+        fi
+        if [ "$path_voided" = 1 ] || [ -n "$REG_PATH" ]; then
+          echo "warn: duplicate +path token \"$tok\" for $n; refusing to guess which path was meant - using no registered path" >&2
+          REG_PATH=
+          path_voided=1
+          continue
+        fi
+        REG_PATH=$expanded
+        ;;
+      *)
+        echo "warn: unknown registry flag \"$tok\" for $n; granting nothing from it" >&2
+        ;;
+    esac
+  done
+  set +f
+  return 0
+}
+
+if [ ! -f "$REG" ]; then
+  if [ "$LIST_PATHS" = 1 ]; then
+    exit 0
+  fi
+  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes with no grants" >&2
+  if [ "$PATH_QUERY" = 1 ]; then exit 1; fi
+  emit no-mistakes
+fi
+
+if [ "$LIST_PATHS" = 1 ]; then
+  # First-entry-wins for a duplicated name, matching the per-name resolver's
+  # "first match" awk above.
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    resolve_name "$n" || continue
+    [ -n "$REG_PATH" ] || continue
+    printf '%s\t%s\n' "$n" "$REG_PATH"
+  done < <(awk '$1=="-" && !seen[$2]++ {print $2}' "$REG")
+  exit 0
+fi
+
+if ! resolve_name "$NAME"; then
+  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes with no grants" >&2
+  if [ "$PATH_QUERY" = 1 ]; then exit 1; fi
+  emit no-mistakes
+fi
+
+if [ "$PATH_QUERY" = 1 ]; then
+  [ -n "$REG_PATH" ] || exit 1
+  printf '%s\n' "$REG_PATH"
+  exit 0
+fi
+
+emit "$MODE"

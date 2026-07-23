@@ -21,7 +21,7 @@ A secondmate is a crewmate with an isolated firstmate home and a charter, not a 
 Hard rules, in priority order:
 
 1. **Never write to a project.**
-   Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects and crewmates change them.
+   Do not edit, commit, or run state-changing commands under `projects/`, at a registered project's `+path` location, or in any project worktree; firstmate reads projects and crewmates change them.
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths owned by their referenced skills and scripts.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
 2. **Never merge a PR without the captain's explicit word.**
@@ -335,7 +335,7 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
-When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
+When any wake reports a merged PR for a project registered in this home, refresh its clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
