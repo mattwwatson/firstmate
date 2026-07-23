@@ -65,16 +65,16 @@ pass() {
 # here, in the sourcing shell, so no command-substitution subshell can inherit
 # it and delete a root it has just created.
 #
-# Each registry path is fixed at source time from this shell's own pid, but the
-# FILE is created LAZILY on first write - the cleanup log on the first
-# fm_test_tmproot, the pid log on the first fm_test_track_pid - so a suite that
-# installs its own EXIT trap and never touches a registry leaves no stray /tmp
-# file behind. The path is derived rather than mktemp'd because fm_test_tmproot
-# runs inside TMP_ROOT=$(...): a mktemp assignment there would die with the
-# command-substitution subshell (same hazard as the array append above), whereas
-# a $$-derived path set here in the sourcing shell is visible to every subshell
-# and stays stable across the run. A stale file from a recycled pid is cleared
-# once here. Every read is existence-guarded so an absent file reads as empty.
+# Both registry files live under a private mktemp'd directory created here at
+# source time - in the sourcing shell, so the assignment survives and the path
+# is visible to every subshell - rather than at predictable $$-derived names in
+# a shared /tmp, where another user could pre-create or symlink a registry and
+# steer the rm -rf in fm_test_cleanup. mktemp -d makes the directory mode 0700
+# with an unguessable name. The FILES inside are still created LAZILY on first
+# write - the cleanup log on the first fm_test_tmproot, the pid log on the
+# first fm_test_track_pid - and fm_test_cleanup removes the whole directory, so
+# a suite that follows the trap convention above leaves nothing behind. Every
+# read is existence-guarded so an absent file reads as empty.
 #
 # Reaping is BY REGISTERED PID ONLY, and only while that pid is still a child of
 # this shell. Never reap by process-name pattern: a pattern like the watcher's
@@ -82,9 +82,10 @@ pass() {
 # home's real watcher.
 
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_LOG="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
-FM_TEST_PID_LOG="${TMPDIR:-/tmp}/fm-test-pids.$$"
-rm -f "$FM_TEST_CLEANUP_LOG" "$FM_TEST_PID_LOG"
+FM_TEST_REGISTRY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-registry.XXXXXX") \
+  || fail "could not create test registry dir"
+FM_TEST_CLEANUP_LOG="$FM_TEST_REGISTRY_DIR/cleanup"
+FM_TEST_PID_LOG="$FM_TEST_REGISTRY_DIR/pids"
 
 # fm_test_pid_is_own_child <pid>: true while <pid> is still a direct child of
 # this shell. This guards every signal the reaper sends: once a pid has been
@@ -152,9 +153,8 @@ fm_test_cleanup() {
       esac
       rm -rf "$d"
     done < "$FM_TEST_CLEANUP_LOG"
-    rm -f "$FM_TEST_CLEANUP_LOG"
   fi
-  [ -n "${FM_TEST_PID_LOG:-}" ] && rm -f "$FM_TEST_PID_LOG"
+  [ -n "${FM_TEST_REGISTRY_DIR:-}" ] && rm -rf "$FM_TEST_REGISTRY_DIR"
   return 0
 }
 
