@@ -44,6 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/projects.md"
 
 NAME=
@@ -92,6 +93,33 @@ grant_apply() {
   esac
 }
 
+# A held merge grant on a forge whose credential firstmate itself holds is only
+# usable when that credential's REAL scopes can merge, so a granted merge query
+# is the resolution-time moment to warn when they cannot (the other moment is
+# session-start bootstrap; the decision record is
+# data/bitbucket-parity/decision-bb-credential-identity.md in the captain's
+# home, summarised in docs/configuration.md "Forge credentials"). Advisory
+# only: the grant answer itself is unchanged, and the merge attempt still fails
+# closed at the forge. Every step degrades to silence - no clone, an unknown
+# forge, gh-owned GitHub, an unreachable forge, or unprovable scopes must never
+# turn a local permission lookup into a failure or a speculative warning.
+# FM_MERGE_CAPABILITY_PROBE=0 skips the probe entirely; bootstrap sets it while
+# scanning grants so one session start cannot fan out one probe per project.
+warn_if_merge_incapable() {
+  local resolver url forge capability
+  [ "${FM_MERGE_CAPABILITY_PROBE:-1}" = 1 ] || return 0
+  resolver="$SCRIPT_DIR/fm-forge-credential.sh"
+  [ -x "$resolver" ] || return 0
+  [ -d "$PROJECTS/$NAME" ] || return 0
+  url=$(git -C "$PROJECTS/$NAME" remote get-url origin 2>/dev/null) || return 0
+  forge=$("$resolver" forge-of "$url" 2>/dev/null) || return 0
+  [ "$forge" = bitbucket ] || return 0
+  capability=$("$resolver" merge-capable "$forge" 2>/dev/null) || return 0
+  [ "$capability" = no ] || return 0
+  echo "warn: $NAME grants merge but firstmate's $forge credential cannot merge (its scopes lack pull-request write); merges will be refused until the credential gains that scope or the grant is removed" >&2
+  return 0
+}
+
 # emit <mode> -> prints the resolved line, or answers a --grant query.
 emit() {
   local mode=$1 grants=""
@@ -103,7 +131,10 @@ emit() {
   if [ "$QUERY_SET" = 1 ]; then
     case "$QUERY" in
       findings) [ "$G_FINDINGS" = on ] || exit 1 ;;
-      merge) [ "$G_MERGE" = on ] || exit 1 ;;
+      merge)
+        [ "$G_MERGE" = on ] || exit 1
+        warn_if_merge_incapable
+        ;;
       local-merge) [ "$G_LOCAL_MERGE" = on ] || exit 1 ;;
     esac
     exit 0

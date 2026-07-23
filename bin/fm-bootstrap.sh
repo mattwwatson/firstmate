@@ -616,6 +616,43 @@ forge_credential_check() {
   forge_credential_report "$unnamed" "$status" "$out"
 }
 
+# Merge-capability detection, the startup half of the capability-checked merge
+# decision (docs/configuration.md "Forge credentials"). A Bitbucket project
+# can carry the merge grant while the shared credential's real scopes cannot
+# merge; that mismatch used to surface only when an autonomous merge failed.
+# The scan asks bin/fm-project-mode.sh (the single owner of the grant grammar)
+# which Bitbucket clones grant merge, with its own resolution-time probe
+# suppressed so a home's clone count cannot become a request count, then
+# probes the credential's scopes ONCE for all of them. Only a proven "no"
+# reports, and it reports every session start while the mismatch persists,
+# because it stays actionable until the captain re-scopes the credential or
+# drops the grant. A read-only credential with no merge grants anywhere is a
+# healthy fleet shape and stays silent, as does an unprovable scope list -
+# the merge attempt itself still fails closed at the forge.
+merge_capability_check() {
+  local resolver proj name url forge granted capability
+  resolver="$SCRIPT_DIR/fm-forge-credential.sh"
+  [ -x "$resolver" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+  granted=
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
+    forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
+    [ "$forge" = bitbucket ] || continue
+    name=${proj##*/}
+    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$DATA" \
+      FM_MERGE_CAPABILITY_PROBE=0 \
+      "$SCRIPT_DIR/fm-project-mode.sh" "$name" --grant merge >/dev/null 2>&1 || continue
+    granted="${granted:+$granted, }$name"
+  done
+  [ -n "$granted" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  capability=$("$resolver" merge-capable bitbucket 2>/dev/null) || return 0
+  [ "$capability" = no ] || return 0
+  echo "FORGE_CREDENTIAL: bitbucket: merge is granted on $granted but the credential cannot merge (its scopes lack pull-request write), so those merges will be refused until the credential gains that scope or the grant is removed"
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -985,6 +1022,7 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 forge_credential_check
+merge_capability_check
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

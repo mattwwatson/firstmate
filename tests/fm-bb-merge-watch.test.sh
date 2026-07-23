@@ -540,9 +540,16 @@ test_build_status_verdicts() {
   pass "build status reads one page, judges the latest entry per key, and refuses what it cannot prove"
 }
 
-test_merge_refuses_not_green_and_stays_read_only() {
+# The full 200/202/409/429/555 merge protocol is pinned by
+# tests/fm-bb-pr-merge.test.sh; this case pins what the fm-pr-merge.sh entry
+# point guarantees around it: not-green build verdicts refuse before any merge
+# request exists, a green one dispatches to the Bitbucket merge protocol
+# rather than gh-axi, and no 2xx shortcut can report success without a
+# confirmed MERGED read-back.
+test_merge_refuses_not_green_and_dispatches_green() {
   local dir out rc
   dir=$(make_case merge-gate)
+  write_task_meta "$dir" task-a
 
   set +e
   out=$(FAKE_BB_STATUSES_BODY='{"values": [{"key": "ci", "state": "FAILED", "updated_on": "2026-07-21T10:00:00+00:00"}]}' \
@@ -562,25 +569,36 @@ test_merge_refuses_not_green_and_stays_read_only() {
   assert_contains "$out" 'still running' "the pending refusal did not explain itself"
 
   set +e
-  out=$(run_merge_entry "$dir" task-a "$BB_URL" 2>&1)
-  rc=$?
-  set -e
-  expect_code 2 "$rc" "merge-green"
-  assert_contains "$out" 'read-only by design' \
-    "a green pull request was not refused with the read-only reason"
-
-  set +e
-  out=$(FAKE_CURL_STATUS=401 run_merge_entry "$dir" task-a "$BB_URL" 2>&1)
+  out=$(FAKE_CURL_FAIL_MATCH=/statuses FAKE_CURL_FAIL_STATUS=401 \
+    run_merge_entry "$dir" task-a "$BB_URL" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "merge-unreadable"
   assert_contains "$out" 'could not be read' "an unreadable verdict was not refused"
   assert_no_credential_leak "$out" "the merge refusal output"
 
-  [ ! -s "$dir/gh-axi.log" ] || fail "a bitbucket merge refusal reached gh-axi"
+  # Every refusal above must have happened before any merge request existed.
   ! grep -qF 'pullrequests/12/merge' "$dir/curl-argv" \
-    || fail "the merge path sent a Bitbucket merge request"
-  pass "the merge path refuses red, pending, and unreadable verdicts and never mutates Bitbucket"
+    || fail "a refused merge still sent a Bitbucket merge request"
+
+  # A green pull request dispatches to the Bitbucket merge protocol. The fake
+  # answers the POST with 200 and an OPEN pull request, so the confirmation
+  # read-back must refuse to report success - the 2xx-shortcut defect guard.
+  set +e
+  out=$(run_merge_entry "$dir" task-a "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "merge-green-unconfirmed"
+  grep -qF 'pullrequests/12/merge' "$dir/curl-argv" \
+    || fail "a green pull request did not reach the Bitbucket merge request"
+  assert_contains "$out" 'refusing to report success' \
+    "a 200 without a MERGED read-back was reported as success"
+  grep -qxF "pr=$BB_URL" "$dir/home/state/task-a.meta" \
+    || fail "the merge path did not record pr= before merging"
+  assert_no_credential_leak "$out" "the merge dispatch output"
+
+  [ ! -s "$dir/gh-axi.log" ] || fail "a bitbucket merge reached gh-axi"
+  pass "the merge path refuses not-green verdicts before any request and dispatches green to the confirmed Bitbucket protocol"
 }
 
 test_watcher_selects_bb_template_and_wakes_merged() {
@@ -687,7 +705,7 @@ test_arm_time_verification_success
 test_arm_time_verification_refusals
 test_arm_survives_statuses_hiccup
 test_build_status_verdicts
-test_merge_refuses_not_green_and_stays_read_only
+test_merge_refuses_not_green_and_dispatches_green
 test_watcher_selects_bb_template_and_wakes_merged
 test_watcher_warns_once_on_lost_credential
 test_migration_rebuilds_bb_and_leaves_github_untouched

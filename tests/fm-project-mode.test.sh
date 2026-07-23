@@ -225,6 +225,7 @@ test_every_caller_reads_the_field_it_intends() {
         *'read -r mode _'*|*'read -r MODE _'*) ;;               # mode only
         *'%% *'*) ;;                                            # mode only
         *'read -r MODE GRANTS'*) ;;                             # mode and grants
+        *'--grant '*) ;;                                        # exit-code query, reads no field
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
     done < <(grep -n 'fm-project-mode\.sh' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
