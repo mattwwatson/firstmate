@@ -534,7 +534,7 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode persona
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
@@ -546,6 +546,15 @@ EOF
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
   fi
+  # A fresh clone does not carry the parent clone's LOCAL config, so a recorded
+  # persona (bin/fm-persona.sh) must be re-applied here or the seeded clone
+  # silently falls back to the global identity. A preexisting clone is verified
+  # instead, never mutated, matching the initialization rule below.
+  persona=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project" --persona 2>/dev/null) || {
+    echo "error: cannot determine the recorded persona for project $project (fm-project-mode.sh $project --persona failed); refusing to seed" >&2
+    return 1
+  }
+  [ -n "$persona" ] || persona=none
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
@@ -555,10 +564,22 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
+    if [ "$persona" != none ]; then
+      "$FM_ROOT/bin/fm-persona.sh" check "$persona" "$dst" >/dev/null || {
+        echo "error: seeded project $project at $dst does not resolve its recorded persona $persona; refusing to mutate preexisting clone (inspect with bin/fm-persona.sh check $persona $dst)" >&2
+        return 1
+      }
+    fi
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  if [ "$persona" != none ]; then
+    "$FM_ROOT/bin/fm-persona.sh" apply "$persona" "$dst" >/dev/null || {
+      echo "error: could not apply recorded persona $persona to seeded project $project at $dst (inspect with bin/fm-persona.sh list)" >&2
+      return 1
+    }
+  fi
 }
 
 validate_seed_project() {

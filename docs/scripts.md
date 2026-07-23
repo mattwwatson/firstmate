@@ -47,8 +47,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `backends/orca.sh`       | Experimental Orca backend adapter owning both worktree and terminal                  |
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inherited local material to live secondmates mid-session and send a pointer to the literal-content config reread when config changed |
-| `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` autonomy grants from `data/projects.md` |
-| `fm-identity-check.sh`   | Refuse enrolment when a fleet clone's resolved git identity does not suit its remote |
+| `fm-project-mode.sh`     | Resolve a project's delivery mode, `+yolo` autonomy grants, and recorded `@persona` from `data/projects.md` |
+| `fm-persona.sh`          | Detect the captain's git identities, apply the recorded one to a clone, and verify a clone against its record |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |

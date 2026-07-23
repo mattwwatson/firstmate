@@ -191,6 +191,82 @@ test_grant_query_rejects_an_empty_grant_name() {
   pass "an empty grant name is refused, never answered as granted"
 }
 
+# --- the recorded persona ---------------------------------------------------
+
+persona_of() {
+  FM_HOME="$1" "$ROOT/bin/fm-project-mode.sh" "$2" --persona 2>/dev/null
+}
+
+test_persona_token_is_recorded_and_queryable() {
+  local home
+  home=$(registry '- app [no-mistakes @moroku +yolo:findings] - x (added 2026-07-23)')
+  [ "$(persona_of "$home" app)" = "moroku" ] \
+    || fail "recorded persona not reported, got: $(persona_of "$home" app)"
+  # The persona token changes neither the mode/grants output nor the grants.
+  [ "$(resolve "$home" app)" = "no-mistakes findings" ] \
+    || fail "persona token disturbed mode/grants, got: $(resolve "$home" app)"
+  granted "$home" app findings || fail "persona token voided a valid grant sibling"
+  granted "$home" app merge && fail "persona token widened permission"
+  pass "a @<persona> token is recorded and queryable without touching mode or grants"
+}
+
+test_persona_defaults_to_none() {
+  local home
+  home=$(registry '- app [direct-PR] - x (added 2026-07-23)')
+  [ "$(persona_of "$home" app)" = "none" ] || fail "unrecorded persona must be none"
+  # Absent project and absent registry resolve the same way: none, exit 0.
+  [ "$(persona_of "$home" other)" = "none" ] || fail "absent project must report none"
+  home=$(mktemp -d "$TMP_ROOT/nreg.XXXXXX")
+  [ "$(persona_of "$home" app)" = "none" ] || fail "missing registry must report none"
+  pass "a project with no persona token reports none, exit 0"
+}
+
+test_persona_only_bracket_keeps_the_default_mode() {
+  local home
+  home=$(registry '- app [@moroku] - x (added 2026-07-23)')
+  [ "$(resolve "$home" app)" = "no-mistakes none" ] \
+    || fail "persona-only bracket changed the mode, got: $(resolve "$home" app)"
+  [ "$(persona_of "$home" app)" = "moroku" ] || fail "persona-only bracket lost the persona"
+  pass "a persona-only bracket keeps the default mode and records the persona"
+}
+
+test_malformed_persona_resolves_to_none_and_reports() {
+  local home err
+  for line in \
+    '- app [no-mistakes @] - empty (added 2026-07-23)' \
+    '- app [no-mistakes @wo/rk] - bad char (added 2026-07-23)' \
+    '- app [no-mistakes @none] - reserved (added 2026-07-23)'; do
+    home=$(registry "$line")
+    [ "$(persona_of "$home" app)" = "none" ] \
+      || fail "malformed persona must resolve to none, got: $(persona_of "$home" app) for $line"
+    err=$({ FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --persona >/dev/null; } 2>&1)
+    assert_contains "$err" "warn:" "malformed persona must be reported for $line"
+  done
+  # An unknown mode drops the line's persona with its flags, matching grants.
+  home=$(registry '- app [bogus-mode @moroku] - x (added 2026-07-23)')
+  [ "$(persona_of "$home" app)" = "none" ] \
+    || fail "unknown mode must drop the persona, got: $(persona_of "$home" app)"
+  pass "malformed, reserved, and unknown-mode persona input resolves safely to none"
+}
+
+test_duplicate_persona_first_wins_and_reports() {
+  local home err
+  home=$(registry '- app [direct-PR @one @two] - x (added 2026-07-23)')
+  [ "$(persona_of "$home" app)" = "one" ] \
+    || fail "duplicate persona must keep the first, got: $(persona_of "$home" app)"
+  err=$({ FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --persona >/dev/null; } 2>&1)
+  assert_contains "$err" "@two" "duplicate persona token must be reported"
+  pass "a duplicate persona token keeps the first and says so"
+}
+
+test_persona_and_grant_queries_are_mutually_exclusive() {
+  local home status
+  home=$(registry '- app [no-mistakes @moroku +yolo] - x (added 2026-07-23)')
+  FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" app --grant merge --persona >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" = 2 ] || fail "--grant with --persona must be a usage error, got exit $status"
+  pass "--grant and --persona refuse to combine"
+}
+
 # --- caller contract --------------------------------------------------------
 
 test_second_field_can_never_be_read_as_the_old_boolean() {
@@ -226,6 +302,7 @@ test_every_caller_reads_the_field_it_intends() {
         *'%% *'*) ;;                                            # mode only
         *'read -r MODE GRANTS'*) ;;                             # mode and grants
         *'--grant '*) ;;                                        # exit-code query, reads no field
+        *'--persona'*) ;;                                       # the one-word persona query
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
     done < <(grep -n 'fm-project-mode\.sh' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
@@ -255,6 +332,12 @@ test_unknown_grant_does_not_poison_valid_siblings
 test_malformed_and_absent_input_resolves_to_least_permission
 test_grant_query_rejects_an_unknown_grant_name
 test_grant_query_rejects_an_empty_grant_name
+test_persona_token_is_recorded_and_queryable
+test_persona_defaults_to_none
+test_persona_only_bracket_keeps_the_default_mode
+test_malformed_persona_resolves_to_none_and_reports
+test_duplicate_persona_first_wins_and_reports
+test_persona_and_grant_queries_are_mutually_exclusive
 test_second_field_can_never_be_read_as_the_old_boolean
 test_every_caller_reads_the_field_it_intends
 test_spawn_records_grants_in_task_metadata
