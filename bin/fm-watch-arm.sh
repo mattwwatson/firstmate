@@ -409,12 +409,18 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
+    # Surface the child's own words the moment it closes, BEFORE spending the
+    # bounded successor-confirmation window on it. The child explains itself
+    # here ("already running pid N" when it stood down behind a peer), and
+    # whoever is reading this arm's output should not have to wait out that poll
+    # to learn why. The relative order of what this arm prints is unchanged: the
+    # child's output has always preceded the attached/FAILED line that follows.
+    print_watch_output "$child_out"
+    rm -f "$child_out" 2>/dev/null || true
+    child=
+    child_out=
     if wait_for_healthy_successor; then
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
-      print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
-      child=
-      child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
       cycle_begin "$HEALTHY_PID" attached
@@ -422,10 +428,6 @@ owned_child_finished() {
       return $?
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
-    print_watch_output "$child_out"
-    rm -f "$child_out" 2>/dev/null || true
-    child=
-    child_out=
     fail_unexplained_cycle
     return 1
   fi
