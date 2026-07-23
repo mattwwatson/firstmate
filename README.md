@@ -105,7 +105,12 @@ pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+Every Pi session starts with calm mode off and tool activity visible; `/calm` is a session-local toggle that hides all seven built-in call shells and text-result rows, including existing rows.
+Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
+Built-in `read` images on image-capable terminals and custom or third-party tool rows remain visible because Pi 0.80.10 does not expose those rows to supported extension renderers.
+The toggle changes only interactive rendering, not tool execution, model context, session storage, exports, or diagnostics.
+The version-scoped feasibility evidence for keeping this feature Pi-only is recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
 
 ### Talk to it
 
@@ -167,6 +172,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
+| `/ahoy`            | Recap only visible session events since the prior real captain message, falling back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
