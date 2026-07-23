@@ -275,8 +275,9 @@ exit 0
 fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
-# yolo does not affect the brief because the worker never owns approval decisions;
-# firstmate applies the authority contract in AGENTS.md section 7, so discard it.
+# Autonomy grants do not affect the brief because the worker never owns approval
+# decisions; firstmate applies the authority contract in AGENTS.md section 7, so
+# discard them.
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
