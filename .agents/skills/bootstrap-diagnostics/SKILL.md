@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, FORGE_CREDENTIAL, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -24,6 +24,18 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `FORGE_CREDENTIAL: <forge>: <reason>` - this home tracks a repository on a forge whose credential firstmate holds itself, and that credential cannot be used, so merge detection and build results for every repository on that forge are unavailable until it is fixed.
+  The reason names the failing requirement only, never a credential value, and never quote a credential back to the captain or ask them to paste one into chat.
+  An absent or empty entry means the captain must create or re-cache it; a rejected credential means it was revoked, expired, or was created without the read scopes firstmate needs; a store read that did not answer in time means the stored item is raising a confirmation dialog no unattended session can answer, so it must be re-cached to allow an unattended read.
+  "cannot see <forge> repository <repo>" means the credential authenticated and the forge then refused to admit that repository exists, which does NOT say whose fault it is.
+  Scope refusal would have arrived as its own HTTP 403 line, so the live possibilities are a credential bound to the wrong account, a credential that has lost access to that specific private repository, or a repository that was renamed or moved.
+  Check those in that order: confirm which account the keychain entry belongs to, then confirm the captain still has access to the named repository, then confirm the repository still lives at the path the clone's origin remote gives.
+  "no credential store on this platform" is news, not a fault: this machine has no login keychain to read, that forge's merge and build checks are simply unavailable here, and there is nothing for the captain to retry.
+  Both of those two are reported once per home and then stay silent, so report each plainly and move on, and do not treat a later silence as the problem having been fixed.
+  The not-visible record is kept per probed repository, so a line naming a different repository later is fresh news reported in its own right rather than a repeat, while the no-store record is per forge because it names no repository.
+  A lock-refused session reports them without recording them, so the same line arriving again in the session that holds the lock is the expected handover, not a regression.
+  `bin/fm-forge-credential.sh`'s header owns the entry names, the required scopes, and the exit-code contract - read it before advising the captain, and tell them the consequence and the action rather than the diagnostic label.
+  Firstmate cannot create or store the credential itself, so this always ends in a captain action; work that does not touch that forge continues normally.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
