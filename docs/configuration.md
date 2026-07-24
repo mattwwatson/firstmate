@@ -23,6 +23,17 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Project autonomy grants (data/projects.md)
+
+`bin/fm-project-mode.sh`'s header is the single owner of the registry grammar, the per-grant meaning, and the least-permission resolution rule; this is a navigation entry for the four grant names only.
+`findings` delegates no-mistakes ask-user answers, `merge` delegates merging any green pull request, `merge-unobservable` delegates merging a green pull request only when the crewmate that built the change declared it captain-unobservable, and `local-merge` delegates approving a local-only landing.
+Each is granted independently and defaults off, and no grant covers destructive, irreversible, or security-sensitive decisions.
+
+`merge-unobservable` spans three files, each owning its own half of the contract.
+`bin/fm-brief.sh` puts the declaration in a PR-based ship brief's definition of done when the project carries the grant, `bin/fm-classify-lib.sh` owns the `[observable=yes]` / `[observable=no]` status-line token grammar and its `status_observability` reader, and `bin/fm-merge-decision.sh` owns the resulting merge-or-escalate decision.
+The declaration is made at pull-request-ready rather than at dispatch because the worker that built the change is the one who knows whether there is anything to hand-test.
+It carries no forge-capability exemption: a Bitbucket project holding it hits the same read-only-credential refusal as one holding `merge`, and is named by the same warnings (see "Forge credentials").
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -292,7 +303,7 @@ Three properties of this arrangement are deliberate and load-bearing.
 
 **Its write capability is the captain's provisioning choice, checked against its real scopes.** The recommended scopes are repository, pull request, and pipeline READ, under which an unattended reader cannot push, merge, or otherwise change a repository, and the merge action stays dormant because the forge itself refuses every write.
 A captain who wants firstmate to merge on Bitbucket adds pull-request write to this same credential - one credential for both polling and merging, per the capability-checked decision of 22/07/2026 - and the system detects which shape it holds from the credential's ACTUAL scopes (`bin/fm-forge-credential.sh merge-capable`) rather than assuming either.
-The mismatch is warned exactly when merge is actually requested: at session start when a Bitbucket project carries the `merge` grant the credential provably cannot honor, and at merge-grant resolution in `bin/fm-project-mode.sh`.
+The mismatch is warned exactly when merge is actually requested: at session start when a Bitbucket project carries an autonomous merge grant (`merge` or `merge-unobservable`) the credential provably cannot honor, and at merge-grant resolution in `bin/fm-project-mode.sh`.
 A read-only credential with no merge grants anywhere is a healthy shape and stays silent.
 The resolver's one write action is the pull-request merge POST driven by `bin/fm-bb-pr-merge.sh` (docs/bitbucket-merge-watch.md "Stage 4"); every other subcommand, including everything the unattended poller runs, performs only reads.
 
@@ -428,7 +439,7 @@ FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/security   # credential-store reader us
 FM_FORGE_CREDENTIAL_TIMEOUT=10   # seconds allowed for one forge API request; a blank, non-numeric, or zero value uses 10
 FM_FORGE_KEYCHAIN_TIMEOUT=5      # seconds allowed for one credential-store read; a blank, non-numeric, or zero value uses 5
 FM_FORGE_MERGE_TIMEOUT=60        # seconds allowed for the one pull-request merge POST; a blank, non-numeric, or zero value uses 60 (the merge protocol's retry and poll bounds are owned by bin/fm-bb-pr-merge.sh's header)
-FM_MERGE_CAPABILITY_PROBE=1      # 0 skips the merge-capability scope probe on a granted --grant merge query; bootstrap sets 0 while scanning grants so one session start probes once, not once per project
+FM_MERGE_CAPABILITY_PROBE=1      # 0 skips the merge-capability scope probe on a granted --grant merge or --grant merge-unobservable query; bootstrap sets 0 while scanning grants so one session start probes once, not once per project, and fm-brief.sh sets 0 so scaffolding a brief never makes a forge request
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state

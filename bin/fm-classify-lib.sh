@@ -278,6 +278,57 @@ status_open_activities() {  # <status-file-or-dash>
   _fm_status_open_activities_stream < "$f"
 }
 
+# --- the captain-observability declaration ----------------------------------
+#
+# A crewmate on a project holding the merge-unobservable autonomy grant must
+# declare, when it reports its PR, whether the change is something the captain
+# could see or feel by running the app. That declaration is what
+# bin/fm-merge-decision.sh turns into an autonomous merge or an escalation, so
+# it is a TOKEN, never prose: nothing here infers observability from wording.
+#
+# Grammar: one `[observable=yes]` or `[observable=no]` token in the status line,
+# after the verb's colon, e.g.
+#   done: PR https://github.com/o/r/pull/7 checks green [observable=no]
+# The token is deliberately separate from the `[key=<slug>]` decision token,
+# which sits BEFORE the colon and is parsed by status_line_verb; putting this
+# one in the note keeps the verb parser untouched.
+FM_CLASSIFY_OBSERVABLE_TOKEN_RE='\[observable=[^]]*\]'
+
+# Print exactly one token for a status FILE's declaration, and always exit 0.
+# Only `no` may ever authorise an autonomous merge; every other answer escalates.
+#   no         the last declaring line declared the change captain-unobservable
+#   yes        it declared the change captain-observable
+#   absent     no line in the stream carries a declaration at all
+#   ambiguous  the last declaring line carries more than one token, or a token
+#              whose value is neither yes nor no
+# The LAST line carrying a token wins, so a corrected declaration supersedes an
+# earlier one, exactly as a later status event supersedes an earlier one.
+# Conflicting tokens on that one line are never resolved by guessing.
+status_observability() {  # <status-file>
+  local f=$1 line note last='' count value
+  [ -f "$f" ] || { printf 'absent'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Only the note counts. A token written before the colon would land inside
+    # the verb and silently break wake classification, so it is not a
+    # declaration at all rather than a declaration on a broken line.
+    case "$line" in *:*) ;; *) continue ;; esac
+    note=$(status_line_note "$line")
+    printf '%s' "$note" | grep -qE "$FM_CLASSIFY_OBSERVABLE_TOKEN_RE" || continue
+    last=$note
+  done < "$f"
+  [ -n "$last" ] || { printf 'absent'; return 0; }
+  count=$(printf '%s' "$last" | grep -oE "$FM_CLASSIFY_OBSERVABLE_TOKEN_RE" | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
+  value=$(printf '%s' "$last" | grep -oE "$FM_CLASSIFY_OBSERVABLE_TOKEN_RE")
+  value=${value#\[observable=}
+  value=${value%\]}
+  case "$value" in
+    yes|no) printf '%s' "$value" ;;
+    *) printf 'ambiguous' ;;
+  esac
+  return 0
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {

@@ -647,7 +647,9 @@ forge_credential_check() {
 # can carry the merge grant while the shared credential's real scopes cannot
 # merge; that mismatch used to surface only when an autonomous merge failed.
 # The scan asks bin/fm-project-mode.sh (the single owner of the grant grammar)
-# which Bitbucket clones grant merge, with its own resolution-time probe
+# which Bitbucket clones grant an autonomous merge - blanket `merge` or the
+# narrower `merge-unobservable`, both of which end at the same forge refusal -
+# with its own resolution-time probe
 # suppressed so a home's clone count cannot become a request count, then
 # probes the credential's scopes ONCE for all of them. Only a proven "no"
 # reports, and it reports every session start while the mismatch persists,
@@ -656,7 +658,7 @@ forge_credential_check() {
 # healthy fleet shape and stays silent, as does an unprovable scope list -
 # the merge attempt itself still fails closed at the forge.
 merge_capability_check() {
-  local resolver proj name url forge granted capability
+  local resolver proj name url forge grant granted capability
   resolver="$SCRIPT_DIR/fm-forge-credential.sh"
   [ -x "$resolver" ] || return 0
   [ -d "$PROJECTS" ] || return 0
@@ -667,16 +669,19 @@ merge_capability_check() {
     forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
     [ "$forge" = bitbucket ] || continue
     name=${proj##*/}
-    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$DATA" \
-      FM_MERGE_CAPABILITY_PROBE=0 \
-      "$SCRIPT_DIR/fm-project-mode.sh" "$name" --grant merge >/dev/null 2>&1 || continue
-    granted="${granted:+$granted, }$name"
+    for grant in merge merge-unobservable; do
+      FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$DATA" \
+        FM_MERGE_CAPABILITY_PROBE=0 \
+        "$SCRIPT_DIR/fm-project-mode.sh" "$name" --grant "$grant" >/dev/null 2>&1 || continue
+      granted="${granted:+$granted, }$name"
+      break
+    done
   done
   [ -n "$granted" ] || return 0
   command -v curl >/dev/null 2>&1 || return 0
   capability=$("$resolver" merge-capable bitbucket 2>/dev/null) || return 0
   [ "$capability" = no ] || return 0
-  echo "FORGE_CREDENTIAL: bitbucket: merge is granted on $granted but the credential cannot merge (its scopes lack pull-request write), so those merges will be refused until the credential gains that scope or the grant is removed"
+  echo "FORGE_CREDENTIAL: bitbucket: an autonomous merge is granted on $granted but the credential cannot merge (its scopes lack pull-request write), so those merges will be refused until the credential gains that scope or the grant is removed"
 }
 
 install_cmd() {

@@ -183,6 +183,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode, its optional, independently settable `+yolo` autonomy grants, its captain-recorded `@<persona>` git identity, and - when its clone deliberately lives outside `projects/` - its registered `+path` location; the header of `bin/fm-project-mode.sh` owns the registry grammar.
+One of those grants, `merge-unobservable`, reaches further than the registry: it puts a captain-observability declaration in the crewmate's brief and turns that declaration into an autonomous merge or an escalation at pull-request-ready (`bin/fm-merge-decision.sh`).
 `bin/fm-persona.sh` owns persona detection, application, and verification, and every task worktree inherits the applied persona because worktrees share the parent clone's local config.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
