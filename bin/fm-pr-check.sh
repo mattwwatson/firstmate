@@ -8,6 +8,9 @@
 # shell source. A GitHub pull request URL, a Bitbucket Cloud pull request URL,
 # and a GitLab merge request URL are all accepted, including a merge request on
 # a self-hosted GitLab instance.
+# After arming, it posts the ship task's Manual-testing section to the PR as a
+# comment via bin/fm-pr-comment.sh - non-fatally, since the watch is already
+# armed - so every ship PR carries that section without editing the PR body.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -188,3 +191,11 @@ if [ "$PROVIDER" = bitbucket ]; then
     printf 'build: unknown\n'
   fi
 fi
+
+# Post the builder's Manual-testing section as a PR comment now that the PR
+# exists and firstmate has just authenticated to it. Informational and
+# non-fatal: the merge watch is already armed, so a posting hiccup or a section
+# the builder never wrote must surface without unarming the watch.
+# bin/fm-pr-comment.sh is idempotent, so re-arming a task never double-comments.
+MT_OUT=$("$SCRIPT_DIR/fm-pr-comment.sh" "$ID" "$URL" 2>&1) || true
+[ -z "$MT_OUT" ] || printf '%s\n' "$MT_OUT"

@@ -279,7 +279,8 @@ remove_pr_poll_artifacts() {
   # they are empty and carry no trust, so removal needs no validation.
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" \
-    "$state_dir/$id.bb-poll-warned.auth" "$state_dir/$id.bb-poll-warned.gone" || return 1
+    "$state_dir/$id.bb-poll-warned.auth" "$state_dir/$id.bb-poll-warned.gone" \
+    "$state_dir/$id-manual-testing-section.md" "$state_dir/$id.manual-testing-posted" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then

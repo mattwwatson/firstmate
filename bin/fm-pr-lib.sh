@@ -82,6 +82,22 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+# The per-task file into which a ship crewmate writes its Manual-testing section
+# at PR-ready, and which firstmate posts as a PR comment at pr-check time. This
+# function is the ONE owner of that path convention: bin/fm-brief.sh names it in
+# the generated brief, and bin/fm-pr-comment.sh reads it back to post. It is a
+# volatile per-task state file, so bin/fm-teardown.sh removes it with the rest.
+fm_manual_testing_section_path() {  # <state-dir> <id>
+  printf '%s/%s-manual-testing-section.md' "$1" "$2"
+}
+
+# The idempotency marker fm-pr-comment.sh writes once the section has been posted
+# for a task, so a re-armed pr-check never double-posts the same comment. Empty
+# and trust-free; bin/fm-teardown.sh removes it with the rest of the task state.
+fm_manual_testing_posted_path() {  # <state-dir> <id>
+  printf '%s/%s.manual-testing-posted' "$1" "$2"
+}
+
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.

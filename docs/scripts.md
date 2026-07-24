@@ -85,13 +85,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
-| `fm-forge-credential.sh` | Resolve firstmate's own forge credential from the login keychain and make forge API calls with it: reads everywhere, plus the one guarded pull-request merge POST |
+| `fm-forge-credential.sh` | Resolve firstmate's own forge credential from the login keychain and make forge API calls with it: reads everywhere, plus two guarded POSTs - the pull-request merge and the pull-request comment |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll and provenance publication |
+| `fm-pr-comment.sh`       | Post a ship task's Manual-testing section to its PR as a comment via firstmate's own credential (gh for GitHub, fm-forge-credential.sh for Bitbucket); idempotent |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated GitHub/GitLab poll sidecars   |
 | `fm-bb-pr-poll.sh`       | Provide the byte-static watcher program for validated Bitbucket poll sidecars       |
 | `fm-bb-build-status.sh`  | Read a Bitbucket pull request's build verdict (green, red, pending, or none)        |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, atomically arm a static merge poll, then post the task's Manual-testing section as a PR comment |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full PR URL through its forge's path |
 | `fm-bb-pr-merge.sh`      | Merge a Bitbucket pull request with explicit protocol handling, reporting success only on a confirmed MERGED state |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
