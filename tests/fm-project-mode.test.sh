@@ -49,13 +49,15 @@ test_bare_yolo_still_grants_all_three() {
   done
   [ "$(resolve "$home" app)" = "no-mistakes findings,merge,local-merge" ] \
     || fail "bare +yolo should resolve to all grants, got: $(resolve "$home" app)"
-  pass "bare +yolo keeps its current meaning: all three grants"
+  granted "$home" app merge-unobservable \
+    && fail "bare +yolo must not silently pick up a grant added after it was written"
+  pass "bare +yolo keeps its current meaning: the original three grants"
 }
 
 test_no_flag_grants_nothing() {
   local home
   home=$(registry '- app [direct-PR] - x (added 2026-07-21)')
-  for grant in findings merge local-merge; do
+  for grant in findings merge merge-unobservable local-merge; do
     granted "$home" app "$grant" && fail "an unflagged project must not grant $grant"
   done
   [ "$(resolve "$home" app)" = "direct-PR none" ] \
@@ -92,11 +94,11 @@ test_findings_grant_is_independent_of_merge() {
 
 test_each_grant_is_settable_alone() {
   local home token grant other
-  for grant in findings merge local-merge; do
+  for grant in findings merge merge-unobservable local-merge; do
     token="+yolo:$grant"
     home=$(registry "- app [no-mistakes $token] - x (added 2026-07-21)")
     granted "$home" app "$grant" || fail "$token must grant $grant"
-    for other in findings merge local-merge; do
+    for other in findings merge merge-unobservable local-merge; do
       [ "$other" = "$grant" ] && continue
       granted "$home" app "$other" && fail "$token must not imply $other"
     done
@@ -117,12 +119,39 @@ test_grants_combine_and_report_canonically() {
   pass "grants combine as a comma list or repeated tokens, canonically ordered"
 }
 
+test_merge_unobservable_is_a_grant_of_its_own() {
+  local home err
+  home=$(registry '- hexbattle [no-mistakes +yolo:merge-unobservable] - captain merges anything he can see (added 2026-07-24)')
+  granted "$home" hexbattle merge-unobservable \
+    || fail "+yolo:merge-unobservable must grant merge-unobservable"
+  granted "$home" hexbattle merge \
+    && fail "merge-unobservable must never widen into the blanket merge grant"
+  [ "$(resolve "$home" hexbattle)" = "no-mistakes merge-unobservable" ] \
+    || fail "merge-unobservable should report alone, got: $(resolve "$home" hexbattle)"
+
+  # Canonical order with its neighbours, so a reader never sees the two merge
+  # grants transposed between projects.
+  home=$(registry '- app [direct-PR +yolo:local-merge,merge-unobservable,findings] - x (added 2026-07-24)')
+  [ "$(resolve "$home" app)" = "direct-PR findings,merge-unobservable,local-merge" ] \
+    || fail "canonical order broke, got: $(resolve "$home" app)"
+
+  # A near-miss spelling is the dangerous case: it must grant nothing at all,
+  # not fall back to the blanket merge it looks like.
+  home=$(registry '- app [no-mistakes +yolo:merge-unobservible] - typo (added 2026-07-24)')
+  for grant in findings merge merge-unobservable local-merge; do
+    granted "$home" app "$grant" && fail "a typo'd merge-unobservable must not grant $grant"
+  done
+  err=$(resolve_err "$home" app)
+  assert_contains "$err" "merge-unobservible" "the typo must be reported by name"
+  pass "merge-unobservable is its own grant, ordered canonically, and typo-proof"
+}
+
 # --- least permission on bad input ------------------------------------------
 
 test_unknown_grant_token_grants_nothing_and_reports() {
   local home err
   home=$(registry '- app [no-mistakes +yolo:merg] - typo (added 2026-07-21)')
-  for grant in findings merge local-merge; do
+  for grant in findings merge merge-unobservable local-merge; do
     granted "$home" app "$grant" && fail "a typo'd grant must not grant $grant"
   done
   [ "$(resolve "$home" app)" = "no-mistakes none" ] \
@@ -430,6 +459,7 @@ test_legacy_and_mode_only_lines_unchanged
 test_findings_grant_is_independent_of_merge
 test_each_grant_is_settable_alone
 test_grants_combine_and_report_canonically
+test_merge_unobservable_is_a_grant_of_its_own
 test_unknown_grant_token_grants_nothing_and_reports
 test_unknown_grant_does_not_poison_valid_siblings
 test_malformed_and_absent_input_resolves_to_least_permission

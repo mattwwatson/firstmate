@@ -56,6 +56,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-project-mode.sh`     | Resolve a project's delivery mode, `+yolo` autonomy grants, recorded `@persona`, and registered `+path` clone location from `data/projects.md` |
 | `fm-persona.sh`          | Detect the captain's git identities, apply the recorded one to a clone, and verify a clone against its record |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-merge-decision.sh`   | Decide whether the `merge-unobservable` grant, green checks, and the worker's own captain-observability declaration authorise merging a task's PR without asking |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and one-shot escalation |

@@ -73,6 +73,62 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The merge-unobservable grant is the one autonomy grant that reaches the
+# crewmate: it makes the worker's own captain-observability judgement part of
+# the deliverable, because the worker that built the change is the one who knows
+# whether there is anything to hand-test. Every other grant must stay invisible
+# in the brief, and local-only has no PR for this grant to cover.
+test_observability_declaration_follows_the_grant() {
+  local home id brief
+  home="$TMP_ROOT/observable-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- hexbattle [no-mistakes +yolo:merge-unobservable] - fixture for the grant (added 2026-07-24)
+- direct-obs [direct-PR +yolo:merge-unobservable] - fixture, faster path (added 2026-07-24)
+- local-obs [local-only +yolo:merge-unobservable] - fixture, no PR (added 2026-07-24)
+- plain [no-mistakes +yolo] - fixture without the grant (added 2026-07-24)
+EOF
+
+  id="brief-observable-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" hexbattle >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Declare whether the captain can see this change" "$brief" \
+    "a granted no-mistakes brief lost the observability declaration"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`[observable=no]`' "$brief" \
+    "the declaration must name the exact non-observable token"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`[observable=yes]`' "$brief" \
+    "the declaration must name the exact observable token"
+  assert_grep "done: PR {url} checks green [observable=no]" "$brief" \
+    "the no-mistakes brief must show the token on its own ready line"
+  assert_grep "is never read as \"no\"" "$brief" \
+    "the declaration must say a malformed token holds rather than merges"
+  assert_no_grep "EOF" "$brief" "the declaration leaked a heredoc EOF marker"
+
+  id="brief-observable-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-obs >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "done: PR {url} [observable=no]" "$brief" \
+    "the direct-PR brief must show the token on its own ready line"
+
+  id="brief-observable-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-obs >/dev/null 2>&1
+  assert_no_grep "observable=" "$home/data/$id/brief.md" \
+    "a local-only brief has no PR, so it must not ask for the declaration"
+
+  id="brief-observable-c4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" plain >/dev/null 2>&1
+  assert_no_grep "observable=" "$home/data/$id/brief.md" \
+    "a project without the grant must not be asked to declare observability"
+
+  id="brief-observable-c5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" hexbattle --scout >/dev/null 2>&1
+  assert_no_grep "observable=" "$home/data/$id/brief.md" \
+    "a scout produces no PR, so it must not be asked to declare observability"
+  pass "fm-brief.sh: the observability declaration appears exactly where a PR can be auto-merged"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -345,6 +401,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_observability_declaration_follows_the_grant
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

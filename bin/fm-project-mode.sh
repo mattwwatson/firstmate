@@ -31,15 +31,20 @@
 #
 # grants (orthogonal to mode) = which routine approvals firstmate may make itself,
 # without checking the captain. They are INDEPENDENT: holding one never implies another.
-#   findings      answer no-mistakes ask-user/review findings
-#   merge         merge a green PR
-#   local-merge   approve a local-only branch for the guarded local merge
-# Bare `+yolo` is shorthand for all three, so every registry line written before
-# grants were split keeps exactly the meaning it had. Repeat the flag
-# (`+yolo:merge +yolo:findings`) or use a comma list (`+yolo:merge,findings`).
+#   findings             answer no-mistakes ask-user/review findings
+#   merge                merge a green PR - ANY green PR, whatever it changed
+#   merge-unobservable   merge a green PR ONLY when the crewmate that built the
+#                        change declared it captain-unobservable at PR-ready
+#                        (bin/fm-merge-decision.sh owns that decision)
+#   local-merge          approve a local-only branch for the guarded local merge
+# Bare `+yolo` is shorthand for findings,merge,local-merge, so every registry
+# line written before grants were split keeps exactly the meaning it had; the
+# narrower merge-unobservable is opt-in by name only, and `merge` already
+# subsumes it. Repeat the flag (`+yolo:merge +yolo:findings`) or use a comma
+# list (`+yolo:merge,findings`).
 #
 # No grant ever covers destructive, irreversible, or security-sensitive decisions,
-# and `merge` never covers a red PR; both always escalate to the captain.
+# and neither merge grant ever covers a red PR; all of those escalate to the captain.
 #
 # persona (@<slug>, at most one per line) = which of the captain's git
 # identities the project uses. bin/fm-persona.sh owns detection, application,
@@ -56,7 +61,7 @@
 # unknown mode drops the line's flags and persona with it.
 #
 # Usage: fm-project-mode.sh <project-name>
-#        fm-project-mode.sh <project-name> --grant <findings|merge|local-merge>
+#        fm-project-mode.sh <project-name> --grant <findings|merge|merge-unobservable|local-merge>
 #        fm-project-mode.sh <project-name> --persona
 #        fm-project-mode.sh <project-name> --path
 #        fm-project-mode.sh --list-paths
@@ -88,7 +93,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/projects.md"
 
 usage_exit() {
-  echo "usage: fm-project-mode.sh <project-name> [--grant <name> | --persona | --path] | fm-project-mode.sh --list-paths" >&2
+  echo "usage: fm-project-mode.sh <project-name> [--grant <findings|merge|merge-unobservable|local-merge> | --persona | --path] | fm-project-mode.sh --list-paths" >&2
   exit 2
 }
 
@@ -142,13 +147,14 @@ fi
 # its own exit code so it can never be mistaken for a resolved "not granted".
 if [ "$QUERY_SET" = 1 ]; then
   case "$QUERY" in
-    findings|merge|local-merge) ;;
-    *) echo "error: unknown grant \"$QUERY\"; expected findings, merge, or local-merge" >&2; exit 2 ;;
+    findings|merge|merge-unobservable|local-merge) ;;
+    *) echo "error: unknown grant \"$QUERY\"; expected findings, merge, merge-unobservable, or local-merge" >&2; exit 2 ;;
   esac
 fi
 
 G_FINDINGS=off
 G_MERGE=off
+G_MERGE_UNOBSERVABLE=off
 G_LOCAL_MERGE=off
 PERSONA=none
 REG_PATH=
@@ -158,6 +164,7 @@ grant_apply() {
   case "$1" in
     findings) G_FINDINGS=on ;;
     merge) G_MERGE=on ;;
+    merge-unobservable) G_MERGE_UNOBSERVABLE=on ;;
     local-merge) G_LOCAL_MERGE=on ;;
     *) return 1 ;;
   esac
@@ -165,7 +172,9 @@ grant_apply() {
 
 # A held merge grant on a forge whose credential firstmate itself holds is only
 # usable when that credential's REAL scopes can merge, so a granted merge query
-# is the resolution-time moment to warn when they cannot (the other moment is
+# is the resolution-time moment to warn when they cannot. Both merge grants go
+# through here: merge-unobservable authorises fewer merges, not different ones,
+# so an incapable credential blocks it in exactly the same way (the other moment is
 # session-start bootstrap; the decision record is
 # data/bitbucket-parity/decision-bb-credential-identity.md in the captain's
 # home, summarised in docs/configuration.md "Forge credentials"). Advisory
@@ -175,8 +184,8 @@ grant_apply() {
 # turn a local permission lookup into a failure or a speculative warning.
 # FM_MERGE_CAPABILITY_PROBE=0 skips the probe entirely; bootstrap sets it while
 # scanning grants so one session start cannot fan out one probe per project.
-warn_if_merge_incapable() {
-  local resolver url forge capability
+warn_if_merge_incapable() {  # <granted-merge-grant-name>
+  local grant=$1 resolver url forge capability
   [ "${FM_MERGE_CAPABILITY_PROBE:-1}" = 1 ] || return 0
   resolver="$SCRIPT_DIR/fm-forge-credential.sh"
   [ -x "$resolver" ] || return 0
@@ -186,7 +195,7 @@ warn_if_merge_incapable() {
   [ "$forge" = bitbucket ] || return 0
   capability=$("$resolver" merge-capable "$forge" 2>/dev/null) || return 0
   [ "$capability" = no ] || return 0
-  echo "warn: $NAME grants merge but firstmate's $forge credential cannot merge (its scopes lack pull-request write); merges will be refused until the credential gains that scope or the grant is removed" >&2
+  echo "warn: $NAME grants $grant but firstmate's $forge credential cannot merge (its scopes lack pull-request write); merges will be refused until the credential gains that scope or the grant is removed" >&2
   return 0
 }
 
@@ -212,6 +221,7 @@ emit() {
   local mode=$1 grants=""
   if [ "$G_FINDINGS" = on ]; then grants="findings"; fi
   if [ "$G_MERGE" = on ]; then grants="${grants:+$grants,}merge"; fi
+  if [ "$G_MERGE_UNOBSERVABLE" = on ]; then grants="${grants:+$grants,}merge-unobservable"; fi
   if [ "$G_LOCAL_MERGE" = on ]; then grants="${grants:+$grants,}local-merge"; fi
   [ -n "$grants" ] || grants=none
 
@@ -220,7 +230,11 @@ emit() {
       findings) [ "$G_FINDINGS" = on ] || exit 1 ;;
       merge)
         [ "$G_MERGE" = on ] || exit 1
-        warn_if_merge_incapable
+        warn_if_merge_incapable merge
+        ;;
+      merge-unobservable)
+        [ "$G_MERGE_UNOBSERVABLE" = on ] || exit 1
+        warn_if_merge_incapable merge-unobservable
         ;;
       local-merge) [ "$G_LOCAL_MERGE" = on ] || exit 1 ;;
     esac
@@ -240,6 +254,7 @@ resolve_name() {
   local n=$1 parsed mode toks tok rest one p rawp expanded path_voided
   G_FINDINGS=off
   G_MERGE=off
+  G_MERGE_UNOBSERVABLE=off
   G_LOCAL_MERGE=off
   PERSONA=none
   REG_PATH=
@@ -314,6 +329,9 @@ resolve_name() {
         esac
         ;;
       +yolo)
+        # Deliberately NOT merge-unobservable: bare +yolo must keep exactly the
+        # meaning it had before that grant existed, and the blanket merge it
+        # does grant is already the wider authority.
         grant_apply findings
         grant_apply merge
         grant_apply local-merge

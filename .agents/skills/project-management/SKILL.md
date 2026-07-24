@@ -35,7 +35,9 @@ Choose the delivery mode when adding or creating the project:
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
 The optional autonomy grants change routine approval authority but do not change the delivery mode.
-`findings`, `merge`, and `local-merge` are granted independently, so a captain who delegates one keeps the others; bare `+yolo` grants all three.
+`findings`, `merge`, `merge-unobservable`, and `local-merge` are granted independently, so a captain who delegates one keeps the others; bare `+yolo` grants the original three and never the narrower `merge-unobservable`.
+`merge-unobservable` suits a project whose work is often invisible to the captain: firstmate merges a green PR itself only when the crewmate that built the change declared it has nothing the captain could hand-test, and everything he could see or exercise still waits for him.
+Offer it when the captain says he is a merge bottleneck for work he cannot review by eye, and name `merge` instead when he means any green PR.
 Confirm which grants the captain intends rather than assuming a single posture, default them all off, and add them only on the captain's explicit instruction.
 Destructive, irreversible, and security-sensitive decisions still require captain approval under every combination of grants.
 

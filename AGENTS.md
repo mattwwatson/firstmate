@@ -265,8 +265,8 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and autonomy grants are orthogonal.
-A project grants `findings`, `merge`, and `local-merge` independently, so holding one never implies another; the captain owns every gate not granted.
-`findings` lets firstmate answer ask-user findings, `merge` lets it merge a green PR, and `local-merge` lets it approve local-only landing.
+A project grants `findings`, `merge`, `merge-unobservable`, and `local-merge` independently, so holding one never implies another; the captain owns every gate not granted.
+`findings` lets firstmate answer ask-user findings, `merge` lets it merge any green PR, `merge-unobservable` lets it merge a green PR only when the worker that built the change declared it has nothing the captain could hand-test, and `local-merge` lets it approve local-only landing.
 Under every combination, firstmate still escalates destructive, irreversible, and security-sensitive choices.
 Never merge a red PR.
 `bin/fm-project-mode.sh` owns the registry grammar and resolves anything unrecognised to the least permission.
@@ -294,7 +294,8 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
-A captain instruction to merge is explicit authority; the project's `merge` grant is the only standing routine authority.
+A captain instruction to merge is explicit authority, and the project's `merge` grant is the only standing blanket authority.
+Under `merge-unobservable`, `bin/fm-merge-decision.sh <id>` owns the decision and merges nothing: merge only on its `merge` verdict, and escalate every hold it reports.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
