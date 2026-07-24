@@ -73,12 +73,53 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-# The merge-unobservable grant is the one autonomy grant that reaches the
-# crewmate: it makes the worker's own captain-observability judgement part of
-# the deliverable, because the worker that built the change is the one who knows
-# whether there is anything to hand-test. Every other grant must stay invisible
-# in the brief, and local-only has no PR for this grant to cover.
-test_observability_declaration_follows_the_grant() {
+# Every PR-based ship brief carries a Manual-testing section off ONE
+# observability judgement the worker makes at PR-ready, regardless of grant;
+# firstmate posts that file to the PR as a comment. local-only has no PR to
+# comment on and a scout has no PR at all, so neither carries the section.
+test_manual_testing_section_universal() {
+  local home id brief
+  home="$TMP_ROOT/manual-testing-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- nm-plain [no-mistakes] - no grant, still gets the section (added 2026-07-24)
+- dp-plain [direct-PR] - no grant, still gets the section (added 2026-07-24)
+- lo-plain [local-only] - no PR, no section (added 2026-07-24)
+EOF
+
+  for id_proj in "brief-mt-nm:nm-plain" "brief-mt-dp:dp-plain"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "## Manual testing section" "$brief" \
+      "$id: a PR-based ship brief must require a Manual-testing section"
+    assert_grep "$id-manual-testing-section.md" "$brief" \
+      "$id: the brief must name the exact section file the worker writes"
+    assert_grep "numbered click-through walkthrough" "$brief" \
+      "$id: the observable branch must require the numbered walkthrough"
+    assert_grep "No hand-testable surface; covered by automated tests" "$brief" \
+      "$id: the not-observable branch must spell out the explicit no-surface line"
+    assert_grep "you never post it or edit the PR yourself" "$brief" \
+      "$id: the brief must make clear firstmate, not the worker, posts the section"
+    assert_no_grep "EOF" "$brief" "$id: the section leaked a heredoc EOF marker"
+  done
+
+  id="brief-mt-lo"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" lo-plain >/dev/null 2>&1
+  assert_no_grep "## Manual testing section" "$home/data/$id/brief.md" \
+    "a local-only brief has no PR, so it must not carry the Manual-testing section"
+
+  id="brief-mt-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" nm-plain --scout >/dev/null 2>&1
+  assert_no_grep "## Manual testing section" "$home/data/$id/brief.md" \
+    "a scout produces no PR, so it must not carry the Manual-testing section"
+  pass "fm-brief.sh: every PR-based ship brief carries the Manual-testing section, both branches spelled out"
+}
+
+# The merge-unobservable grant additionally records the SAME judgement as an
+# [observable=yes|no] token on the PR-ready line, which bin/fm-merge-decision.sh
+# reads. Every other grant leaves the token out; local-only and scout have no PR.
+test_observability_token_follows_the_grant() {
   local home id brief
   home="$TMP_ROOT/observable-home"
   mkdir -p "$home/data"
@@ -92,19 +133,19 @@ EOF
   id="brief-observable-c1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" hexbattle >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "Declare whether the captain can see this change" "$brief" \
-    "a granted no-mistakes brief lost the observability declaration"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`[observable=no]`' "$brief" \
-    "the declaration must name the exact non-observable token"
+    "the token half must name the exact non-observable token"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`[observable=yes]`' "$brief" \
-    "the declaration must name the exact observable token"
+    "the token half must name the exact observable token"
   assert_grep "done: PR {url} checks green [observable=no]" "$brief" \
     "the no-mistakes brief must show the token on its own ready line"
+  assert_grep "two records of one judgement" "$brief" \
+    "the token half must tie the token to the same judgement as the section"
   assert_grep "is never read as \"no\"" "$brief" \
-    "the declaration must say a malformed token holds rather than merges"
-  assert_no_grep "EOF" "$brief" "the declaration leaked a heredoc EOF marker"
+    "the token half must say a malformed token holds rather than merges"
+  assert_no_grep "EOF" "$brief" "the token half leaked a heredoc EOF marker"
 
   id="brief-observable-c2"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-obs >/dev/null 2>&1
@@ -115,18 +156,18 @@ EOF
   id="brief-observable-c3"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-obs >/dev/null 2>&1
   assert_no_grep "observable=" "$home/data/$id/brief.md" \
-    "a local-only brief has no PR, so it must not ask for the declaration"
+    "a local-only brief has no PR, so it must not carry the token"
 
   id="brief-observable-c4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" plain >/dev/null 2>&1
   assert_no_grep "observable=" "$home/data/$id/brief.md" \
-    "a project without the grant must not be asked to declare observability"
+    "a project without the grant must not carry the token"
 
   id="brief-observable-c5"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" hexbattle --scout >/dev/null 2>&1
   assert_no_grep "observable=" "$home/data/$id/brief.md" \
-    "a scout produces no PR, so it must not be asked to declare observability"
-  pass "fm-brief.sh: the observability declaration appears exactly where a PR can be auto-merged"
+    "a scout produces no PR, so it must not carry the token"
+  pass "fm-brief.sh: the observability token appears exactly where a PR can be auto-merged"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -401,7 +442,8 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
-test_observability_declaration_follows_the_grant
+test_manual_testing_section_universal
+test_observability_token_follows_the_grant
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

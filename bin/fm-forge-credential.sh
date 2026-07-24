@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Resolve firstmate's own forge credential and make forge API calls with it:
-# read-only calls everywhere, plus exactly one write action - the pull-request
-# merge POST - which only bin/fm-bb-pr-merge.sh drives.
+# read-only calls everywhere, plus exactly two write actions, each a single
+# closed-form POST - the pull-request merge POST (driven only by
+# bin/fm-bb-pr-merge.sh) and the pull-request comment POST (driven only by
+# bin/fm-pr-comment.sh, which posts a ship task's Manual-testing section). Both
+# writes need the same pullrequest:write scope; neither can be turned into a
+# general write channel, because each supports exactly one method, path shape,
+# and body.
 #
 # Usage: fm-forge-credential.sh check <forge> [<repository>]
 #        fm-forge-credential.sh api-get <forge> <api-path>
 #        fm-forge-credential.sh merge-capable <forge>
 #        fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
+#        fm-forge-credential.sh pr-comment <forge> <repository> <number>
 #        fm-forge-credential.sh forge-of <url>
 #        fm-forge-credential.sh repo-of <url>
 #
@@ -36,9 +42,9 @@
 #          python3 cannot read the body, so both are "unknown" rather than a
 #          guess; a caller warning on "no" therefore never warns speculatively,
 #          and the merge POST itself still fails closed on a real 403.
-# pr-merge The ONE write action this script can perform: a single POST of the
-#          pull-request merge endpoint for <repository> and <number> with the
-#          named merge <strategy>. It deliberately supports no other method,
+# pr-merge One of the two write actions this script can perform: a single POST
+#          of the pull-request merge endpoint for <repository> and <number> with
+#          the named merge <strategy>. It deliberately supports no other method,
 #          path, or body, so no caller can turn this credential into a general
 #          write channel. Output is three fixed header lines - "status=<http>",
 #          "location=<Location header or empty>", "retry-after=<header or
@@ -47,6 +53,17 @@
 #          200/202/409/429/555 protocol (bin/fm-bb-pr-merge.sh), this script
 #          owns only credential resolution and the request. Whether the merge
 #          actually happened is never inferred here.
+# pr-comment
+#          The other write action: a single POST of the pull-request comment
+#          endpoint for <repository> and <number>. The comment body is read
+#          whole from stdin - never from argv, so an arbitrary markdown section
+#          cannot leak onto the command line - and is JSON-encoded before the
+#          request, so no body content can break out of the JSON. Like every
+#          read, it prints the response body on a 2xx and returns a classifying
+#          exit code otherwise; unlike pr-merge there is no multi-status
+#          protocol, because a comment neither redirects nor rate-negotiates.
+#          Only bin/fm-pr-comment.sh drives it, to post a ship task's
+#          Manual-testing section once its PR exists.
 # forge-of Print the forge name for a git remote or PR URL (single owner of
 #          that mapping), or exit 1 when the host belongs to no known forge.
 # repo-of  Print the repository identifier that same URL names, in the forge's
@@ -95,14 +112,16 @@
 # WHAT IT WILL NOT TOUCH. For Bitbucket, firstmate holds its OWN Atlassian
 # account API token under the keychain services firstmate-bitbucket-email and
 # firstmate-bitbucket-token, used with HTTP Basic (email as username, token as
-# password). Whether that one credential can merge is the captain's
+# password). Whether that one credential can write - merge a pull request or
+# comment on one, both gated by pullrequest:write - is the captain's
 # provisioning choice, detected from its real scopes by merge-capable rather
 # than assumed; with the recommended read-only scopes every write is refused by
-# the forge itself and the pr-merge action stays dormant. no-mistakes' separate
+# the forge itself and both write actions stay dormant. no-mistakes' separate
 # write-capable credential is deliberately out of reach - this script must
 # never read it - because the two credentials serve different systems and must
 # rotate independently. For GitHub, firstmate holds no credential at all; the
-# gh CLI owns it.
+# gh CLI owns it, so the GitHub comment path lives in bin/fm-pr-comment.sh and
+# never reaches this script.
 #
 # SECRET HANDLING. The resolved pair never reaches stdout, stderr, a log, argv,
 # or a file. It leaves the store through a private FIFO, which carries it in
@@ -175,6 +194,7 @@ usage: fm-forge-credential.sh check <forge> [<repository>]
        fm-forge-credential.sh api-get <forge> <api-path>
        fm-forge-credential.sh merge-capable <forge>
        fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
+       fm-forge-credential.sh pr-comment <forge> <repository> <number>
        fm-forge-credential.sh forge-of <url>
        fm-forge-credential.sh repo-of <url>
 
@@ -242,6 +262,23 @@ forge_pr_merge_path() {  # <forge> <repository> <number>
   esac
   case "$1" in
     bitbucket) printf '%s' "/2.0/repositories/$2/pullrequests/$3/merge" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The pull-request comment endpoint, validated with the same closed repository
+# and number grammar as the merge path so no caller can point the write at
+# another resource.
+forge_pr_comment_path() {  # <forge> <repository> <number>
+  forge_repo_valid "$1" "$2" || return 1
+  case "$3" in
+    [1-9]) ;;
+    [1-9]*[!0-9]*) return 1 ;;
+    [1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    bitbucket) printf '%s' "/2.0/repositories/$2/pullrequests/$3/comments" ;;
     *) return 1 ;;
   esac
 }
@@ -560,6 +597,74 @@ forge_post_merge() {  # <forge> <api-path> <strategy>
   return "$EX_OK"
 }
 
+# The second write request: POST one pull-request comment whose already
+# JSON-encoded body lives in <body-file>. Same secret handling as forge_get -
+# credential through a curl config on stdin, every curl diagnostic discarded -
+# so <body-file> is the request's only stdin-free payload. Unlike the merge
+# POST there is no multi-status protocol: a 2xx prints the response body and
+# succeeds, and every other status classifies exactly like a read, because a
+# comment neither redirects nor rate-negotiates.
+forge_post_comment() {  # <forge> <api-path> <body-file>
+  local forge=$1 path=$2 bodyfile=$3 base body http curl_status status
+  base=$(forge_api_base "$forge") || {
+    REASON="unknown forge"
+    return "$EX_USAGE"
+  }
+  if ! command -v curl >/dev/null 2>&1; then
+    REASON="curl is not installed, so the comment request could not be made"
+    return "$EX_INCONCLUSIVE"
+  fi
+  body=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-body.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the response"
+    return "$EX_INCONCLUSIVE"
+  }
+  http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
+    | curl --silent --globoff --config - \
+        --request POST \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data "@$bodyfile" \
+        --max-time "$REQUEST_TIMEOUT" \
+        --output "$body" \
+        --write-out '%{http_code}' \
+        "$base$path" 2>/dev/null)
+  curl_status=$?
+  if [ "$curl_status" -ne 0 ]; then
+    rm -f -- "$body"
+    REASON="no usable response from ${base#https://} (curl exit $curl_status)"
+    return "$EX_INCONCLUSIVE"
+  fi
+  case "$http" in
+    2??)
+      cat -- "$body"
+      rm -f -- "$body"
+      return "$EX_OK"
+      ;;
+    401)
+      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
+      status=$EX_REJECTED
+      ;;
+    403)
+      REASON="credential refused by $forge (HTTP 403): it lacks the required pullrequest:write scope"
+      status=$EX_REJECTED
+      ;;
+    404)
+      REASON="$forge has no such pull request (HTTP 404)"
+      status=$EX_NOT_FOUND
+      ;;
+    000|'')
+      REASON="no usable response from ${base#https://}"
+      status=$EX_INCONCLUSIVE
+      ;;
+    *)
+      REASON="unexpected response from $forge (HTTP $http)"
+      status=$EX_UNEXPECTED
+      ;;
+  esac
+  rm -f -- "$body"
+  return "$status"
+}
+
 # --- subcommands -------------------------------------------------------------
 
 cmd_check() {  # <forge> [<repository>]
@@ -683,6 +788,53 @@ cmd_pr_merge() {  # <forge> <repository> <number> <strategy>
   return "$EX_OK"
 }
 
+# Post one pull-request comment. The markdown body arrives on stdin, so it never
+# touches argv, and python3 (already required for every Bitbucket path) encodes
+# it into the request JSON so no content can break out of the string. An empty
+# body is refused rather than posted as a blank comment.
+cmd_pr_comment() {  # <forge> <repository> <number>   (body on stdin)
+  local forge=$1 repo=$2 number=$3 path status raw json
+  forge_supported "$forge" || return "$EX_USAGE"
+  if ! path=$(forge_pr_comment_path "$forge" "$repo" "$number"); then
+    REASON="'$repo' number '$number' is not a valid $forge pull request identifier"
+    return "$EX_USAGE"
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    REASON="python3 is not installed, so the comment body could not be encoded"
+    return "$EX_INCONCLUSIVE"
+  fi
+  raw=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-cbody.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the comment body"
+    return "$EX_INCONCLUSIVE"
+  }
+  json=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-cjson.XXXXXX" 2>/dev/null) || {
+    rm -f -- "$raw"
+    REASON="could not create a temporary file for the comment request"
+    return "$EX_INCONCLUSIVE"
+  }
+  cat > "$raw"
+  if [ ! -s "$raw" ]; then
+    rm -f -- "$raw" "$json"
+    REASON="refusing to post an empty pull-request comment"
+    return "$EX_USAGE"
+  fi
+  if ! python3 -c '
+import json
+import sys
+raw = open(sys.argv[1], "r", encoding="utf-8", errors="strict").read()
+json.dump({"content": {"raw": raw}}, open(sys.argv[2], "w", encoding="utf-8"))
+' "$raw" "$json" 2>/dev/null; then
+    rm -f -- "$raw" "$json"
+    REASON="the comment body is not valid UTF-8, so it could not be encoded"
+    return "$EX_USAGE"
+  fi
+  rm -f -- "$raw"
+  resolve_credential "$forge" || { status=$?; rm -f -- "$json"; return "$status"; }
+  forge_post_comment "$forge" "$path" "$json" || { status=$?; rm -f -- "$json"; return "$status"; }
+  rm -f -- "$json"
+  return "$EX_OK"
+}
+
 # Single owner of the url-to-forge mapping. The host is matched exactly, so a
 # URL that merely mentions a forge host inside its path is never mistaken for
 # one.
@@ -783,6 +935,15 @@ case "$COMMAND" in
       exit "$EX_USAGE"
     fi
     cmd_pr_merge "$1" "$2" "$3" "$4"
+    STATUS=$?
+    ;;
+  pr-comment)
+    shift
+    if [ "$#" -ne 3 ]; then
+      echo "usage: fm-forge-credential.sh pr-comment <forge> <repository> <number>" >&2
+      exit "$EX_USAGE"
+    fi
+    cmd_pr_comment "$1" "$2" "$3"
     STATUS=$?
     ;;
   forge-of)

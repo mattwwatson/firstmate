@@ -33,11 +33,15 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
-# A PR-based ship brief for a project carrying the merge-unobservable autonomy
-# grant additionally requires the worker to end its PR-ready line with one
-# [observable=yes] or [observable=no] token; bin/fm-classify-lib.sh owns that
-# grammar and bin/fm-merge-decision.sh reads it back. local-only skips it: it
-# has no PR for that grant to cover.
+# Every PR-based ship brief (no-mistakes and direct-PR) requires the worker to
+# write a Manual-testing section, off ONE observability judgement it makes at
+# PR-ready, into the per-task file bin/fm-pr-lib.sh's
+# fm_manual_testing_section_path names; firstmate posts that file to the PR as a
+# comment via bin/fm-pr-comment.sh at pr-check time. A project that also carries
+# the merge-unobservable grant additionally requires the SAME judgement as an
+# [observable=yes|no] token on the PR-ready line (bin/fm-classify-lib.sh owns the
+# grammar, bin/fm-merge-decision.sh reads it back) - one judgement, two records.
+# local-only skips both: it has no PR to comment on or auto-merge.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -70,6 +74,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -111,6 +117,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+SECTION_FILE=$(shell_quote "$(fm_manual_testing_section_path "$STATE" "$ID")")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -288,35 +295,49 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
-# The one grant that DOES shape the brief: merge-unobservable makes the worker's
-# own captain-observability judgement part of the deliverable, because the
-# worker that built the change is the one who knows whether there is anything to
-# hand-test. bin/fm-merge-decision.sh reads that declaration back at PR-ready.
-# The capability probe is suppressed: this is a brief-shaping question, not a
-# merge, so it must never turn scaffolding into a forge request.
+# One grant shapes the token half of the section below: merge-unobservable lets
+# firstmate merge a green PR by itself only when the change has nothing to
+# hand-test, and bin/fm-merge-decision.sh reads that judgement back from the
+# [observable=yes|no] token on the PR-ready line. The capability probe is
+# suppressed: this is a brief-shaping question, not a merge, so it must never
+# turn scaffolding into a forge request.
 DECLARE_OBSERVABILITY=0
 if FM_MERGE_CAPABILITY_PROBE=0 "$FM_ROOT/bin/fm-project-mode.sh" "$REPO" \
     --grant merge-unobservable >/dev/null 2>&1; then
   DECLARE_OBSERVABILITY=1
 fi
 
-# observability_section <ready-line-example> -> the declaration contract, or
-# nothing when the project does not carry the grant.
-observability_section() {  # <example-ready-line>
+# manual_testing_section <example-ready-line> -> the Manual-testing contract
+# every PR-based ship brief carries. The worker makes ONE judgement at PR-ready -
+# could the captain see or feel this change by running the app? - and that single
+# judgement shapes both the section it writes (always) and, where the project
+# carries merge-unobservable, the [observable=yes|no] token (bin/fm-merge-decision.sh
+# reads it). One judgement, two records; the file is what firstmate posts to the
+# PR as a comment (bin/fm-pr-comment.sh), so the worker never edits the PR itself.
+manual_testing_section() {  # <example-ready-line>
+  cat <<EOF
+
+## Manual testing section (write this before you report the PR ready)
+Every PR you raise must carry a Manual-testing section, and you write it off ONE judgement about the change you actually made: could the captain see or feel it by running the app?
+Write your answer into this exact file (create it, overwriting any earlier draft):
+  $SECTION_FILE
+Start the file with a \`## Manual testing\` heading. Firstmate posts that file to the PR as a comment with its own credential once the PR exists - you never post it or edit the PR yourself.
+
+Shape the body by that one judgement:
+- The captain CAN see or feel it (a visible interface, gameplay, or behaviour difference someone could exercise by hand): list the exact visible changes to expect, THEN a numbered click-through walkthrough. Each step says what to do and what he should see, and names any setup - which branch to check out, env vars to set, where output lands.
+- There is NOTHING to hand-test (server, simulation, tooling, build, test, or documentation work with no surface a person could exercise): the body is exactly one line - \`No hand-testable surface; covered by automated tests\` - so the absence is deliberate, never a silent omission.
+If the change is mixed, treat it as observable and write the walkthrough.
+EOF
   [ "$DECLARE_OBSERVABILITY" -eq 1 ] || return 0
   cat <<EOF
 
-## Declare whether the captain can see this change
-This project lets firstmate merge a green PR by itself ONLY when the change has nothing the captain could hand-test, and you are the one who knows which it is.
-So your PR-ready line MUST end with exactly one declaration token:
-- \`[observable=yes]\` - running the app, someone could see or feel this: a visible interface difference, a gameplay or behaviour difference they could exercise by hand.
-- \`[observable=no]\` - there is nothing to hand-test: server, simulation, tooling, build, test, or documentation work with no surface a person could exercise.
-
+This project also lets firstmate merge a green PR by itself ONLY when that same judgement is "nothing to hand-test", so your PR-ready line MUST additionally end with exactly one token recording the SAME call:
+- \`[observable=yes]\` - the walkthrough case above; the captain merges it himself.
+- \`[observable=no]\` - the one-line no-surface case above; firstmate may merge it.
 Example: \`$1 [observable=no]\`
-
-Judge the change you actually made, not the one you set out to make.
-If you are unsure, or the change is mixed, declare \`[observable=yes]\`: that just means the captain merges it himself.
-Omitting the token, writing both, or writing any other value is never read as "no" - it holds the PR for the captain, so a missing declaration costs him a manual merge rather than shipping something unseen.
+Keep the token and the file consistent: they are two records of one judgement.
+If you are unsure, declare \`[observable=yes]\` and write the walkthrough - that just means the captain merges it himself.
+Omitting the token, writing both, or writing any other value is never read as "no": it holds the PR for the captain, so a missing declaration costs him a manual merge rather than shipping something unseen.
 EOF
 }
 
@@ -330,7 +351,7 @@ This project ships **direct-PR**: you raise the PR yourself, without the no-mist
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-$(observability_section 'done: PR {url}')
+$(manual_testing_section 'done: PR {url}')
 EOF
 )
     ;;
@@ -367,7 +388,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
-$(observability_section 'done: PR {url} checks green')
+$(manual_testing_section 'done: PR {url} checks green')
 EOF
 )
     ;;

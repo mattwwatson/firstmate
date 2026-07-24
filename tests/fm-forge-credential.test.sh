@@ -423,6 +423,64 @@ test_github_has_no_firstmate_credential() {
   pass "GitHub reports that gh owns its credential instead of inventing one"
 }
 
+# Run the resolver with the fake toolchain and a comment body on stdin. The
+# comment write is the second and only other write action; it must reach the
+# forge through the same secret-safe path as every read.
+run_resolver_body() {  # <case-dir> <body> <args...>
+  local dir=$1 body=$2 out err status
+  shift 2
+  err="$dir/stderr"
+  out=$(printf '%s' "$body" | PATH="$dir/bin:$PATH" \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$dir/bin/security" \
+    FAKE_KEYCHAIN_USER="${FAKE_KEYCHAIN_USER:-ok}" \
+    FAKE_KEYCHAIN_SECRET="${FAKE_KEYCHAIN_SECRET:-ok}" \
+    FAKE_KEYCHAIN_LOG="$dir/keychain-services" \
+    FAKE_CURL_ARGV_LOG="$dir/curl-argv" \
+    FAKE_CURL_STDIN_LOG="$dir/curl-stdin" \
+    FAKE_CURL_STATUS="${FAKE_CURL_STATUS:-200}" \
+    FAKE_CURL_EXIT="${FAKE_CURL_EXIT:-0}" \
+    "$RESOLVER" "$@" 2>"$err")
+  status=$?
+  printf '%s|%s|%s' "$status" "$out" "$(cat "$err")"
+}
+
+test_pr_comment_posts_through_the_secret_safe_path() {
+  local dir record argv stdin
+  # Happy path: a 201 POST to the comments endpoint, body encoded off stdin, the
+  # credential on curl's config stdin and never on argv.
+  dir=$(new_case)
+  record=$(FAKE_CURL_STATUS=201 run_resolver_body "$dir" '## Manual testing
+walkthrough' pr-comment bitbucket mattw_watson/hexbattle 9)
+  expect_code 0 "$(field "$record" 1)" "a 201 comment POST must succeed"
+  argv=$(cat "$dir/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "POST" "the comment must be a POST"
+  assert_contains "$argv" "/2.0/repositories/mattw_watson/hexbattle/pullrequests/9/comments" \
+    "the comment must target the pull request's comments endpoint"
+  assert_no_credential_leak "$argv" "the comment request argv"
+  stdin=$(cat "$dir/curl-stdin" 2>/dev/null)
+  assert_contains "$stdin" "AUTH_PRESENT" "the credential must reach curl through its config on stdin"
+
+  # A 403 classifies as a scope rejection, naming the write scope it needs.
+  dir=$(new_case)
+  record=$(FAKE_CURL_STATUS=403 run_resolver_body "$dir" 'body' pr-comment bitbucket mattw_watson/hexbattle 9)
+  expect_code 5 "$(field "$record" 1)" "a 403 comment POST is a credential rejection"
+  assert_contains "$(field "$record" 3)" "pullrequest:write" \
+    "a rejected comment must name the write scope it lacked"
+
+  # GitHub is refused before any keychain read: gh owns that credential.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'body' pr-comment github owner/repo 9)
+  expect_code 2 "$(field "$record" 1)" "GitHub comments do not go through this script"
+  assert_absent "$dir/keychain-services" "a refused forge must not read the keychain"
+
+  # An empty body is refused rather than posted as a blank comment.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" '' pr-comment bitbucket mattw_watson/hexbattle 9)
+  expect_code 2 "$(field "$record" 1)" "an empty comment body must be refused"
+  assert_absent "$dir/curl-argv" "a refused empty body must never reach a request"
+  pass "pr-comment posts through the secret-safe path and classifies failures"
+}
+
 test_no_credential_store_is_its_own_outcome() {
   local dir record
   dir=$(new_case)
@@ -871,6 +929,7 @@ test_no_stream_can_emit_a_credential_value
 test_no_mistakes_credential_is_out_of_reach
 test_forge_and_repository_identity
 test_github_has_no_firstmate_credential
+test_pr_comment_posts_through_the_secret_safe_path
 test_no_credential_store_is_its_own_outcome
 test_a_stalling_store_times_out_instead_of_hanging
 test_a_zero_bound_falls_back_to_the_default

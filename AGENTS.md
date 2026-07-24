@@ -93,6 +93,8 @@ state/               volatile runtime signals; gitignored
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.bb-poll-warned.*  watcher one-shot markers so a Bitbucket poll's credential or visibility warning wakes firstmate once, not every cycle; removed by teardown
+  <id>-manual-testing-section.md  the ship crewmate's Manual-testing section, written at PR-ready off its single observability judgement; fm-pr-comment.sh posts it to the PR as a comment; removed by teardown
+  <id>.manual-testing-posted  fm-pr-comment.sh idempotency marker so a re-armed pr-check never double-posts the section; removed by teardown
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
@@ -292,7 +294,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta, arms the watcher's merge poll, and posts the ship task's Manual-testing section to the PR as a comment via `bin/fm-pr-comment.sh` (every PR-based ship brief requires the crewmate to write that section off its single observability judgement; a missing or failed post surfaces without unarming the watch).
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority, and the project's `merge` grant is the only standing blanket authority.
 Under `merge-unobservable`, `bin/fm-merge-decision.sh <id>` owns the decision and merges nothing: merge only on its `merge` verdict, and escalate every hold it reports.
