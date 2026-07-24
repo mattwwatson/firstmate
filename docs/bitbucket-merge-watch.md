@@ -136,7 +136,7 @@ A legacy Bitbucket check (arbitrary bytes with a canonical `pr=` in task metadat
 ## Stage 4: the merge action (23/07/2026)
 
 `bin/fm-pr-merge.sh` now dispatches a canonical Bitbucket pull request URL to `bin/fm-bb-pr-merge.sh` after recording `pr=` through `bin/fm-pr-check.sh`, exactly as the GitHub path records before merging; the GitHub path itself is byte-for-byte untouched and `tests/fm-pr-merge.test.sh` passes unchanged.
-The merge POST goes through the same shared credential the poller holds, per the captain's one-credential decision: `bin/fm-forge-credential.sh pr-merge` is the resolver's ONE write action, fixed to the merge endpoint of a validated repository and pull-request number, so no caller can turn the credential into a general write channel.
+The merge POST goes through the same shared credential the poller holds, per the captain's one-credential decision: `bin/fm-forge-credential.sh pr-merge` is one of the resolver's two write actions (the other being the pull-request comment POST driven by `bin/fm-pr-comment.sh`), fixed to the merge endpoint of a validated repository and pull-request number, so no caller can turn the credential into a general write channel.
 A read-only credential keeps the whole path dormant because the forge itself answers the POST with 403, which the merge script reports as the missing pull-request write scope.
 
 The protocol handling follows section 8.4 of the parity investigation and is pinned case-by-case by `tests/fm-bb-pr-merge.test.sh` against stubbed HTTP:

@@ -301,11 +301,11 @@ Both halves are required, because an account API token authenticates over HTTP B
 
 Three properties of this arrangement are deliberate and load-bearing.
 
-**Its write capability is the captain's provisioning choice, checked against its real scopes.** The recommended scopes are repository, pull request, and pipeline READ, under which an unattended reader cannot push, merge, or otherwise change a repository, and the merge action stays dormant because the forge itself refuses every write.
+**Its write capability is the captain's provisioning choice, checked against its real scopes.** The recommended scopes are repository, pull request, and pipeline READ, under which an unattended reader cannot push, merge, or otherwise change a repository, and both write actions stay dormant because the forge itself refuses every write.
 A captain who wants firstmate to merge on Bitbucket adds pull-request write to this same credential - one credential for both polling and merging, per the capability-checked decision of 22/07/2026 - and the system detects which shape it holds from the credential's ACTUAL scopes (`bin/fm-forge-credential.sh merge-capable`) rather than assuming either.
 The mismatch is warned exactly when merge is actually requested: at session start when a Bitbucket project carries an autonomous merge grant (`merge` or `merge-unobservable`) the credential provably cannot honor, and at merge-grant resolution in `bin/fm-project-mode.sh`.
 A read-only credential with no merge grants anywhere is a healthy shape and stays silent.
-The resolver's one write action is the pull-request merge POST driven by `bin/fm-bb-pr-merge.sh` (docs/bitbucket-merge-watch.md "Stage 4"); every other subcommand, including everything the unattended poller runs, performs only reads.
+The resolver has two write actions, both gated by the same pull-request write scope: the pull-request merge POST driven by `bin/fm-bb-pr-merge.sh` (docs/bitbucket-merge-watch.md "Stage 4"), and the pull-request comment POST driven by `bin/fm-pr-comment.sh` to post a ship task's Manual-testing section; every other subcommand, including everything the unattended poller runs, performs only reads.
 
 **It is separate from no-mistakes' credential.** no-mistakes keeps its own write-capable Bitbucket credential, cached under a different service name and populated from the interactive shell path, because it pushes branches and opens pull requests.
 Firstmate must never read it. The two credentials serve different systems and rotate independently, so neither can silently stand in for the other.
