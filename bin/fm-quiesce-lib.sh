@@ -2,7 +2,7 @@
 # fm-quiesce-lib.sh - shared helpers for the captain-invoked fleet pause.
 #
 # Sourced by bin/fm-fleet-pause.sh, bin/fm-fleet-resume.sh, bin/fm-quiesce.sh,
-# bin/fm-nm-abort.sh, and bin/fm-watch.sh. It owns three things and nothing else:
+# bin/fm-nm-abort.sh, and bin/fm-watch.sh. It owns four things and nothing else:
 #
 #   1. The DURABLE PAUSE RECORD at state/.fleet-paused - the fleet-wide analogue
 #      of state/.afk. Its presence is what makes a fleet pause survive a
@@ -11,10 +11,18 @@
 #   2. The composed confirmation predicate: a task confirms THIS pause only when
 #      its own status stream currently declares the quiesce token for this
 #      instance (bin/fm-classify-lib.sh owns the token grammar).
-#   3. A bounded external-command runner, so a wedged forge or no-mistakes call
+#   3. The task enumeration and the WORKER PRESENCE reading both fleet commands
+#      share, including the rule that decides when a worker is confidently gone.
+#      One owner, because a pause and the resume that lifts it disagreeing about
+#      who is still there is exactly where this subsystem must not drift.
+#   4. A bounded external-command runner, so a wedged forge or no-mistakes call
 #      cannot hold a pause or resume open forever. The shape mirrors
 #      bin/fm-fleet-snapshot.sh's run_timed; it is repeated here rather than
 #      imported so this subsystem has no dependency on the snapshot reader.
+#
+# The presence helpers call bin/fm-backend.sh's readers, so a caller that uses
+# them sources that file too (bin/fm-fleet-pause.sh and bin/fm-fleet-resume.sh
+# both do). Everything else here stands alone.
 #
 # RECORD FORMAT (TAB-separated, one row per line; this is the only statement of
 # it, and every reader/writer goes through the helpers below):
@@ -118,6 +126,104 @@ fm_quiesce_task_confirms() {  # <state-dir> <task>
   [ -n "$declared" ] && [ "$declared" = "$epoch" ]
 }
 
+# Every task this home records. Persistent secondmates are included: they are
+# direct reports with live work, and a fleet pause that silently skipped them
+# would report safe-to-close while a whole child fleet kept running.
+fm_quiesce_task_ids() {  # <state-dir>
+  local meta
+  for meta in "$1"/*.meta; do
+    [ -f "$meta" ] || continue
+    basename "$meta" .meta
+  done
+}
+
+# 0 when <task>'s recorded endpoint answers a cheap read-only presence probe.
+# PRESENCE ONLY: bin/fm-backend.sh's fm_backend_target_exists cannot tell a pane
+# that is gone from one it merely could not read, so a failure here is never on
+# its own evidence that the worker is gone. Callers that are about to ACT on a
+# worker's absence go through fm_quiesce_worker_presence instead.
+fm_quiesce_endpoint_is_live() {  # <meta> <id>
+  local meta=$1 id=$2 window target backend
+  window=$(fm_meta_get "$meta" window)
+  [ -n "$window" ] || return 1
+  target=$(fm_backend_target_of_meta "$meta")
+  backend=$(fm_backend_of_meta "$meta")
+  fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id" 2>/dev/null
+}
+
+# Path of the per-task consecutive-absence marker. Named under the record's own
+# prefix so a completed release removes it with everything else the pause left.
+fm_quiesce_probe_file() {  # <state-dir> <task>
+  printf '%s/.fleet-paused.probe.%s' "$1" "$2"
+}
+
+fm_quiesce_probe_reset() {  # <state-dir> <task>
+  rm -f "$(fm_quiesce_probe_file "$1" "$2")" 2>/dev/null || true
+}
+
+# Record one more consecutive absent reading and print the running count. The
+# count lives on disk because the verify passes that produce it are a poll
+# interval apart and may span a firstmate restart, and it is stamped with the
+# pause instance so a counter left behind by an EARLIER pause can never be read
+# as evidence about this one.
+fm_quiesce_probe_bump() {  # <state-dir> <task>
+  local state=$1 task=$2 epoch file prev count
+  epoch=$(fm_quiesce_epoch "$state")
+  file=$(fm_quiesce_probe_file "$state" "$task")
+  prev=
+  count=0
+  if [ -f "$file" ]; then
+    read -r prev count < "$file" 2>/dev/null || { prev=; count=0; }
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    [ -n "$epoch" ] && [ "$prev" = "$epoch" ] || count=0
+  fi
+  count=$((count + 1))
+  if [ -n "$epoch" ]; then
+    printf '%s %s\n' "$epoch" "$count" > "$file" 2>/dev/null || true
+  fi
+  printf '%s' "$count"
+}
+
+# How many consecutive absent readings must stack up before an unreadable
+# endpoint counts as a gone worker. Two, deliberately: a single glitched read is
+# a read failure, not a death, and the passes are a poll interval apart.
+FM_QUIESCE_GONE_PROBES=2
+
+# One presence reading for <task>, as the word its callers act on:
+#   live      the recorded endpoint answered.
+#   gone      the worker is CONFIDENTLY gone - either the backend's own agent
+#             probe reads `dead`, or the endpoint has been absent for
+#             FM_QUIESCE_GONE_PROBES consecutive passes.
+#   unproven  the endpoint did not answer, but nothing here proves the worker is
+#             gone rather than momentarily unreadable.
+# The distinction exists because acting on absence means reaching into a run
+# firstmate may not own. bin/fm-backend.sh's fm_backend_agent_alive states the
+# house rule this implements: an unknown or unreadable reading must NEVER on its
+# own license an action, precisely so a momentary read glitch cannot be mistaken
+# for a death. `unproven` is therefore not a quiet pass - it holds the fleet
+# unsafe until the reading resolves one way or the other.
+fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
+  local state=$1 meta=$2 id=$3 window target backend reading
+  if fm_quiesce_endpoint_is_live "$meta" "$id"; then
+    fm_quiesce_probe_reset "$state" "$id"
+    printf 'live'
+    return 0
+  fi
+  window=$(fm_meta_get "$meta" window)
+  target=$(fm_backend_target_of_meta "$meta")
+  backend=$(fm_backend_of_meta "$meta")
+  reading=$(fm_backend_agent_alive "$backend" "${target:-$window}" 2>/dev/null)
+  case "$reading" in
+    dead) printf 'gone'; return 0 ;;
+    alive) fm_quiesce_probe_reset "$state" "$id"; printf 'live'; return 0 ;;
+  esac
+  if [ "$(fm_quiesce_probe_bump "$state" "$id")" -ge "$FM_QUIESCE_GONE_PROBES" ]; then
+    printf 'gone'
+  else
+    printf 'unproven'
+  fi
+}
+
 # Atomically (re)write the record. `started` is preserved from any existing
 # record so a re-run refreshes a pause rather than restarting its identity and
 # invalidating confirmations already given. <rows-file> may be empty or absent.
@@ -142,9 +248,12 @@ fm_quiesce_write() {  # <state-dir> <phase> <reason> [<rows-file>]
   mv "$pending" "$record"
 }
 
-# Remove the record. Used only by a completed release.
+# Remove the record and every artifact the pause left beside it, the absence
+# counters included: a count kept past the pause that produced it would be
+# evidence about a world that no longer exists. Used only by a completed release.
 fm_quiesce_clear() {  # <state-dir>
   rm -f "$(fm_quiesce_record "$1")"
+  rm -f "$1"/.fleet-paused.probe.* 2>/dev/null || true
 }
 
 # Append one task row to a rows file being built for fm_quiesce_write.

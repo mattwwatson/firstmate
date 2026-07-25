@@ -49,6 +49,17 @@ A task whose worker is already gone cannot be asked anything, but it can still b
 Those are verified anyway, and because no live worker owns the run, firstmate reaps it.
 A live worker's run is only checked, never aborted from outside: that run belongs to the worker driving it.
 
+**Gone has to be proven, because reaping is an action.**
+An endpoint probe that fails cannot tell a pane that is closed from one that merely could not be read, and the reap cancels a pipeline.
+So a single failed probe never licenses it: the worker counts as gone only on the backend's own agent probe reading `dead`, or on the endpoint being absent across two consecutive verify passes a poll interval apart.
+Anything short of that is reported as a worker whose liveness could not be established, which holds the fleet unsafe with the run untouched.
+This is the same rule `bin/fm-backend.sh`'s `fm_backend_agent_alive` already records for the secondmate-liveness sweep, and for the same reason: a momentary read glitch must never be mistaken for a death.
+
+**A worker that cannot be released keeps the pause record.**
+The mirror of a false safe-to-close is a false "everything is back".
+If a worker that quiesced for this pause cannot be reached when `/resume` runs, it is still sitting on its `paused:` line, and the record is the only thing that says so - clearing it would strand that worker with nothing left to wake it.
+So the resume reports exit 4, names the worker, and leaves the record in place for a second attempt.
+
 **Out of scope, deliberately.**
 Automatic lid-close detection (a system sleep/wake hook such as `sleepwatcher`) as an involuntary-drop safety net is not built here.
 The deliberate path lands and gets proven first.

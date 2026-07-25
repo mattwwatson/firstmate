@@ -23,7 +23,8 @@ Read its `--help` before first use; it is the authority on what each check prove
 
 Exit 0 means the pause is lifted and every worker was released.
 Exit 3 means a check failed: **nothing was released and the fleet is still paused.**
-Exit 4 means the pause was lifted but a worker did not take its instruction, and that worker needs a look.
+Exit 4 means a worker was not released, and that worker needs a look.
+If it had already quiesced for this pause, it is still sitting paused and the pause record is deliberately kept, so the fleet is not fully back: deal with that worker, then run `/resume` again to finish the lift.
 
 ## The one rule that matters
 
@@ -39,7 +40,7 @@ Do not restart it: one instance serves every fleet, so restarting it would kill 
 Resume the normal supervision cycle for this session's primary harness, exactly as at session start.
 Then pick the fleet back up: workers carry on where they left off, so re-read the fleet before assuming anything about where each one got to.
 
-On exit 4, handle the named worker through the normal recovery path before treating the fleet as fully back.
+On exit 4, handle the named worker through the normal recovery path before treating the fleet as fully back, and run `/resume` again if the command said the pause record was kept.
 
 ## Reporting it
 

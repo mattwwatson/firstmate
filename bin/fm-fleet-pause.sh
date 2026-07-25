@@ -43,11 +43,22 @@
 # bin/fm-nm-abort.sh. A live worker's run is only CHECKED, never aborted from
 # here: that run belongs to the worker driving it.
 #
+# WHAT COUNTS AS GONE. Reaping a run is reaching into a pipeline, so it needs
+# proof, not a single failed read. An endpoint probe that fails cannot tell a
+# closed pane from an unreadable one, so the reap waits for the CONFIDENT
+# reading bin/fm-quiesce-lib.sh's fm_quiesce_worker_presence defines: the
+# backend's own agent probe reading `dead`, or the endpoint absent across two
+# consecutive verify passes a poll interval apart. Until then the task is
+# reported NOT CONFIRMED with its run untouched, which holds the fleet unsafe
+# rather than cancelling a live worker's pipeline on a momentary glitch.
+#
 # SECONDMATES. A registered secondmate's work is a fleet, not a worktree, so it
 # quiesces by running this same command for its OWN home. It confirms with the
 # same token in its status here, and the parent additionally verifies that the
-# child home's own record reached the `paused` phase. A secondmate whose own
-# fleet is not quiesced can never confirm this one.
+# child home's own record reached the `paused` phase FOR THIS PAUSE INSTANCE - a
+# record left at `paused` by an earlier pause names an older instance and proves
+# nothing about this one, the same binding the worker's own token carries. A
+# secondmate whose own fleet is not quiesced can never confirm this one.
 #
 # The durable record at state/.fleet-paused is written BEFORE the first steer,
 # so a firstmate restart in the middle of a pause finds the pause rather than
@@ -97,31 +108,6 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 
-meta_field() {  # <meta> <key>
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
-}
-
-# Every task this home records. Persistent secondmates are included: they are
-# direct reports with live work, and a fleet pause that silently skipped them
-# would report safe-to-close while a whole child fleet kept running.
-task_ids() {
-  local meta id
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    printf '%s\n' "$id"
-  done
-}
-
-endpoint_is_live() {  # <meta> <id>
-  local meta=$1 id=$2 window target backend
-  window=$(meta_field "$meta" window)
-  [ -n "$window" ] || return 1
-  target=$(fm_backend_target_of_meta "$meta")
-  backend=$(fm_backend_of_meta "$meta")
-  fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id" 2>/dev/null
-}
-
 # Print nothing when the worktree holds nothing a sleep could lose; otherwise
 # print the concrete reason it does. A scout worktree is declared scratch
 # (AGENTS.md section 7) and its deliverable is the report, so scratch left at a
@@ -144,7 +130,7 @@ VERDICT=
 DETAIL=
 
 verify_task() {  # <id>
-  local id=$1 meta kind wt home live risk out rc child_state
+  local id=$1 meta kind wt home presence risk out rc child_state child_epoch
   VERDICT=unconfirmed
   DETAIL=
   meta="$STATE/$id.meta"
@@ -155,24 +141,30 @@ verify_task() {  # <id>
     DETAIL="task record is gone"
     return 0
   fi
-  kind=$(meta_field "$meta" kind)
+  kind=$(fm_meta_get "$meta" kind)
   [ -n "$kind" ] || kind=ship
-  wt=$(meta_field "$meta" worktree)
-  home=$(meta_field "$meta" home)
+  wt=$(fm_meta_get "$meta" worktree)
+  home=$(fm_meta_get "$meta" home)
 
   if ! fm_quiesce_task_confirms "$STATE" "$id"; then
-    live=no
-    endpoint_is_live "$meta" "$id" && live=yes
     if [ "$kind" = secondmate ]; then
       DETAIL="secondmate has not confirmed its own fleet is quiesced"
       return 0
     fi
-    if [ "$live" = yes ]; then
+    presence=$(fm_quiesce_worker_presence "$STATE" "$meta" "$id")
+    if [ "$presence" = live ]; then
       DETAIL="worker has not confirmed quiesce"
       return 0
     fi
-    # No live worker to answer. Verify the two things that could still be in
-    # flight and, since nobody owns the run any more, reap it here.
+    if [ "$presence" != gone ]; then
+      # The endpoint did not answer, and nothing proves the worker is gone
+      # rather than momentarily unreadable. Its run belongs to a worker that may
+      # still be driving it, so it is left alone and the fleet stays unsafe.
+      DETAIL="worker's endpoint did not answer and its liveness could not be established; its validation run was left alone"
+      return 0
+    fi
+    # The worker is confidently gone. Verify the two things that could still be
+    # in flight and, since nobody owns the run any more, reap it here.
     out=$("$NM_ABORT" --worktree "$wt" --label "$id" 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -201,6 +193,15 @@ verify_task() {  # <id>
       DETAIL="secondmate declared quiesce but its own fleet is not recorded as paused"
       return 0
     fi
+    # Bind the child pause to THIS instance, exactly as the worker's own token
+    # is bound. A child home left at `paused` by an earlier incident and put
+    # back to work without a resume still has that record on disk, and taking it
+    # would report the whole fleet safe with a child fleet running.
+    child_epoch=$(fm_quiesce_epoch "$child_state")
+    if [ "$child_epoch" -lt "$EPOCH" ]; then
+      DETAIL="secondmate declared quiesce but its own fleet's pause (started $child_epoch) predates this one (started $EPOCH), so it is an older pause left on disk"
+      return 0
+    fi
     VERDICT=confirmed
     DETAIL="own fleet quiesced"
     return 0
@@ -225,7 +226,7 @@ steer_task() {  # <id> <epoch>
   local id=$1 epoch=$2 meta kind text
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || return 0
-  kind=$(meta_field "$meta" kind)
+  kind=$(fm_meta_get "$meta" kind)
   [ -n "$kind" ] || kind=ship
   if [ "$kind" = secondmate ]; then
     text="FLEET PAUSE: run '$SCRIPT_DIR/fm-fleet-pause.sh' for your own home now; when it reports the fleet quiesced, append \"paused: fleet pause - own fleet quiesced [fleet-quiesced=$epoch]\" to $STATE/$id.status, then stop and wait for the resume instruction."
@@ -249,7 +250,7 @@ verify_pass() {  # <rows-file> <report-file>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     meta="$STATE/$id.meta"
-    kind=$(meta_field "$meta" kind)
+    kind=$(fm_meta_get "$meta" kind)
     [ -n "$kind" ] || kind=ship
     verify_task "$id"
     TASK_TOTAL=$((TASK_TOTAL + 1))
@@ -261,7 +262,7 @@ verify_pass() {  # <rows-file> <report-file>
       TASK_UNCONFIRMED=$((TASK_UNCONFIRMED + 1))
     fi
   done <<EOF
-$(task_ids)
+$(fm_quiesce_task_ids "$STATE")
 EOF
 }
 
@@ -307,11 +308,11 @@ if [ "$MODE" = begin ]; then
     fm_quiesce_task_confirms "$STATE" "$id" && continue
     # A dead endpoint has nobody to read the instruction; verification below
     # handles it directly instead of reporting a steer that could never land.
-    endpoint_is_live "$STATE/$id.meta" "$id" || continue
+    fm_quiesce_endpoint_is_live "$STATE/$id.meta" "$id" || continue
     steer_task "$id" "$EPOCH" \
       || printf 'note: the pause instruction may not have landed for %s\n' "$id"
   done <<EOF
-$(task_ids)
+$(fm_quiesce_task_ids "$STATE")
 EOF
 fi
 

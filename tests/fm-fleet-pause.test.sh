@@ -13,7 +13,10 @@
 #   - a task whose worker is already gone must still be verified, because a
 #     dead worker holding a monitoring run is exactly the orphan from the
 #     24/07/2026 incident;
-#   - a resume must release nobody while any readiness check fails.
+#   - but a worker whose endpoint merely could not be READ is not a gone worker,
+#     and its run must be left alone rather than cancelled on one bad probe;
+#   - a resume must release nobody while any readiness check fails, and must not
+#     claim success while a worker it could not reach is still sitting paused.
 #
 # Plus the two supervision properties a fleet pause depends on: a confirmed
 # quiesce stops producing wakes (or a fleet where everything is correctly paused
@@ -79,9 +82,12 @@ SH
 # A `no-mistakes` stub whose answer is data, not code: FM_FAKE_NM_STATUS names a
 # file holding the `axi status` TOON to print, FM_FAKE_NM_ABORT_FAILS makes the
 # abort refuse, and FM_FAKE_NM_HANG makes every call sleep past the bound.
+# FM_FAKE_NM_LOG records every invocation, so a case can assert what was NOT
+# done - an abort that never happened leaves no other trace.
 install_fake_no_mistakes() {  # <fakebin>
   cat > "$1/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -n "${FM_FAKE_NM_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_NM_LOG"
 [ -e "${FM_FAKE_NM_HANG:-/nonexistent}" ] && sleep 30
 case "${1:-} ${2:-}" in
   "axi status")
@@ -151,6 +157,7 @@ run_fleet() {  # <dir> <script> [args...]
     FM_FLEET_RESUME_CHECK_TIMEOUT="${FM_TEST_RESUME_TIMEOUT:-5}" \
     FM_NM_ABORT_TIMEOUT="${FM_TEST_NM_TIMEOUT:-5}" \
     FM_FAKE_NM_STATUS="${FM_FAKE_NM_STATUS:-}" \
+    FM_FAKE_NM_LOG="${FM_FAKE_NM_LOG:-}" \
     FM_FAKE_NM_ABORT_FAILS="${FM_FAKE_NM_ABORT_FAILS:-/nonexistent}" \
     FM_FAKE_NM_DAEMON_DOWN="${FM_FAKE_NM_DAEMON_DOWN:-/nonexistent}" \
     FM_FAKE_NM_HANG="${FM_FAKE_NM_HANG:-/nonexistent}" \
@@ -282,11 +289,15 @@ test_pause_verifies_and_reaps_a_dead_workers_run() {
   touch "$dir/dead"
   export FM_FAKE_NM_STATUS="$dir/nm-status" FM_FAKE_ENDPOINT_DEAD="$dir/dead"
 
-  # First, a run that refuses to stop: nobody is left to own it, and it is
-  # precisely the orphan from the incident, so the fleet is NOT safe.
+  # One absent reading is not a death, so the first pass proves nothing and the
+  # reap waits. The second consecutive absence is what makes the worker gone.
   touch "$dir/abort-fails"
   export FM_FAKE_NM_ABORT_FAILS="$dir/abort-fails"
-  out=$(run_fleet "$dir" "$PAUSE" --reason "lid" 2>&1)
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+
+  # Now, a run that refuses to stop: nobody is left to own it, and it is
+  # precisely the orphan from the incident, so the fleet is NOT safe.
+  out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
   rc=$?
   expect_code 3 "$rc" "an orphaned run that will not stop must keep the fleet unsafe"
   assert_contains "$out" "no live worker and its validation run could not be stopped" \
@@ -302,6 +313,32 @@ test_pause_verifies_and_reaps_a_dead_workers_run() {
   assert_contains "$out" "no live worker; verified quiet" "the verified-quiet path must be reported"
   assert_contains "$out" "aborted run R1" "the reaped run must be named"
   pass "a task whose worker is gone is verified, and its orphaned run reaped"
+}
+
+test_pause_never_reaps_on_an_unreadable_endpoint() {
+  local dir out rc
+  dir=$(make_case unreadable-endpoint)
+  install_fake_no_mistakes "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
+  touch "$dir/dead"
+  : > "$dir/nm.log"
+  export FM_FAKE_NM_STATUS="$dir/nm-status" FM_FAKE_ENDPOINT_DEAD="$dir/dead" \
+    FM_FAKE_NM_LOG="$dir/nm.log"
+
+  # One failed presence probe cannot tell a closed pane from an unreadable one,
+  # and the worker may be alive and mid-step driving this very run. Cancelling
+  # it here would reach into a pipeline firstmate does not own.
+  out=$(run_fleet "$dir" "$PAUSE" --reason "lid" 2>&1)
+  rc=$?
+  unset FM_FAKE_NM_STATUS FM_FAKE_ENDPOINT_DEAD FM_FAKE_NM_LOG
+  expect_code 3 "$rc" "an unproven liveness reading must keep the fleet unsafe, not pass"
+  assert_contains "$out" "task-a: NOT CONFIRMED" "the task must be reported as not confirmed"
+  assert_contains "$out" "liveness could not be established" \
+    "the report must say why the run was left alone"
+  assert_no_grep "abort" "$dir/nm.log" \
+    "a single unreadable probe must never abort the run"
+  pass "an unreadable endpoint holds the fleet unsafe instead of reaping a live worker's run"
 }
 
 test_pause_requires_a_secondmates_own_fleet() {
@@ -320,12 +357,36 @@ test_pause_requires_a_secondmates_own_fleet() {
   assert_contains "$out" "its own fleet is not recorded as paused" \
     "the second mate's unpaused fleet must be named"
 
-  printf 'schema\tfm-fleet-pause.v1\nstarted\t1\nphase\tpaused\nreason\tlid\n' \
-    > "$child/state/.fleet-paused"
+  printf 'schema\tfm-fleet-pause.v1\nstarted\t%s\nphase\tpaused\nreason\tlid\n' \
+    "$(pause_epoch "$dir")" > "$child/state/.fleet-paused"
   out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
   rc=$?
   expect_code 0 "$rc" "a second mate whose own fleet is paused confirms"
   pass "a second mate confirms only once its own fleet is quiesced too"
+}
+
+test_pause_rejects_a_secondmates_older_pause() {
+  local dir out rc child
+  dir=$(make_case secondmate-stale)
+  install_fake_no_mistakes "$dir/fakebin"
+  child="$dir/child-home"
+  mkdir -p "$child/state"
+  fm_write_secondmate_meta "$dir/state/mate.meta" "$child" "firstmate:fm-mate"
+
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  # A record left at the paused phase by an earlier incident, whose crew was put
+  # back to work without a resume. It proves nothing about THIS pause, so taking
+  # it would report the whole fleet safe with a child fleet still running.
+  printf 'schema\tfm-fleet-pause.v1\nstarted\t1000\nphase\tpaused\nreason\tan older lid\n' \
+    > "$child/state/.fleet-paused"
+  confirm "$dir" mate
+  out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
+  rc=$?
+  expect_code 3 "$rc" "a child pause from an earlier instance must not confirm this one"
+  assert_contains "$out" "mate: NOT CONFIRMED" "the second mate must be named"
+  assert_contains "$out" "predates this one" \
+    "the reason must say the child record belongs to an older pause"
+  pass "a second mate's own pause is bound to the instance it is confirming"
 }
 
 test_pause_record_survives_a_restart() {
@@ -430,6 +491,35 @@ test_resume_lifts_the_pause_when_everything_answers() {
   assert_absent "$dir/state/.fleet-paused" "a completed resume must clear the pause record"
   assert_grep "FLEET RESUME" "$dir/sent.log" "each worker must be told to resume"
   pass "a resume with the world back lifts the pause and releases the fleet"
+}
+
+test_resume_keeps_the_record_for_a_worker_it_could_not_release() {
+  local dir out rc
+  dir=$(make_case resume-stranded)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  # task-a quiesced for this pause and is sitting on its `paused:` line; task-b
+  # never did, so it has nothing to be released from.
+  confirm "$dir" task-a
+  : > "$dir/sent.log"
+
+  touch "$dir/dead"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_ENDPOINT_DEAD
+  expect_code 4 "$rc" "a worker that could not be released must not read as a clean resume"
+  assert_not_contains "$out" "every worker was released" \
+    "no claim that every worker was released may appear while one is stranded"
+  assert_contains "$out" "task-a: STILL PAUSED" "the stranded worker must be named"
+  assert_contains "$out" "task-b: no live worker to release" \
+    "a task that never quiesced must not be counted as stranded"
+  assert_present "$dir/state/.fleet-paused" \
+    "the record that would later resume the stranded worker must survive"
+  pass "a resume that could not release a paused worker says so and keeps the record"
 }
 
 # --- the crewmate side ------------------------------------------------------
@@ -572,12 +662,15 @@ test_pause_confirms_only_with_verification
 test_pause_rejects_a_previous_pauses_confirmation
 test_pause_rejects_a_still_active_run
 test_pause_verifies_and_reaps_a_dead_workers_run
+test_pause_never_reaps_on_an_unreadable_endpoint
 test_pause_requires_a_secondmates_own_fleet
+test_pause_rejects_a_secondmates_older_pause
 test_pause_record_survives_a_restart
 test_resume_blocks_while_the_forge_is_down
 test_resume_blocks_while_the_daemon_is_silent
 test_resume_blocks_when_the_daemon_stops_answering
 test_resume_lifts_the_pause_when_everything_answers
+test_resume_keeps_the_record_for_a_worker_it_could_not_release
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop
