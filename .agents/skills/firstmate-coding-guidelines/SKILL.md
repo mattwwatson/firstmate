@@ -2,8 +2,8 @@
 name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Use before scoping a firstmate bug or proposing a firstmate change, and before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
+  Covers the upstream prior-art sweep required before scoping, the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -11,9 +11,24 @@ metadata:
 
 # firstmate-coding-guidelines
 
-Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
+Load this before scoping a firstmate bug or proposing a firstmate change, and before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
 It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
 Applying the rules below on every change is what keeps that from happening again.
+
+## Upstream prior-art sweep
+
+Before scoping a firstmate bug or proposing a firstmate change, sweep upstream for prior art: open pull requests, open and closed issues, and anything merged since this home last fetched.
+Read the near-misses rather than trusting titles - a matching title can be a different problem, and a closed one can still name the conflict surface.
+Record what you found and why it does or does not cover the work, so the sweep is not repeated blind.
+
+Upstream is `kunchenguid/firstmate` and origin is the captain's fork.
+`gh-axi pr list` and `gh-axi issue list`, each with `--state all`, are the tools, and `gh-axi` resolves to the upstream parent by default, so a fork-side check needs an explicit `-R`.
+Sweep the full title list first, then read the body of everything that looks close.
+
+The worked example is the fleet pause and resume design of 25/07/2026, whose full evidence lives in the backlog item `fm-pause-resume-fleet`.
+Three closed upstream pull requests titled "fleet freeze" read as a direct hit, but their bodies described a runaway-spawn token-burn incident with no pause semantics at all, so a title-only check would have wrongly abandoned justified work.
+The sweep's real payoff was adjacency rather than duplication: it found the merged pull request providing the per-task pause primitive to build on, plus five open pull requests and three open issues actively churning those exact semantics.
+Building something that already exists is the cheaper failure; landing into a live conflict surface unaware is the expensive one, and only reading the near-misses finds it.
 
 ## Knowledge-placement decision tree
 
