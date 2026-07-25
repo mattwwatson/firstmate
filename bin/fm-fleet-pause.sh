@@ -50,7 +50,10 @@
 # backend's own agent probe reading `dead`, or the endpoint absent across two
 # consecutive verify passes a poll interval apart. Until then the task is
 # reported NOT CONFIRMED with its run untouched, which holds the fleet unsafe
-# rather than cancelling a live worker's pipeline on a momentary glitch.
+# rather than cancelling a live worker's pipeline on a momentary glitch. Every
+# pass therefore takes exactly one presence reading for EVERY task, confirmed or
+# not, so the absence run is genuinely consecutive: any pass that sees the worker
+# clears it, and a count can never survive passes that never saw it absent.
 #
 # SECONDMATES. A registered secondmate's work is a fleet, not a worktree, so it
 # quiesces by running this same command for its OWN home. It confirms with the
@@ -146,12 +149,13 @@ verify_task() {  # <id>
   wt=$(fm_meta_get "$meta" worktree)
   home=$(fm_meta_get "$meta" home)
 
+  presence=$(fm_quiesce_worker_presence "$STATE" "$meta" "$id")
+
   if ! fm_quiesce_task_confirms "$STATE" "$id"; then
     if [ "$kind" = secondmate ]; then
       DETAIL="secondmate has not confirmed its own fleet is quiesced"
       return 0
     fi
-    presence=$(fm_quiesce_worker_presence "$STATE" "$meta" "$id")
     if [ "$presence" = live ]; then
       DETAIL="worker has not confirmed quiesce"
       return 0
@@ -308,7 +312,7 @@ if [ "$MODE" = begin ]; then
     fm_quiesce_task_confirms "$STATE" "$id" && continue
     # A dead endpoint has nobody to read the instruction; verification below
     # handles it directly instead of reporting a steer that could never land.
-    fm_quiesce_endpoint_is_live "$STATE/$id.meta" "$id" || continue
+    fm_quiesce_worker_reachable "$STATE" "$STATE/$id.meta" "$id" || continue
     steer_task "$id" "$EPOCH" \
       || printf 'note: the pause instruction may not have landed for %s\n' "$id"
   done <<EOF

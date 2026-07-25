@@ -138,10 +138,12 @@ fm_quiesce_task_ids() {  # <state-dir>
 }
 
 # 0 when <task>'s recorded endpoint answers a cheap read-only presence probe.
-# PRESENCE ONLY: bin/fm-backend.sh's fm_backend_target_exists cannot tell a pane
-# that is gone from one it merely could not read, so a failure here is never on
-# its own evidence that the worker is gone. Callers that are about to ACT on a
-# worker's absence go through fm_quiesce_worker_presence instead.
+# RAW PRIMITIVE, and PRESENCE ONLY: bin/fm-backend.sh's fm_backend_target_exists
+# cannot tell a pane that is gone from one it merely could not read, so a failure
+# here is never on its own evidence that the worker is gone. Nothing in this
+# subsystem decides anything from it directly - every caller goes through
+# fm_quiesce_worker_presence or fm_quiesce_worker_reachable below, so that every
+# observation of a worker also maintains the absence run those two own.
 fm_quiesce_endpoint_is_live() {  # <meta> <id>
   local meta=$1 id=$2 window target backend
   window=$(fm_meta_get "$meta" window)
@@ -202,6 +204,13 @@ FM_QUIESCE_GONE_PROBES=2
 # own license an action, precisely so a momentary read glitch cannot be mistaken
 # for a death. `unproven` is therefore not a quiet pass - it holds the fleet
 # unsafe until the reading resolves one way or the other.
+#
+# CONSECUTIVE means consecutive. Every reading maintains the absence run: a live
+# or alive reading clears it, an unproven one extends it. That only holds if the
+# run is also cleared wherever else a caller sees the worker present, which is
+# what fm_quiesce_worker_reachable below exists for - a stale count left standing
+# through passes that never observed an absence would let ONE later glitch reach
+# the threshold, which is exactly the reap this rule forbids.
 fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
   local state=$1 meta=$2 id=$3 window target backend reading
   if fm_quiesce_endpoint_is_live "$meta" "$id"; then
@@ -222,6 +231,21 @@ fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
   else
     printf 'unproven'
   fi
+}
+
+# 0 when <task>'s endpoint answers right now. For the callers that only need to
+# know whether they can TALK to the worker and never act on its absence - the
+# pause steer, which simply skips an endpoint that cannot read the instruction.
+# It deliberately does not extend the absence run: this observation is not a
+# verify pass, and counting it would let two glitched reads milliseconds apart
+# stand in for the two separated passes the reap rule requires. A live reading
+# is still proof of life, so it clears the run like any other.
+fm_quiesce_worker_reachable() {  # <state-dir> <meta> <id>
+  if fm_quiesce_endpoint_is_live "$2" "$3"; then
+    fm_quiesce_probe_reset "$1" "$3"
+    return 0
+  fi
+  return 1
 }
 
 # Atomically (re)write the record. `started` is preserved from any existing

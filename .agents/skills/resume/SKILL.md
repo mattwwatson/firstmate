@@ -21,10 +21,14 @@ Read its `--help` before first use; it is the authority on what each check prove
 - `bin/fm-fleet-resume.sh` - check readiness, then lift the pause and release every worker.
 - `bin/fm-fleet-resume.sh check` - run the readiness checks only and report. Changes nothing, so it is the right answer to "is the network back yet?".
 
-Exit 0 means the pause is lifted and every worker was released.
+Exit 0 means the pause is lifted and every paused worker was released.
 Exit 3 means a check failed: **nothing was released and the fleet is still paused.**
-Exit 4 means a worker was not released, and that worker needs a look.
-If it had already quiesced for this pause, it is still sitting paused and the pause record is deliberately kept, so the fleet is not fully back: deal with that worker, then run `/resume` again to finish the lift.
+Exit 4 means a worker that is still paused could not be released, so the fleet is not fully back and the pause record is deliberately kept: deal with that worker, then run `/resume` again to finish the lift.
+Re-running it is safe, because it only steers workers that are still paused for this pause instance.
+
+Two things it deliberately does not do, both reported by name in its output rather than skipped silently.
+It does not steer a worker that never paused, because that worker has nothing to resume from.
+It does not hold the pause open for a worker whose window is confidently gone, because no re-run could ever release it and the home would stay under an open pause forever.
 
 ## The one rule that matters
 

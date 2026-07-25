@@ -108,6 +108,7 @@ state/               volatile runtime signals; gitignored
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .fleet-paused      durable captain-invoked fleet-pause record with its per-task confirmation verdicts; present = the fleet is quiescing or quiesced (set by /pause, cleared by /resume); bin/fm-quiesce-lib.sh owns the format and phases
   .fleet-pause.lock  fleet-pause and resume serialization lock
+  .fleet-paused.probe.<task>  per-task consecutive-endpoint-absence counter for the open pause, holding `<pause-epoch> <count>`; it is what stops one unreadable probe passing as a dead worker, and bin/fm-quiesce-lib.sh owns it
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .wedge-probe-* .wedge-unreadable-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .primary-turn-active .turnend-handoff-pass   watcher and turn-end-guard internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete

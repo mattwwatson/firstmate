@@ -8,18 +8,30 @@
 #           each paused worker. On failure release nobody and change nothing.
 #   check   Run the readiness checks only and report. Never mutates anything.
 #
-# Exit 0 when the pause is lifted and every worker was released, 3 when a
+# Exit 0 when the pause is lifted and every paused worker was released, 3 when a
 # readiness check failed (nothing was released and the pause record is intact),
-# 4 when a worker could not be told to resume, 1 on an operational error, 2 on a
+# 4 when a paused worker could not be released, 1 on an operational error, 2 on a
 # usage error.
 #
-# EXIT 4 AND THE RECORD. A worker that had quiesced for THIS pause and could not
-# be released is still sitting on its `paused:` line, so the pause record is
-# KEPT (back in the `quiescing` phase) rather than cleared: that record is the
-# only thing that says a paused worker is still out there, and clearing it would
-# strand that worker with nothing left to wake it. Re-running the resume once
-# the worker is reachable finishes the lift. A task that never quiesced has
-# nothing to be released from and never holds the record open.
+# WHO GETS RELEASED. Only a task that STILL CARRIES a confirmation token for this
+# pause instance - that token is what says the worker is sitting stopped waiting
+# to be told to carry on. Two consequences are deliberate. A worker that never
+# quiesced is not steered, because it never paused and has nothing to resume
+# from. And a worker already released earlier has retired its own token by
+# reporting `working:`, so a re-run cannot type a second FLEET RESUME into a
+# worker that is mid-turn. Both are reported by name rather than skipped
+# silently. Re-running this command is therefore safe and idempotent.
+#
+# EXIT 4 AND THE RECORD. A worker still paused for THIS instance that could not
+# be released keeps the pause record KEPT (back in the `quiescing` phase) rather
+# than cleared: that record is the only thing that says a paused worker is still
+# out there, and clearing it would strand that worker with nothing left to wake
+# it. Re-run once it is reachable to finish the lift. A worker whose endpoint is
+# CONFIDENTLY gone is the exception and does not hold the record open: there is
+# nothing left to release, and holding it would leave the home under an open
+# pause that no re-run could ever close (bin/fm-quiesce-lib.sh's
+# fm_quiesce_worker_presence owns that gone-versus-merely-unreadable rule, and
+# the pause side gates its run reaping on the same reading).
 #
 # WHY IT CHECKS FIRST. Resuming into a network that is not really back recreates
 # the failure the pause exists to prevent: pushes, forge calls, and no-mistakes
@@ -203,26 +215,26 @@ fi
 REASON=$(fm_quiesce_field "$STATE" reason)
 fm_quiesce_write "$STATE" releasing "$REASON" || { echo "error: cannot record the release" >&2; exit 1; }
 
-# UNRELEASED counts every worker that was not put back to work. STRANDED counts
-# the subset that had actually quiesced for THIS pause and is therefore still
-# sitting on its `paused:` line: those are the ones whose pause record must
-# survive, because that record is the only thing that would later tell firstmate
-# to resume them. A task that never quiesced has nothing to be released from and
-# must not hold the lift open.
+# UNRELEASED counts the workers that are STILL PAUSED for this instance and were
+# not put back to work. Only those keep the record alive, because only for those
+# is there anything left to release.
 UNRELEASED=0
-STRANDED=0
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || continue
-  if ! fm_quiesce_endpoint_is_live "$meta" "$id"; then
-    if fm_quiesce_task_confirms "$STATE" "$id"; then
-      printf '  %s: STILL PAUSED - it quiesced for this pause and its endpoint does not answer\n' "$id"
-      UNRELEASED=$((UNRELEASED + 1))
-      STRANDED=$((STRANDED + 1))
-    else
-      printf '  %s: no live worker to release\n' "$id"
-    fi
+  if ! fm_quiesce_task_confirms "$STATE" "$id"; then
+    printf '  %s: not paused for this pause; nothing to release\n' "$id"
+    continue
+  fi
+  presence=$(fm_quiesce_worker_presence "$STATE" "$meta" "$id")
+  if [ "$presence" = gone ]; then
+    printf '  %s: worker is gone; nothing left to release\n' "$id"
+    continue
+  fi
+  if [ "$presence" != live ]; then
+    printf '  %s: STILL PAUSED - its endpoint did not answer and its liveness could not be established\n' "$id"
+    UNRELEASED=$((UNRELEASED + 1))
     continue
   fi
   kind=$(fm_meta_get "$meta" kind)
@@ -237,33 +249,23 @@ while IFS= read -r id; do
   else
     printf '  %s: RESUME INSTRUCTION DID NOT LAND\n' "$id"
     UNRELEASED=$((UNRELEASED + 1))
-    fm_quiesce_task_confirms "$STATE" "$id" && STRANDED=$((STRANDED + 1))
   fi
 done <<EOF
 $(fm_quiesce_task_ids "$STATE")
 EOF
 
 # Cleared last: until this line the home still knows a pause is open. A worker
-# that quiesced for this pause and could NOT be released keeps the record alive
-# instead, back in the honest `quiescing` phase: clearing it would delete the
-# one thing that says a paused worker is still out there waiting, and leave it
-# paused with nothing left to wake it.
-if [ "$STRANDED" -eq 0 ]; then
-  fm_quiesce_clear "$STATE"
-else
-  fm_quiesce_write "$STATE" quiescing "$REASON" \
-    || echo "error: cannot record the incomplete release" >&2
-fi
-
+# still paused for this instance that could NOT be released keeps the record
+# alive instead, back in the honest `quiescing` phase: clearing it would delete
+# the one thing that says a paused worker is still out there waiting, and leave
+# it paused with nothing left to wake it.
 if [ "$UNRELEASED" -eq 0 ]; then
-  echo "fleet resumed: the pause is lifted and every worker was released"
+  fm_quiesce_clear "$STATE"
+  echo "fleet resumed: the pause is lifted and every paused worker was released"
   exit 0
 fi
-if [ "$STRANDED" -gt 0 ]; then
-  printf 'NOT FULLY RESUMED: %s worker(s) were not released and %s of them are still paused; the pause record is kept so they can be resumed once reachable\n' \
-    "$UNRELEASED" "$STRANDED"
-  exit 4
-fi
-printf 'fleet resumed, but %s worker(s) did not take the resume instruction; they need a look\n' \
+fm_quiesce_write "$STATE" quiescing "$REASON" \
+  || echo "error: cannot record the incomplete release" >&2
+printf 'NOT FULLY RESUMED: %s worker(s) are still paused and were not released; the pause record is kept, so run this again once they are reachable\n' \
   "$UNRELEASED"
 exit 4

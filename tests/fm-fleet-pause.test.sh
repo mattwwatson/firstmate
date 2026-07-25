@@ -51,12 +51,34 @@ make_case() {  # <name>
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$dir/projects" "$fakebin"
 
-  # Endpoint liveness is a tmux display-message probe; a file flag drives it so
-  # a case can kill the worker without killing anything real.
+  # Endpoint liveness is a tmux display-message probe; file flags drive it so a
+  # case can kill a worker without killing anything real. FM_FAKE_ENDPOINT_DEAD
+  # kills every endpoint, FM_FAKE_DEAD_DIR/<target> kills one. A dead endpoint
+  # reads UNREADABLE by default, which is what the two-probe rule is about; a
+  # case that wants the backend to report a CONFIDENT dead agent instead sets
+  # FM_FAKE_AGENT_DEAD, and the pane_current_command probe then answers with a
+  # bare shell, exactly as a real pane whose agent has exited does.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = display-message ]; then
-  [ -e "${FM_FAKE_ENDPOINT_DEAD:-/nonexistent}" ] && exit 1
+  target=
+  fmt=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -t) shift; target=${1:-} ;;
+      '#{'*) fmt=$1 ;;
+    esac
+    shift || true
+  done
+  dead=0
+  [ -e "${FM_FAKE_ENDPOINT_DEAD:-/nonexistent}" ] && dead=1
+  [ -n "${FM_FAKE_DEAD_DIR:-}" ] && [ -e "$FM_FAKE_DEAD_DIR/$target" ] && dead=1
+  if [ "$dead" = 1 ]; then
+    [ "$fmt" = '#{pane_current_command}' ] && [ -e "${FM_FAKE_AGENT_DEAD:-/nonexistent}" ] \
+      && { printf 'bash\n'; exit 0; }
+    exit 1
+  fi
+  [ "$fmt" = '#{pane_current_command}' ] && { printf 'claude\n'; exit 0; }
   printf '%%1\n'
   exit 0
 fi
@@ -163,6 +185,8 @@ run_fleet() {  # <dir> <script> [args...]
     FM_FAKE_NM_HANG="${FM_FAKE_NM_HANG:-/nonexistent}" \
     FM_FAKE_GH_DOWN="${FM_FAKE_GH_DOWN:-/nonexistent}" \
     FM_FAKE_ENDPOINT_DEAD="${FM_FAKE_ENDPOINT_DEAD:-/nonexistent}" \
+    FM_FAKE_DEAD_DIR="${FM_FAKE_DEAD_DIR:-}" \
+    FM_FAKE_AGENT_DEAD="${FM_FAKE_AGENT_DEAD:-/nonexistent}" \
     FM_FAKE_SEND_FAILS="${FM_FAKE_SEND_FAILS:-/nonexistent}" \
     "$script" "$@" )
 }
@@ -341,6 +365,42 @@ test_pause_never_reaps_on_an_unreadable_endpoint() {
   pass "an unreadable endpoint holds the fleet unsafe instead of reaping a live worker's run"
 }
 
+test_pause_absence_run_resets_on_proof_of_life() {
+  local dir out rc
+  dir=$(make_case absence-reset)
+  install_fake_no_mistakes "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
+  touch "$dir/dead"
+  : > "$dir/nm.log"
+  export FM_FAKE_NM_STATUS="$dir/nm-status" FM_FAKE_NM_LOG="$dir/nm.log"
+
+  # Pass 1: one absent reading. Not proof of anything on its own.
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead"
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+
+  # Pass 2: the worker is plainly there, which ends the run of absences. It is
+  # seen on the CONFIRMED branch, the one place a proof of life is easiest to
+  # drop on the floor, so this is what the counter has to notice.
+  unset FM_FAKE_ENDPOINT_DEAD
+  confirm "$dir" task-a
+  run_fleet "$dir" "$PAUSE" check >/dev/null 2>&1
+
+  # Pass 3: the token is retired and the endpoint glitches once more. That is a
+  # FIRST absence again, not a second, so nothing may be reaped.
+  printf 'blocked: waiting on a decision\n' >> "$dir/state/task-a.status"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead"
+  out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
+  rc=$?
+  unset FM_FAKE_NM_STATUS FM_FAKE_ENDPOINT_DEAD FM_FAKE_NM_LOG
+  expect_code 3 "$rc" "a single absence after a proof of life must not reach the gone threshold"
+  assert_contains "$out" "liveness could not be established" \
+    "the task must be held unproven rather than treated as gone"
+  assert_no_grep "axi abort" "$dir/nm.log" \
+    "a stale absence count must never let one glitch reap a live worker's run"
+  pass "seeing the worker resets the absence run, so the two probes must be consecutive"
+}
+
 test_pause_requires_a_secondmates_own_fleet() {
   local dir out rc child
   dir=$(make_case secondmate)
@@ -515,11 +575,77 @@ test_resume_keeps_the_record_for_a_worker_it_could_not_release() {
   assert_not_contains "$out" "every worker was released" \
     "no claim that every worker was released may appear while one is stranded"
   assert_contains "$out" "task-a: STILL PAUSED" "the stranded worker must be named"
-  assert_contains "$out" "task-b: no live worker to release" \
+  assert_contains "$out" "task-b: not paused for this pause" \
     "a task that never quiesced must not be counted as stranded"
   assert_present "$dir/state/.fleet-paused" \
     "the record that would later resume the stranded worker must survive"
   pass "a resume that could not release a paused worker says so and keeps the record"
+}
+
+test_resume_completes_when_a_paused_workers_window_is_gone() {
+  local dir out rc
+  dir=$(make_case resume-gone)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  : > "$dir/sent.log"
+
+  # The window is not merely unreadable: the backend confidently reports no
+  # agent, the way a real pane whose harness exited does. Nobody is left to
+  # release, and holding the record open for it would leave this home under a
+  # pause that no later resume could ever close.
+  touch "$dir/dead" "$dir/agent-dead"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead" FM_FAKE_AGENT_DEAD="$dir/agent-dead"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_ENDPOINT_DEAD FM_FAKE_AGENT_DEAD
+  expect_code 0 "$rc" "a worker that is confidently gone must not hold the resume open forever"
+  assert_contains "$out" "task-a: worker is gone" "the gone worker must be distinguished by name"
+  assert_absent "$dir/state/.fleet-paused" \
+    "a pause nobody is left to be released from must not stay open"
+  pass "a confidently gone worker is not stranded, because no re-run could ever release it"
+}
+
+test_resume_rerun_does_not_resteer_a_released_worker() {
+  local dir out rc steers
+  dir=$(make_case resume-rerun)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  confirm "$dir" task-b
+  : > "$dir/sent.log"
+
+  # task-b's window alone stops answering, so the first resume releases task-a
+  # and strands task-b, which is what makes a re-run necessary.
+  mkdir -p "$dir/deadtargets"
+  touch "$dir/deadtargets/firstmate:fm-task-b"
+  export FM_FAKE_DEAD_DIR="$dir/deadtargets"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 4 "$rc" "a stranded worker must keep the resume incomplete"
+  assert_contains "$out" "task-a: released" "the reachable worker must be released"
+
+  # task-a is back at work and says so, which retires its token. The re-run the
+  # exit-4 path asks for must not type a second instruction into its turn.
+  printf 'working: resumed after fleet pause\n' >> "$dir/state/task-a.status"
+  rm -f "$dir/deadtargets/firstmate:fm-task-b"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_DEAD_DIR
+  expect_code 0 "$rc" "the re-run must finish the lift once the last worker is reachable"
+  assert_contains "$out" "task-b: released" "the worker still paused must be released"
+  assert_contains "$out" "task-a: not paused for this pause" \
+    "a worker already back at work must be named, not silently skipped"
+  steers=$(grep -c "^task-a	FLEET RESUME" "$dir/sent.log" || true)
+  [ "$steers" = 1 ] \
+    || fail "a released worker must be steered exactly once, got $steers"
+  assert_absent "$dir/state/.fleet-paused" "the completed re-run must clear the record"
+  pass "a resume re-run releases only workers still paused, so it cannot double-steer"
 }
 
 # --- the crewmate side ------------------------------------------------------
@@ -663,6 +789,7 @@ test_pause_rejects_a_previous_pauses_confirmation
 test_pause_rejects_a_still_active_run
 test_pause_verifies_and_reaps_a_dead_workers_run
 test_pause_never_reaps_on_an_unreadable_endpoint
+test_pause_absence_run_resets_on_proof_of_life
 test_pause_requires_a_secondmates_own_fleet
 test_pause_rejects_a_secondmates_older_pause
 test_pause_record_survives_a_restart
@@ -671,6 +798,8 @@ test_resume_blocks_while_the_daemon_is_silent
 test_resume_blocks_when_the_daemon_stops_answering
 test_resume_lifts_the_pause_when_everything_answers
 test_resume_keeps_the_record_for_a_worker_it_could_not_release
+test_resume_completes_when_a_paused_workers_window_is_gone
+test_resume_rerun_does_not_resteer_a_released_worker
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop
