@@ -127,19 +127,21 @@ test_upstream_prior_art_sweep_is_owned() {
   assert_contains "$sweep" "Record what you found and why it does or does not cover the work with the backlog item" \
     "coding guidance lost the record-the-finding obligation or its recording home"
   for command in \
-    'gh-axi pr list --state all -R kunchenguid/firstmate --limit 500' \
-    'gh-axi issue list --state all -R kunchenguid/firstmate --limit 500'; do
+    'gh-axi pr list --state all -R kunchenguid/firstmate --limit 2000' \
+    'gh-axi issue list --state all -R kunchenguid/firstmate --limit 2000'; do
     assert_contains "$sweep" "$command" \
       "sweep command lost its explicit upstream repo or raised limit: $command"
   done
+  assert_contains "$sweep" 'raise it and rerun whenever the output reports `count: N (showing first N)`' \
+    "sweep guidance lost the truncation marker that keeps the limit correct as upstream grows"
   assert_grep '`firstmate-coding-guidelines` - load before scoping a firstmate bug or proposing a firstmate change' "$AGENTS" \
     "AGENTS.md lost the widened firstmate-coding-guidelines trigger"
   for phrase in \
-    "prior art" \
-    "near-miss" \
-    "kunchenguid/firstmate" \
-    "gh-axi pr list" \
-    "gh-axi issue list"; do
+    "sweep upstream for prior art" \
+    "Read the near-misses rather than trusting titles" \
+    "-R kunchenguid/firstmate" \
+    "gh-axi pr list --state all" \
+    "gh-axi issue list --state all"; do
     assert_no_grep "$phrase" "$AGENTS" \
       "AGENTS.md restated the upstream prior-art sweep instead of pointing at the skill: $phrase"
   done

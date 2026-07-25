@@ -21,9 +21,9 @@ Before scoping a firstmate bug or proposing a firstmate change, sweep upstream f
 Read the near-misses rather than trusting titles - a matching title can be a different problem, and a closed one can still name the conflict surface.
 Record what you found and why it does or does not cover the work with the backlog item, per `AGENTS.md` section 6's knowledge-routing list, so the sweep is not repeated blind.
 
-`gh-axi pr list --state all -R kunchenguid/firstmate --limit 500` and `gh-axi issue list --state all -R kunchenguid/firstmate --limit 500` are the tools.
+`gh-axi pr list --state all -R kunchenguid/firstmate --limit 2000` and `gh-axi issue list --state all -R kunchenguid/firstmate --limit 2000` are the tools.
 Name the upstream repo explicitly on every sweep command, because `gh-axi`'s repo resolution without `-R` depends on this home's remote configuration and can silently read the fork instead.
-Raise `--limit` well past its default on every sweep command, because the default returns only a recent window and hides the older prior art the sweep exists to find.
+The limit must stay above the upstream total, so raise it and rerun whenever the output reports `count: N (showing first N)`, because a truncated list hides the older prior art the sweep exists to find.
 Sweep the full title list first, then read the body of everything that looks close.
 
 The worked example is the fleet pause and resume design of 25/07/2026.
