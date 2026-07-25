@@ -15,6 +15,7 @@ RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
+CONTRIB="$ROOT/CONTRIBUTING.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
 
 test_new_skill_metadata_and_triggers() {
@@ -148,6 +149,20 @@ test_upstream_prior_art_sweep_is_owned() {
   pass "firstmate-coding-guidelines is the sole owner of the upstream prior-art sweep"
 }
 
+test_scoping_trigger_reaches_every_pointer() {
+  assert_grep 'Use before scoping a firstmate bug or proposing a firstmate change, and before editing any of that material' "$CODING" \
+    "coding guidance metadata lost the scoping half of its load trigger"
+  assert_grep 'Covers the upstream prior-art sweep required before scoping' "$CODING" \
+    "coding guidance metadata lost the sweep from its coverage list"
+  assert_grep 'Load this before scoping a firstmate bug or proposing a firstmate change' "$CODING" \
+    "coding guidance body lost the scoping half of its load trigger"
+  assert_grep 'explicitly require `firstmate-coding-guidelines` before scoping or editing.' "$AGENTS" \
+    "AGENTS.md ship-brief requirement lost the scoping half of the trigger"
+  assert_grep 'Before scoping a firstmate bug, proposing such a change, or making one, load the agent-only `firstmate-coding-guidelines` skill' "$CONTRIB" \
+    "CONTRIBUTING.md lost the scoping half of the trigger"
+  pass "the widened scoping trigger reaches metadata, the skill body, AGENTS.md, and CONTRIBUTING.md"
+}
+
 test_secondmate_registry_contract_stays_concise() {
   local guidance routing_section schema_line
   routing_section=$(awk '
@@ -263,6 +278,7 @@ test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
 test_upstream_prior_art_sweep_is_owned
+test_scoping_trigger_reaches_every_pointer
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
