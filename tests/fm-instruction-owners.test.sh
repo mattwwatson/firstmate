@@ -113,6 +113,39 @@ test_shared_authoring_requirements_are_owned() {
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
 }
 
+test_upstream_prior_art_sweep_is_owned() {
+  local sweep
+  sweep=$(awk '
+    /^## Upstream prior-art sweep$/ { found = 1 }
+    found && /^## Knowledge-placement decision tree$/ { exit }
+    found { print }
+  ' "$CODING")
+  assert_contains "$sweep" "sweep upstream for prior art" \
+    "coding guidance lost the upstream prior-art sweep obligation"
+  assert_contains "$sweep" "Read the near-misses rather than trusting titles" \
+    "coding guidance lost the read-the-near-misses obligation"
+  assert_contains "$sweep" "Record what you found and why it does or does not cover the work with the backlog item" \
+    "coding guidance lost the record-the-finding obligation or its recording home"
+  for command in \
+    'gh-axi pr list --state all -R kunchenguid/firstmate --limit 500' \
+    'gh-axi issue list --state all -R kunchenguid/firstmate --limit 500'; do
+    assert_contains "$sweep" "$command" \
+      "sweep command lost its explicit upstream repo or raised limit: $command"
+  done
+  assert_grep '`firstmate-coding-guidelines` - load before scoping a firstmate bug or proposing a firstmate change' "$AGENTS" \
+    "AGENTS.md lost the widened firstmate-coding-guidelines trigger"
+  for phrase in \
+    "prior art" \
+    "near-miss" \
+    "kunchenguid/firstmate" \
+    "gh-axi pr list" \
+    "gh-axi issue list"; do
+    assert_no_grep "$phrase" "$AGENTS" \
+      "AGENTS.md restated the upstream prior-art sweep instead of pointing at the skill: $phrase"
+  done
+  pass "firstmate-coding-guidelines is the sole owner of the upstream prior-art sweep"
+}
+
 test_secondmate_registry_contract_stays_concise() {
   local guidance routing_section schema_line
   routing_section=$(awk '
@@ -227,6 +260,7 @@ test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
+test_upstream_prior_art_sweep_is_owned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map

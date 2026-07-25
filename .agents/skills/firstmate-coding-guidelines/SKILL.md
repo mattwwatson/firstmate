@@ -19,13 +19,14 @@ Applying the rules below on every change is what keeps that from happening again
 
 Before scoping a firstmate bug or proposing a firstmate change, sweep upstream for prior art: open pull requests, open and closed issues, and anything merged since this home last fetched.
 Read the near-misses rather than trusting titles - a matching title can be a different problem, and a closed one can still name the conflict surface.
-Record what you found and why it does or does not cover the work, so the sweep is not repeated blind.
+Record what you found and why it does or does not cover the work with the backlog item, per `AGENTS.md` section 6's knowledge-routing list, so the sweep is not repeated blind.
 
-Upstream is `kunchenguid/firstmate` and origin is the captain's fork.
-`gh-axi pr list` and `gh-axi issue list`, each with `--state all`, are the tools, and `gh-axi` resolves to the upstream parent by default, so a fork-side check needs an explicit `-R`.
+`gh-axi pr list --state all -R kunchenguid/firstmate --limit 500` and `gh-axi issue list --state all -R kunchenguid/firstmate --limit 500` are the tools.
+Name the upstream repo explicitly on every sweep command, because `gh-axi`'s repo resolution without `-R` depends on this home's remote configuration and can silently read the fork instead.
+Raise `--limit` well past its default on every sweep command, because the default returns only a recent window and hides the older prior art the sweep exists to find.
 Sweep the full title list first, then read the body of everything that looks close.
 
-The worked example is the fleet pause and resume design of 25/07/2026, whose full evidence lives in the backlog item `fm-pause-resume-fleet`.
+The worked example is the fleet pause and resume design of 25/07/2026.
 Three closed upstream pull requests titled "fleet freeze" read as a direct hit, but their bodies described a runaway-spawn token-burn incident with no pause semantics at all, so a title-only check would have wrongly abandoned justified work.
 The sweep's real payoff was adjacency rather than duplication: it found the merged pull request providing the per-task pause primitive to build on, plus five open pull requests and three open issues actively churning those exact semantics.
 Building something that already exists is the cheaper failure; landing into a live conflict surface unaware is the expensive one, and only reading the near-misses finds it.
