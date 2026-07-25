@@ -69,6 +69,10 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# The captain-invoked fleet pause record, read to tell a wait firstmate itself
+# commanded from every other declared pause (see fleet_quiesced_task below).
+# shellcheck source=bin/fm-quiesce-lib.sh
+. "$SCRIPT_DIR/fm-quiesce-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
 # (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
 # synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
@@ -193,6 +197,47 @@ _event_cap_fails=0
 # every wake) and let the daemon classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
+
+# --- captain-invoked fleet pause --------------------------------------------
+#
+# A worker quiesced by /pause declares it with the ordinary paused: verb plus a
+# token naming the pause instance (bin/fm-quiesce-lib.sh), so every existing
+# declared-pause path below already treats it as the deliberate wait it is. What
+# the token adds is that firstmate ITSELF commanded this particular wait, which
+# makes the two sightings the pause cadence would still produce - the one live-
+# agent surface, and the hourly "confirm the wait still holds" re-surface - pure
+# noise, each of them a wake that ends the arm cycle.
+#
+# That matters more than tidiness. With the captain's laptop shut there is
+# nobody to re-arm, and a fleet where EVERY task is correctly paused would
+# otherwise burn its supervision cycle on those sightings and leave nothing
+# listening for /resume. Suppression is therefore per task and strictly
+# evidence-based: it applies only while a valid pause record exists AND that
+# task's own current status confirms that exact instance. A task that never
+# confirmed keeps its normal supervision, so a worker that failed to quiesce
+# still surfaces - which is the whole point of learning about it - and any later
+# status event (a done:, a blocked:) retires the token and restores normal
+# treatment at once.
+fleet_quiesced_task() {  # <task>
+  fm_quiesce_task_confirms "$STATE" "$1"
+}
+
+# 0 (benign/absorb) when a no-verb signal wake is about nothing but tasks already
+# confirmed quiesced under the current fleet pause. Confirming a quiesce IS a
+# status append, so without this the very act of confirming would end the arm
+# cycle once per worker - during a pause, when firstmate is least able to notice
+# and re-arm. An empty or unresolvable list is never absorbable.
+fleet_signal_all_quiesced() {  # <file>...
+  local task seen=0
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    seen=1
+    fleet_quiesced_task "$task" || return 1
+  done <<EOF
+$(signal_task_ids "$@")
+EOF
+  [ "$seen" -eq 1 ]
+}
 
 # Append one line to the triage debug log explaining an absorbed (benign) wake,
 # size-capped so a long benign stretch cannot grow it without bound. Best-effort:
@@ -579,6 +624,12 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  if fleet_quiesced_task "$task"; then
+    # Firstmate commanded this wait, so there is no wait to confirm: re-surfacing
+    # it would only cost the supervision cycle nobody is there to re-arm.
+    triage_log "absorbed stale (fleet pause, age ${age}s): $win"
+    return 0
+  fi
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
     fm_wake_append stale "$win" "$reason" || exit 1
@@ -645,6 +696,10 @@ pause_instance() {  # <task>
 
 pause_declared_class() {  # <window> <key> <task>
   local win=$1 key=$2 task=$3 agent_alive rf
+  # A confirmed fleet-pause quiesce needs no live-agent sighting: firstmate
+  # ordered this wait and already verified it, so there is nothing for that one
+  # sighting to reveal.
+  fleet_quiesced_task "$task" && { printf 'paused'; return; }
   [ "$(window_kind "$win")" = secondmate ] && { printf 'paused'; return; }
   rf="$STATE/.paused-resurfaced-$key"
   if [ -e "$rf" ] && [ "$(cat "$rf" 2>/dev/null || true)" = "$(pause_instance "$task")" ]; then
@@ -1178,8 +1233,14 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # A confirmed fleet-pause quiesce is the one other benign no-verb case: the
+    # crew is deliberately stopped on firstmate's own order, so it is absorbed
+    # exactly like a provably-working crew rather than read as a crew that
+    # stopped unexpectedly. A captain-relevant verb still surfaces first, so a
+    # paused worker that later reports blocked: or done: is never swallowed.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_reason_is_actionable $files \
+       || { ! signal_crew_provably_working $files && ! fleet_signal_all_quiesced $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1

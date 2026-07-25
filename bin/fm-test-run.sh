@@ -131,7 +131,8 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-daemon.test.sh|fm-fleet-pause.test.sh|fm-guard-stale-banner.test.sh|\
+    fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
@@ -645,6 +646,13 @@ families_for_changed_path() {
     bin/fm-afk*)
       printf '%s\n' afk
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-fleet-pause.sh|bin/fm-fleet-resume.sh|bin/fm-quiesce.sh|\
+    bin/fm-quiesce-lib.sh|bin/fm-nm-abort.sh)
+      # The fleet pause owns its own suite (watcher-wake-lock) and shares the run
+      # abort with teardown, whose refusal matrix lives in pr-forge.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pr-forge
       ;;
     bin/fm-supervisor-target-lib.sh)
       printf '%s\n' watcher-wake-lock

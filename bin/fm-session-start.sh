@@ -38,8 +38,11 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, the captain-invoked fleet-pause record with
+#                       its per-task verdicts (state/.fleet-paused, so a restart
+#                       mid-pause finds the pause rather than losing it), and a
+#                       cheap per-task endpoint-liveness read: read-only, always
+#                       runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -100,6 +103,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quiesce-lib.sh
+. "$SCRIPT_DIR/fm-quiesce-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -386,6 +391,15 @@ else
   printf 'absent\n'
 fi
 
+subsection "FLEET PAUSE"
+if fm_quiesce_active "$STATE"; then
+  printf 'present - the fleet is under a captain-invoked pause (phase %s). Load /resume before restarting any work.\n' \
+    "$(fm_quiesce_phase "$STATE")"
+  fm_quiesce_task_rows "$STATE" | sed 's/^/  /'
+else
+  printf 'absent\n'
+fi
+
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
@@ -400,6 +414,14 @@ elif [ "$AFK_PRESENT" -eq 1 ]; then
 Away mode is active. Follow the supervision operating instructions block above:
 load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
+
+EOF
+elif fm_quiesce_active "$STATE"; then
+  cat <<'EOF'
+A captain-invoked fleet pause is still open (see FLEET PAUSE above). Keep
+supervision live per the block above, but start no new work and release no
+worker by hand: load /resume, which proves the network and the validation
+daemon are back before lifting the pause.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then

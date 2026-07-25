@@ -220,6 +220,34 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# Install a `no-mistakes` stub for the run-abort path. <mode> is one of:
+#   none         no run is attributed to the worktree's branch
+#   active       a run is monitoring, and abort works (the run then reads terminal)
+#   unstoppable  a run is monitoring and abort refuses
+# The run state lives in a file so a successful abort is observable, which is what
+# lets a test tell a real abort from an abort that only claimed to work.
+add_fake_no_mistakes_run() {  # <case_dir> <mode>
+  local case_dir=$1 mode=$2
+  case "$mode" in
+    none) printf 'run:\n  id: "R1"\n  branch: other/branch\n  status: ci\n' > "$case_dir/nm-run" ;;
+    *)    printf 'run:\n  id: "R1"\n  branch: fm/task-x1\n  status: ci\n' > "$case_dir/nm-run" ;;
+  esac
+  [ "$mode" = unstoppable ] && touch "$case_dir/nm-abort-refuses"
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "axi status") cat "$case_dir/nm-run"; exit 0 ;;
+  "axi abort")
+    [ -e "$case_dir/nm-abort-refuses" ] && exit 1
+    printf 'run:\n  id: "R1"\n  branch: fm/task-x1\n  status: cancelled\n  outcome: cancelled\n' > "$case_dir/nm-run"
+    printf 'aborted\n' >> "$case_dir/nm-aborts"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -1052,6 +1080,90 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+# --- the active-run abort (fm-nm-abort-orphans-nomistakes-run) --------------
+#
+# A no-mistakes run does not end when its PR goes green: it stays in its
+# "monitoring until merged or closed" phase holding the shared daemon. Teardown
+# used to remove the worktree without stopping it, so every task torn down before
+# its PR merged left a run monitoring a worktree that no longer existed. Seven
+# such orphans accumulated behind the 24/07/2026 laptop-sleep incident and wedged
+# the daemon. bin/fm-nm-abort.sh is the single owner of the fix, shared with the
+# fleet pause (tests/fm-fleet-pause.test.sh).
+
+landed_case_with_run() {  # <name> <run-mode>
+  local case_dir pr_head
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_fake_no_mistakes_run "$case_dir" "$2"
+  printf '%s\n' "$case_dir"
+}
+
+test_teardown_stops_an_active_run_before_removing_the_worktree() {
+  local case_dir rc
+  case_dir=$(landed_case_with_run nm-abort active)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-abort: teardown of landed work should succeed"
+  assert_present "$case_dir/nm-aborts" "nm-abort: the still-monitoring run was never stopped"
+  grep -q "aborted run R1" "$case_dir/stdout" || fail "nm-abort: teardown did not report the stopped run"
+  pass "teardown stops a still-monitoring validation run instead of orphaning it"
+}
+
+test_teardown_leaves_an_unattributed_run_alone() {
+  local case_dir rc
+  case_dir=$(landed_case_with_run nm-abort-other none)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-abort-other: teardown of landed work should succeed"
+  assert_absent "$case_dir/nm-aborts" "nm-abort-other: another branch's run must never be aborted"
+  pass "teardown aborts only a run attributed to this task's own branch"
+}
+
+test_teardown_refuses_when_the_run_will_not_stop() {
+  local case_dir rc
+  case_dir=$(landed_case_with_run nm-abort-stuck unstoppable)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-abort-stuck: teardown must refuse while a run cannot be stopped"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-abort-stuck: no REFUSED line in stderr"
+  grep -q "validation run that could not be stopped" "$case_dir/stderr" \
+    || fail "nm-abort-stuck: the refusal did not name the run"
+  [ -d "$case_dir/wt" ] || fail "nm-abort-stuck: the worktree must survive a refusal"
+  pass "teardown refuses rather than orphaning a run it could not stop"
+}
+
+test_teardown_force_proceeds_past_an_unstoppable_run_with_a_warning() {
+  local case_dir rc
+  case_dir=$(landed_case_with_run nm-abort-force unstoppable)
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-abort-force: --force should proceed"
+  grep -q "could not be stopped" "$case_dir/stderr" \
+    || fail "nm-abort-force: --force proceeded without warning about the run"
+  pass "--force proceeds past an unstoppable run, but says so loudly"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -1780,6 +1892,10 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_teardown_stops_an_active_run_before_removing_the_worktree
+test_teardown_leaves_an_unattributed_run_alone
+test_teardown_refuses_when_the_run_will_not_stop
+test_teardown_force_proceeds_past_an_unstoppable_run_with_a_warning
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
