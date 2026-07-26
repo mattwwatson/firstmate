@@ -10,8 +10,10 @@
 #
 # Exit 0 when the pause is lifted and every stopped worker was released, 3 when a
 # readiness check failed (nothing was released and the pause record is intact),
-# 4 when a stopped worker could not be released, 1 on an operational error, 2 on
-# a usage error.
+# 4 when a stopped worker could not be released, 5 when the pause never finished
+# quiescing so there is nothing to release yet (see the ask-to-answer window
+# below), 1 on an operational error, 2 on a usage error. Only exit 0 ever means
+# the fleet is back.
 #
 # WHO GETS RELEASED, from ONE source of truth. A task is released when its own
 # CURRENT status stream says it is stopped for this pause instance - either the
@@ -232,6 +234,10 @@ fm_quiesce_copy_task_rows "$STATE" "$ROWS" \
   || { echo "error: cannot read the pause record" >&2; exit 1; }
 
 REASON=$(fm_quiesce_field "$STATE" reason)
+# Read the phase BEFORE the release rewrites it. `quiescing` here means the
+# pause never finished, which is what the completion guard below needs to know;
+# once this write lands the phase says `releasing` and that evidence is gone.
+PHASE_AT_ENTRY=$(fm_quiesce_phase "$STATE")
 fm_quiesce_write "$STATE" releasing "$REASON" "$ROWS" \
   || { echo "error: cannot record the release" >&2; exit 1; }
 
@@ -239,6 +245,7 @@ fm_quiesce_write "$STATE" releasing "$REASON" "$ROWS" \
 # were not put back to work. Only those keep the record alive, because only for
 # those is there anything left to release.
 UNRELEASED=0
+STOPPED_SEEN=0
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   meta="$STATE/$id.meta"
@@ -247,6 +254,7 @@ while IFS= read -r id; do
     printf '  %s: not stopped for this pause; nothing to release\n' "$id"
     continue
   fi
+  STOPPED_SEEN=$((STOPPED_SEEN + 1))
   presence=$(fm_quiesce_worker_confident_presence "$STATE" "$meta" "$id")
   if [ "$presence" = gone ]; then
     printf '  %s: worker is gone; nothing left to release\n' "$id"
@@ -279,6 +287,33 @@ EOF
 # back in the honest `quiescing` phase: clearing it would delete the one thing
 # that says a stopped worker is still out there waiting, and leave it with
 # nothing left to wake it.
+# The ask-to-answer window. bin/fm-fleet-pause.sh writes the record and steers
+# every live worker BEFORE any of them has answered, so for up to
+# FM_FLEET_PAUSE_TIMEOUT the fleet can be full of workers under a stop order
+# with not one token in the status stream yet. A resume run inside that window
+# finds nobody stopped, and without this guard it would clear the record and
+# report success while every worker sat waiting for an instruction already
+# spent. A firstmate restart mid-pause is exactly when that happens, which is
+# the case the durable record exists for.
+# The record itself already knows: `quiescing` means at least one worker has not
+# confirmed. So a run that found NOBODY stopped at all, while the phase still
+# says the pause never finished, must refuse rather than claim the fleet is back.
+# Reading the phase is a sanity gate on whether this resume may claim completion;
+# it is never consulted to decide WHICH worker to release, so the status stream
+# remains the single source of truth for that.
+# The discriminator is "found nobody stopped", not "released nobody": a worker
+# that IS stopped but confidently gone needs no steer and legitimately completes
+# the lift, and gating on the release count would refuse that too.
+# Known narrow cost: if every stopped worker retires its own token without ever
+# being released - each having gone back to work by itself - this refuses once
+# and points at the pause check. Refusing in an ambiguous state is the direction
+# this whole feature errs in, and the check settles it.
+if [ "$STOPPED_SEEN" -eq 0 ] && [ "$PHASE_AT_ENTRY" = quiescing ]; then
+  echo "NOT RESUMED: the pause never finished quiescing and no worker is recorded as stopped yet, so there is nothing to release and the fleet may still be under a stop order." >&2
+  echo "Run the fleet pause check first to settle who actually stopped, then resume." >&2
+  exit 5
+fi
+
 if [ "$UNRELEASED" -eq 0 ]; then
   fm_quiesce_clear "$STATE"
   echo "fleet resumed: the pause is lifted and every stopped worker was released"

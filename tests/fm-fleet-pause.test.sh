@@ -339,6 +339,37 @@ test_pause_verifies_and_reaps_a_dead_workers_run() {
   pass "a task whose worker is gone is verified, and its orphaned run reaped"
 }
 
+test_pause_reaps_a_stopped_short_workers_orphaned_run() {
+  local dir out rc epoch
+  dir=$(make_case stopped-short-reap)
+  install_fake_no_mistakes "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
+  export FM_FAKE_NM_STATUS="$dir/nm-status"
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  epoch=$(pause_epoch "$dir")
+
+  # The worker obeyed the stop order but its abort failed against a wedged
+  # daemon, so it recorded the stopped marker and stopped. Tasks carrying this
+  # marker are the ones MOST likely to still be holding a monitoring run - the
+  # first path that writes it is exactly an abort that would not stop.
+  printf 'paused: fleet pause - could not quiesce: could not stop the validation run [fleet-stopped=%s]\n' \
+    "$epoch" >> "$dir/state/task-a.status"
+
+  # Its endpoint then dies for good. The run is now an orphan monitoring a
+  # worktree nobody owns, which is the whole reason this feature exists, so
+  # firstmate must still reap it rather than stopping at "it told us it stopped".
+  touch "$dir/dead" "$dir/agent-dead"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead" FM_FAKE_AGENT_DEAD="$dir/agent-dead"
+  out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
+  rc=$?
+  unset FM_FAKE_NM_STATUS FM_FAKE_ENDPOINT_DEAD FM_FAKE_AGENT_DEAD
+  expect_code 0 "$rc" "a gone stopped-short worker whose run reaps and worktree is clean is quiet"
+  assert_contains "$out" "aborted run R1" \
+    "the stopped-short worker's orphaned run must still be reaped once it is gone"
+  pass "a worker that stopped short does not shield its orphaned run from the reap"
+}
+
 test_pause_never_reaps_on_an_unreadable_endpoint() {
   local dir out rc
   dir=$(make_case unreadable-endpoint)
@@ -782,6 +813,41 @@ test_pause_check_between_resumes_does_not_resteer() {
 
 # --- the crewmate side ------------------------------------------------------
 
+test_resume_refuses_before_any_worker_has_answered() {
+  local dir out rc
+  dir=$(make_case ask-to-answer)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+
+  # The window between the pause steering a worker and that worker answering:
+  # the record is down, the worker is under a stop order, and NOTHING is in the
+  # status stream yet. A firstmate restart lands here, which is exactly the case
+  # the durable record exists for. Resuming here must not read an empty status
+  # stream as an empty fleet.
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  [ "$(record_phase "$dir")" = quiescing ] \
+    || fail "the fixture should leave the pause mid-quiesce"
+  : > "$dir/sent.log"
+
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 5 "$rc" "a resume inside the ask-to-answer window must refuse"
+  assert_not_contains "$out" "fleet resumed" "it must not claim the fleet is back"
+  assert_contains "$out" "never finished quiescing" "it must say why it refused"
+  assert_present "$dir/state/.fleet-paused" \
+    "the record must survive: it is the only thing that can wake the stopped workers"
+
+  # Once a worker actually answers, the same command completes normally.
+  confirm "$dir" task-a
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "a resume must complete once a worker has answered"
+  assert_contains "$out" "fleet resumed" "the completed lift must be reported"
+  assert_absent "$dir/state/.fleet-paused" "a completed resume clears the record"
+  pass "a resume before any worker has answered refuses instead of claiming success"
+}
+
 test_quiesce_refuses_outside_the_worktree() {
   local dir out rc
   dir=$(make_case boundary)
@@ -933,6 +999,7 @@ test_pause_confirms_only_with_verification
 test_pause_rejects_a_previous_pauses_confirmation
 test_pause_rejects_a_still_active_run
 test_pause_verifies_and_reaps_a_dead_workers_run
+test_pause_reaps_a_stopped_short_workers_orphaned_run
 test_pause_never_reaps_on_an_unreadable_endpoint
 test_pause_absence_run_resets_on_proof_of_life
 test_pause_requires_a_secondmates_own_fleet
@@ -949,6 +1016,7 @@ test_resume_reruns_never_accumulate_into_a_gone_verdict
 test_resume_releases_a_worker_whose_quiesce_refused
 test_resume_works_from_a_record_with_no_task_rows
 test_pause_check_between_resumes_does_not_resteer
+test_resume_refuses_before_any_worker_has_answered
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop

@@ -162,26 +162,37 @@ verify_task() {  # <id>
 
   if ! fm_quiesce_task_confirms "$STATE" "$id"; then
     # A worker that stopped for this pause but could not quiesce says so itself,
-    # and that reason is worth more to the captain than "did not confirm". It is
-    # still NOT CONFIRMED: only the quiesce token can make a fleet safe to close.
+    # and that reason is worth more to the captain than "did not confirm".
+    # It sets the DETAIL and then falls THROUGH to the presence logic below
+    # rather than returning: the stopped token is written on exactly the paths
+    # that leave something in flight - the first being a validation run that
+    # would not abort - so these are the tasks most likely to be holding a run.
+    # Returning here skipped the confidently-gone reap entirely and left that
+    # run monitoring a worktree nobody owns, which is the orphan this whole
+    # change exists to prevent.
+    stopped_short=0
     if fm_quiesce_task_stopped_short "$STATE" "$id"; then
+      stopped_short=1
       note=$(status_line_note "$(last_status_line "$STATE/$id.status")")
       DETAIL="stopped for this pause but ${note#fleet pause - }"
-      return 0
     fi
     if [ "$kind" = secondmate ]; then
-      DETAIL="secondmate has not confirmed its own fleet is quiesced"
+      [ "$stopped_short" = 1 ] || DETAIL="secondmate has not confirmed its own fleet is quiesced"
       return 0
     fi
     if [ "$presence" = live ]; then
-      DETAIL="worker has not confirmed quiesce"
+      [ "$stopped_short" = 1 ] || DETAIL="worker has not confirmed quiesce"
       return 0
     fi
     if [ "$presence" != gone ]; then
       # The endpoint did not answer, and nothing proves the worker is gone
       # rather than momentarily unreadable. Its run belongs to a worker that may
       # still be driving it, so it is left alone and the fleet stays unsafe.
-      DETAIL="worker's endpoint did not answer and its liveness could not be established; its validation run was left alone"
+      if [ "$stopped_short" = 1 ]; then
+        DETAIL="$DETAIL; its endpoint did not answer and its liveness could not be established, so its validation run was left alone"
+      else
+        DETAIL="worker's endpoint did not answer and its liveness could not be established; its validation run was left alone"
+      fi
       return 0
     fi
     # The worker is confidently gone. Verify the two things that could still be
@@ -197,6 +208,12 @@ verify_task() {  # <id>
       DETAIL="no live worker and $risk"
       return 0
     fi
+    # A confidently-gone worker confirms on firstmate's OWN proof - the run
+    # reaped and the worktree quiet - which references no token at all. That is
+    # why a stopped-short task can still reach `confirmed` here without breaking
+    # the rule that its token never confirms anything: the token is not what
+    # decided this, and the usual reason it was written (a dirty worktree) is
+    # caught by worktree_risk just above.
     VERDICT=confirmed
     DETAIL="no live worker; verified quiet ($out)"
     return 0
