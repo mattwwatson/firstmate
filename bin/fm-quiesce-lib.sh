@@ -31,7 +31,15 @@
 #   started  <epoch>              the pause instance identity, never rewritten
 #   phase    quiescing|paused|releasing
 #   reason   <free text>          why the captain paused; may be empty
-#   task     <id> <kind> <confirmed|unconfirmed> <detail>
+#   task     <id> <kind> <confirmed|unconfirmed|released> <detail>
+#
+# The task rows are a LEDGER, not decoration, and a writer that is only changing
+# the phase carries them across rather than dropping them. `unconfirmed` records
+# that firstmate ASKED this task to quiesce and it had not confirmed yet, which
+# is a different thing from a task that was never part of the pause at all - a
+# worker ordered to stop is waiting for the resume whether its quiesce succeeded
+# or not. `released` records that the resume has already steered it, so a re-run
+# cannot steer it twice.
 #
 # `phase` is the honest state of the pause, not a claim about safety:
 #   quiescing  a pause is under way or incomplete - at least one worker has not
@@ -113,6 +121,27 @@ fm_quiesce_task_rows() {  # <state-dir>
   awk -F '\t' '$1 == "task" { print $2 "\t" $3 "\t" $4 "\t" $5 }' "$record" 2>/dev/null || true
 }
 
+# Print <task>'s whole row exactly as the record holds it, or nothing when the
+# record does not list that task at all. Nothing is the meaningful answer: a task
+# with no row was never part of this pause, so nobody ever asked it to stop.
+fm_quiesce_task_row() {  # <state-dir> <task>
+  local record
+  record=$(fm_quiesce_record "$1")
+  [ -f "$record" ] || return 0
+  awk -F '\t' -v id="$2" '$1 == "task" && $2 == id { print; exit }' "$record" 2>/dev/null || true
+}
+
+# Copy the record's task rows verbatim into <file>, ready to hand back to
+# fm_quiesce_write. A caller that is only advancing the phase uses this so the
+# ledger survives the rewrite instead of being silently dropped.
+fm_quiesce_copy_task_rows() {  # <state-dir> <file>
+  local record
+  record=$(fm_quiesce_record "$1")
+  : > "$2" || return 1
+  [ -f "$record" ] || return 0
+  awk -F '\t' '$1 == "task"' "$record" >> "$2" 2>/dev/null || true
+}
+
 # 0 when <task>'s own status stream currently confirms THIS pause instance.
 # Both halves must hold: a live pause record, and a current declared quiesce
 # naming that record's epoch. A confirmation left over from an earlier pause
@@ -191,27 +220,26 @@ fm_quiesce_probe_bump() {  # <state-dir> <task>
 # a read failure, not a death, and the passes are a poll interval apart.
 FM_QUIESCE_GONE_PROBES=2
 
-# One presence reading for <task>, as the word its callers act on:
-#   live      the recorded endpoint answered.
-#   gone      the worker is CONFIDENTLY gone - either the backend's own agent
-#             probe reads `dead`, or the endpoint has been absent for
-#             FM_QUIESCE_GONE_PROBES consecutive passes.
-#   unproven  the endpoint did not answer, but nothing here proves the worker is
-#             gone rather than momentarily unreadable.
-# The distinction exists because acting on absence means reaching into a run
+# One presence reading for <task>, from EVIDENCE ALONE and with no memory of
+# earlier readings:
+#   live      the recorded endpoint answered, or the backend's agent probe reads
+#             `alive`.
+#   gone      the backend's own agent probe reads `dead`. This is the single
+#             CONFIDENT signal, and the only one a caller that does not run
+#             repeated verify passes of its own may ever act on.
+#   unproven  anything else - the endpoint did not answer, but nothing here
+#             proves the worker is gone rather than momentarily unreadable.
+# The distinction exists because acting on absence means reaching into work
 # firstmate may not own. bin/fm-backend.sh's fm_backend_agent_alive states the
 # house rule this implements: an unknown or unreadable reading must NEVER on its
 # own license an action, precisely so a momentary read glitch cannot be mistaken
 # for a death. `unproven` is therefore not a quiet pass - it holds the fleet
 # unsafe until the reading resolves one way or the other.
 #
-# CONSECUTIVE means consecutive. Every reading maintains the absence run: a live
-# or alive reading clears it, an unproven one extends it. That only holds if the
-# run is also cleared wherever else a caller sees the worker present, which is
-# what fm_quiesce_worker_reachable below exists for - a stale count left standing
-# through passes that never observed an absence would let ONE later glitch reach
-# the threshold, which is exactly the reap this rule forbids.
-fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
+# A live reading clears the absence run below, because it is proof of life
+# wherever it is seen. It never EXTENDS that run: only a repeated verify pass may
+# do that, through fm_quiesce_worker_presence.
+fm_quiesce_worker_confident_presence() {  # <state-dir> <meta> <id>
   local state=$1 meta=$2 id=$3 window target backend reading
   if fm_quiesce_endpoint_is_live "$meta" "$id"; then
     fm_quiesce_probe_reset "$state" "$id"
@@ -226,6 +254,27 @@ fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
     dead) printf 'gone'; return 0 ;;
     alive) fm_quiesce_probe_reset "$state" "$id"; printf 'live'; return 0 ;;
   esac
+  printf 'unproven'
+}
+
+# The same three words, but for a caller that IS running repeated verify passes a
+# poll interval apart, and may therefore also treat FM_QUIESCE_GONE_PROBES
+# consecutive absences as `gone`. Only bin/fm-fleet-pause.sh's verify loop
+# qualifies today.
+#
+# CONSECUTIVE means consecutive, and that only holds if EVERY observation of the
+# worker maintains the run - a live reading anywhere clears it, and no reading
+# that is not a verify pass may extend it. A stale count left standing through
+# passes that never saw an absence would let ONE later glitch reach the
+# threshold, which is exactly the action this rule forbids. That is why the two
+# readings above and below exist beside this one rather than everyone calling it.
+fm_quiesce_worker_presence() {  # <state-dir> <meta> <id>
+  local state=$1 meta=$2 id=$3 verdict
+  verdict=$(fm_quiesce_worker_confident_presence "$state" "$meta" "$id")
+  if [ "$verdict" != unproven ]; then
+    printf '%s' "$verdict"
+    return 0
+  fi
   if [ "$(fm_quiesce_probe_bump "$state" "$id")" -ge "$FM_QUIESCE_GONE_PROBES" ]; then
     printf 'gone'
   else

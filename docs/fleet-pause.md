@@ -59,12 +59,20 @@ This is the same rule `bin/fm-backend.sh`'s `fm_backend_agent_alive` already rec
 The mirror of a false safe-to-close is a false "everything is back".
 If a worker that quiesced for this pause cannot be reached when `/resume` runs, it is still sitting on its `paused:` line, and the record is the only thing that says so - clearing it would strand that worker with nothing left to wake it.
 So the resume reports exit 4, names the worker, and leaves the record in place for a second attempt.
-The one exception is a worker whose window is confidently gone by the same reading the pause uses: there is nothing left to release, and holding the record for it would leave the home under an open pause that no re-run could ever close.
+The one exception is a worker whose backend confidently reports no agent: there is nothing left to release, and holding the record for it would leave the home under an open pause that no re-run could ever close.
 
-**The resume releases only workers that are still paused, and is therefore idempotent.**
-The confirmation token is what says a worker is stopped and waiting to be told to carry on, and any later status event retires it - including the `working:` line a released worker reports.
-So a second `/resume` after a partial one cannot type a second instruction into a worker that is already back at work and mid-turn, and a worker that never paused is never steered at all.
-Both cases are named in the output rather than skipped silently, so "nothing happened for this task" is always visible and explained.
+**The resume is stricter about "gone" than the pause, because it is the command that asks to be re-run.**
+The pause may treat two consecutive absences a poll interval apart as a gone worker, because it takes those readings itself inside one verify loop.
+The resume runs once on demand, and its own exit 4 tells the captain to run it again - so if it counted absences the same way, an endpoint that was merely unreadable would supply its own second absence across two runs and manufacture the verdict that clears the record out from under a live worker.
+That is worse than the strand it was meant to prevent, because it reports success.
+So the resume acts only on the confident reading, and anything less keeps the worker counted and the record kept.
+
+**The pause record's task rows are a ledger, and the resume reads them.**
+Who firstmate stopped is not answerable from the confirmation token alone.
+A worker whose quiesce refused - a worktree mid-rebase, a run that would not abort, a commit that failed - appends no token at all, but it was told to stop and is waiting for the resume just the same, so the record listing it as `unconfirmed` is what earns it its instruction.
+A released worker's row is rewritten to `released`, which is what makes a re-run idempotent even before that worker has answered: the token would still be sitting there, but the ledger already says it was steered.
+A task with no row was never part of this pause at all.
+Each of those, and a task that has gone back to work on its own, is named in the output rather than skipped silently, so "nothing happened for this task" is always visible and explained.
 
 **Out of scope, deliberately.**
 Automatic lid-close detection (a system sleep/wake hook such as `sleepwatcher`) as an involuntary-drop safety net is not built here.

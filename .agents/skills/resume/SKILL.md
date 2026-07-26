@@ -21,14 +21,14 @@ Read its `--help` before first use; it is the authority on what each check prove
 - `bin/fm-fleet-resume.sh` - check readiness, then lift the pause and release every worker.
 - `bin/fm-fleet-resume.sh check` - run the readiness checks only and report. Changes nothing, so it is the right answer to "is the network back yet?".
 
-Exit 0 means the pause is lifted and every paused worker was released.
+Exit 0 means the pause is lifted and every stopped worker was released.
 Exit 3 means a check failed: **nothing was released and the fleet is still paused.**
-Exit 4 means a worker that is still paused could not be released, so the fleet is not fully back and the pause record is deliberately kept: deal with that worker, then run `/resume` again to finish the lift.
-Re-running it is safe, because it only steers workers that are still paused for this pause instance.
+Exit 4 means a worker this pause stopped could not be released, so the fleet is not fully back and the pause record is deliberately kept: deal with that worker, then run `/resume` again to finish the lift.
+Re-running it is safe: a worker it has already steered is recorded as released and is never steered a second time, and a window it merely could not read never accumulates into a verdict that the worker is gone.
 
-Two things it deliberately does not do, both reported by name in its output rather than skipped silently.
-It does not steer a worker that never paused, because that worker has nothing to resume from.
-It does not hold the pause open for a worker whose window is confidently gone, because no re-run could ever release it and the home would stay under an open pause forever.
+Every worker the pause stopped is released, including one whose quiesce refused and left it stopped without confirming, because it was told to stop and wait for this instruction all the same.
+Three things it deliberately does not steer, each named in its output rather than skipped silently: a task that was never part of this pause, one that has since gone back to work on its own, and one this resume already released.
+It also does not hold the pause open for a worker whose window is confidently gone, because no re-run could ever release it and the home would stay under an open pause forever.
 
 ## The one rule that matters
 

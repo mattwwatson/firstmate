@@ -559,11 +559,12 @@ test_resume_keeps_the_record_for_a_worker_it_could_not_release() {
   install_fake_no_mistakes "$dir/fakebin"
   install_fake_gh "$dir/fakebin"
   write_task_meta "$dir" task-a
-  write_task_meta "$dir" task-b
   run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
-  # task-a quiesced for this pause and is sitting on its `paused:` line; task-b
-  # never did, so it has nothing to be released from.
+  # task-a quiesced for this pause and is sitting on its `paused:` line. task-b
+  # arrived after the pause was taken, so the record never listed it and nobody
+  # ever told it to stop.
   confirm "$dir" task-a
+  write_task_meta "$dir" task-b
   : > "$dir/sent.log"
 
   touch "$dir/dead"
@@ -574,9 +575,9 @@ test_resume_keeps_the_record_for_a_worker_it_could_not_release() {
   expect_code 4 "$rc" "a worker that could not be released must not read as a clean resume"
   assert_not_contains "$out" "every worker was released" \
     "no claim that every worker was released may appear while one is stranded"
-  assert_contains "$out" "task-a: STILL PAUSED" "the stranded worker must be named"
-  assert_contains "$out" "task-b: not paused for this pause" \
-    "a task that never quiesced must not be counted as stranded"
+  assert_contains "$out" "task-a: STILL WAITING" "the stranded worker must be named"
+  assert_contains "$out" "task-b: never part of this pause" \
+    "a task the pause never stopped must not be counted as stranded"
   assert_present "$dir/state/.fleet-paused" \
     "the record that would later resume the stranded worker must survive"
   pass "a resume that could not release a paused worker says so and keeps the record"
@@ -638,14 +639,73 @@ test_resume_rerun_does_not_resteer_a_released_worker() {
   rc=$?
   unset FM_FAKE_DEAD_DIR
   expect_code 0 "$rc" "the re-run must finish the lift once the last worker is reachable"
-  assert_contains "$out" "task-b: released" "the worker still paused must be released"
-  assert_contains "$out" "task-a: not paused for this pause" \
-    "a worker already back at work must be named, not silently skipped"
+  assert_contains "$out" "task-b: released" "the worker still waiting must be released"
+  assert_contains "$out" "task-a: already released by this resume" \
+    "a worker already steered must be named, not silently skipped"
   steers=$(grep -c "^task-a	FLEET RESUME" "$dir/sent.log" || true)
   [ "$steers" = 1 ] \
     || fail "a released worker must be steered exactly once, got $steers"
   assert_absent "$dir/state/.fleet-paused" "the completed re-run must clear the record"
   pass "a resume re-run releases only workers still paused, so it cannot double-steer"
+}
+
+test_resume_reruns_never_accumulate_into_a_gone_verdict() {
+  local dir out rc
+  dir=$(make_case resume-unreadable)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  : > "$dir/sent.log"
+
+  # Merely unreadable, never confidently dead. The exit-4 path asks the captain
+  # to run the command again, so a resume that counted absences the way the
+  # pause does would supply its own second one and declare a live worker gone.
+  touch "$dir/dead"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 4 "$rc" "an unreadable endpoint must leave the resume incomplete"
+  assert_present "$dir/state/.fleet-paused" "the first run must keep the pause record"
+
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_ENDPOINT_DEAD
+  expect_code 4 "$rc" "a second unreadable reading is still not proof the worker is gone"
+  assert_contains "$out" "task-a: STILL WAITING" "the worker must stay named as waiting"
+  assert_not_contains "$out" "worker is gone" \
+    "two unreadable readings must never manufacture a gone verdict"
+  assert_not_contains "$out" "was released" \
+    "no claim of a completed resume may appear while the worker is still waiting"
+  assert_present "$dir/state/.fleet-paused" \
+    "the record that would later wake the worker must survive the re-run"
+  pass "re-running the resume cannot stack unreadable probes into a gone worker"
+}
+
+test_resume_releases_a_worker_whose_quiesce_refused() {
+  local dir out rc
+  dir=$(make_case resume-unconfirmed)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+
+  # firstmate asked it to stop and it never confirmed, which is what happens
+  # when fm-quiesce.sh refuses: a worktree mid-rebase, a run that would not
+  # abort, a commit that failed. The worker stopped all the same and is waiting
+  # for the very instruction this command exists to give.
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  assert_grep "	unconfirmed	" "$dir/state/.fleet-paused" \
+    "the record must list the asked-but-unconfirmed worker"
+  : > "$dir/sent.log"
+
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "a reachable worker the pause stopped must be released"
+  assert_contains "$out" "task-a: released" "the worker must be reported released"
+  assert_grep "FLEET RESUME" "$dir/sent.log" \
+    "a worker firstmate stopped must be told to carry on, token or no token"
+  pass "a worker whose quiesce refused is still released, because it was told to stop"
 }
 
 # --- the crewmate side ------------------------------------------------------
@@ -800,6 +860,8 @@ test_resume_lifts_the_pause_when_everything_answers
 test_resume_keeps_the_record_for_a_worker_it_could_not_release
 test_resume_completes_when_a_paused_workers_window_is_gone
 test_resume_rerun_does_not_resteer_a_released_worker
+test_resume_reruns_never_accumulate_into_a_gone_verdict
+test_resume_releases_a_worker_whose_quiesce_refused
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop
