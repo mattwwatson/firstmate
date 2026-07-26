@@ -39,6 +39,7 @@ Typical holds and what they mean to the captain:
 - uncommitted work - a worker still has changes that are not saved to its branch.
 - a second mate whose own fleet is not quiesced - its crew is still running.
 - a worker whose liveness could not be established - its window did not answer and nothing proves it is gone, so its validation run was deliberately left alone rather than cancelled on a bad read.
+- a worker that stopped but could not quiesce - it obeyed the order and is waiting, and it reports its own reason, most often a worktree mid-rebase or a validation run that would not stop. It still needs dealing with before the fleet is safe, and `/resume` will still release it when the time comes.
 
 For anything still holding, either give it more time and run `check` again, or deal with the specific worker through the normal recovery path, then run `check`.
 Only report safe to close when `check` finally exits 0.

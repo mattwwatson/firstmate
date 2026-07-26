@@ -366,6 +366,41 @@ status_quiesce_epoch() {  # <status-file>
   printf '%s' "${value%\]}"
 }
 
+# The pause's SECOND token, and deliberately not a second pause vocabulary: same
+# declared-pause verb, same position in the note, one different name.
+#   paused: fleet pause - could not quiesce: <reason> [fleet-stopped=1753400000]
+# It says the worker obeyed the order to stop and is waiting, but could not
+# finish quiescing - a worktree mid-rebase, a run that would not abort, a commit
+# that failed (bin/fm-quiesce.sh writes it on every path that refuses).
+#
+# The two tokens are never interchangeable. [fleet-quiesced=...] confirms the
+# pause and is the only thing that can let a fleet be reported safe to close;
+# this one NEVER confirms anything, and a task carrying it stays NOT CONFIRMED
+# with its reason named. What they share is that both mean "stopped for THIS
+# pause instance", which is what makes the worker owed a resume. Supervision
+# suppression stays keyed on the confirmation alone: a worker that could not
+# quiesce needs firstmate's attention, so it must keep surfacing.
+FM_CLASSIFY_STOPPED_TOKEN_RE='\[fleet-stopped=[0-9][0-9]*\]'
+
+# Print the pause epoch a status FILE currently declares it stopped-but-not-
+# quiesced for, or nothing; always exits 0. Same rules as status_quiesce_epoch
+# above and for the same reasons: the last non-blank line only, the pause verb
+# required, and nothing at all when that line is ambiguous.
+status_fleet_stopped_epoch() {  # <status-file>
+  local f=$1 line note count value
+  [ -f "$f" ] || return 0
+  line=$(last_status_line "$f")
+  [ -n "$line" ] || return 0
+  status_is_paused "$line" || return 0
+  case "$line" in *:*) ;; *) return 0 ;; esac
+  note=$(status_line_note "$line")
+  count=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_STOPPED_TOKEN_RE" | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || return 0
+  value=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_STOPPED_TOKEN_RE")
+  value=${value#\[fleet-stopped=}
+  printf '%s' "${value%\]}"
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {

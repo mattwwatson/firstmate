@@ -61,18 +61,30 @@ If a worker that quiesced for this pause cannot be reached when `/resume` runs, 
 So the resume reports exit 4, names the worker, and leaves the record in place for a second attempt.
 The one exception is a worker whose backend confidently reports no agent: there is nothing left to release, and holding the record for it would leave the home under an open pause that no re-run could ever close.
 
+**The release decides from one source of truth: the worker's own status stream.**
+This was arrived at the hard way, and the history is the point.
+Four separate fixes each closed one route to the same failure and opened the next, every one of them a `/resume` that reported success, cleared the durable record, and left a stopped worker with nothing to wake it.
+The cause was structural rather than local: the release was reconciling three things that could each be missing or stale - a ledger row in the pause record, the live confirmation token, and a tri-state presence probe - across two commands that both rewrite that record.
+One source cannot disagree with itself, so the record's task rows were demoted back to what they always should have been, a report for the captain, and the release now asks one question of one place.
+
+**Which made the worker's silence on a failed quiesce the real bug.**
+`bin/fm-quiesce.sh` has several paths that refuse and stop - a worktree mid-rebase, a run that would not abort, a commit that failed - and each of those workers has obeyed the order to stop and is waiting.
+They used to say nothing at all, which is why a ledger had to exist to remember them.
+Now each writes a second token, `[fleet-stopped=<epoch>]`, on the same `paused:` verb: stopped for this instance, but NOT quiesced.
+It can never confirm a pause, so the fleet still cannot be reported safe to close and the task is still named with its reason; and supervision suppression stays keyed on the confirmation alone, because a worker that could not quiesce is exactly one firstmate needs to hear about.
+What the two tokens share is the only thing the release needs: both mean this worker is stopped for this pause, and therefore owed a resume.
+
+**Idempotence then falls out of the design instead of being bookkept.**
+A released worker reports `working: resumed after fleet pause`, which retires its token, so a re-run simply does not see it as stopped.
+Nothing has to remember that it was steered, and nothing else rewriting the record can undo that memory.
+
 **The resume is stricter about "gone" than the pause, because it is the command that asks to be re-run.**
 The pause may treat two consecutive absences a poll interval apart as a gone worker, because it takes those readings itself inside one verify loop.
 The resume runs once on demand, and its own exit 4 tells the captain to run it again - so if it counted absences the same way, an endpoint that was merely unreadable would supply its own second absence across two runs and manufacture the verdict that clears the record out from under a live worker.
 That is worse than the strand it was meant to prevent, because it reports success.
 So the resume acts only on the confident reading, and anything less keeps the worker counted and the record kept.
 
-**The pause record's task rows are a ledger, and the resume reads them.**
-Who firstmate stopped is not answerable from the confirmation token alone.
-A worker whose quiesce refused - a worktree mid-rebase, a run that would not abort, a commit that failed - appends no token at all, but it was told to stop and is waiting for the resume just the same, so the record listing it as `unconfirmed` is what earns it its instruction.
-A released worker's row is rewritten to `released`, which is what makes a re-run idempotent even before that worker has answered: the token would still be sitting there, but the ledger already says it was steered.
-A task with no row was never part of this pause at all.
-Each of those, and a task that has gone back to work on its own, is named in the output rather than skipped silently, so "nothing happened for this task" is always visible and explained.
+A task that is not stopped for this pause is named in the output rather than skipped silently, so "nothing happened for this task" is always visible and explained.
 
 **Out of scope, deliberately.**
 Automatic lid-close detection (a system sleep/wake hook such as `sleepwatcher`) as an involuntary-drop safety net is not built here.

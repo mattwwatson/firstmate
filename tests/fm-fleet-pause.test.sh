@@ -576,7 +576,7 @@ test_resume_keeps_the_record_for_a_worker_it_could_not_release() {
   assert_not_contains "$out" "every worker was released" \
     "no claim that every worker was released may appear while one is stranded"
   assert_contains "$out" "task-a: STILL WAITING" "the stranded worker must be named"
-  assert_contains "$out" "task-b: never part of this pause" \
+  assert_contains "$out" "task-b: not stopped for this pause" \
     "a task the pause never stopped must not be counted as stranded"
   assert_present "$dir/state/.fleet-paused" \
     "the record that would later resume the stranded worker must survive"
@@ -640,8 +640,8 @@ test_resume_rerun_does_not_resteer_a_released_worker() {
   unset FM_FAKE_DEAD_DIR
   expect_code 0 "$rc" "the re-run must finish the lift once the last worker is reachable"
   assert_contains "$out" "task-b: released" "the worker still waiting must be released"
-  assert_contains "$out" "task-a: already released by this resume" \
-    "a worker already steered must be named, not silently skipped"
+  assert_contains "$out" "task-a: not stopped for this pause" \
+    "a worker already back at work must be named, not steered again"
   steers=$(grep -c "^task-a	FLEET RESUME" "$dir/sent.log" || true)
   [ "$steers" = 1 ] \
     || fail "a released worker must be steered exactly once, got $steers"
@@ -689,14 +689,20 @@ test_resume_releases_a_worker_whose_quiesce_refused() {
   install_fake_no_mistakes "$dir/fakebin"
   install_fake_gh "$dir/fakebin"
   write_task_meta "$dir" task-a
-
-  # firstmate asked it to stop and it never confirmed, which is what happens
-  # when fm-quiesce.sh refuses: a worktree mid-rebase, a run that would not
-  # abort, a commit that failed. The worker stopped all the same and is waiting
-  # for the very instruction this command exists to give.
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
   run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
-  assert_grep "	unconfirmed	" "$dir/state/.fleet-paused" \
-    "the record must list the asked-but-unconfirmed worker"
+
+  # A real refused quiesce, driven end to end: the run will not stop, so the
+  # worker confirms nothing but records that it stopped and is waiting. That
+  # marker is the whole reason it is owed the instruction this command gives.
+  touch "$dir/abort-fails"
+  ( cd "$dir/wt" && PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_FAKE_NM_STATUS="$dir/nm-status" FM_FAKE_NM_ABORT_FAILS="$dir/abort-fails" \
+    FM_NM_ABORT_TIMEOUT=5 "$QUIESCE" task-a >/dev/null 2>&1 )
+  rm -f "$dir/abort-fails"
+  [ -z "$(status_quiesce_epoch "$dir/state/task-a.status")" ] \
+    || fail "the refused quiesce must not have confirmed anything"
   : > "$dir/sent.log"
 
   out=$(run_fleet "$dir" "$RESUME" 2>&1)
@@ -704,8 +710,74 @@ test_resume_releases_a_worker_whose_quiesce_refused() {
   expect_code 0 "$rc" "a reachable worker the pause stopped must be released"
   assert_contains "$out" "task-a: released" "the worker must be reported released"
   assert_grep "FLEET RESUME" "$dir/sent.log" \
-    "a worker firstmate stopped must be told to carry on, token or no token"
+    "a worker that stopped without quiescing must still be told to carry on"
   pass "a worker whose quiesce refused is still released, because it was told to stop"
+}
+
+test_resume_works_from_a_record_with_no_task_rows() {
+  local dir out rc epoch
+  dir=$(make_case resume-rowless)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+
+  # Firstmate died between opening the pause and finishing its first verify
+  # pass, which is a window of up to FM_FLEET_PAUSE_TIMEOUT: the record is on
+  # disk with no task rows at all, and the worker is stopped and waiting.
+  epoch=$(date +%s)
+  printf 'schema\tfm-fleet-pause.v1\nstarted\t%s\nphase\tquiescing\nreason\tlid\n' \
+    "$epoch" > "$dir/state/.fleet-paused"
+  confirm "$dir" task-a "$epoch"
+  : > "$dir/sent.log"
+
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "a record with no rows yet must not read as an empty fleet"
+  assert_contains "$out" "task-a: released" "the stopped worker must still be released"
+  assert_not_contains "$out" "not stopped for this pause" \
+    "a worker carrying a valid confirmation must never be skipped"
+  assert_grep "FLEET RESUME" "$dir/sent.log" "the waiting worker must be told to carry on"
+  assert_absent "$dir/state/.fleet-paused" "a completed release still clears the record"
+  pass "a pause record with no rows yet still releases the workers it stopped"
+}
+
+test_pause_check_between_resumes_does_not_resteer() {
+  local dir out rc steers
+  dir=$(make_case rerun-after-check)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  confirm "$dir" task-b
+  : > "$dir/sent.log"
+
+  mkdir -p "$dir/deadtargets"
+  touch "$dir/deadtargets/firstmate:fm-task-b"
+  export FM_FAKE_DEAD_DIR="$dir/deadtargets"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 4 "$rc" "the unreachable worker must keep the resume incomplete"
+  assert_contains "$out" "task-a: released" "the reachable worker must be released"
+
+  # AGENTS.md sends firstmate to /pause check whenever a pause is recorded but
+  # incomplete, which is exactly this state. That check rewrites the record's
+  # rows, and no release decision may depend on what it writes there.
+  printf 'working: resumed after fleet pause\n' >> "$dir/state/task-a.status"
+  run_fleet "$dir" "$PAUSE" check >/dev/null 2>&1
+  rm -f "$dir/deadtargets/firstmate:fm-task-b"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_DEAD_DIR
+  expect_code 0 "$rc" "the re-run must finish the lift"
+  assert_contains "$out" "task-b: released" "the worker still waiting must be released"
+  assert_contains "$out" "task-a: not stopped for this pause" \
+    "a worker back at work must be named, not steered"
+  steers=$(grep -c "^task-a	FLEET RESUME" "$dir/sent.log" || true)
+  [ "$steers" = 1 ] \
+    || fail "a pause check between resumes must not cause a second steer, got $steers"
+  pass "a pause check between two resumes cannot resurrect a released worker"
 }
 
 # --- the crewmate side ------------------------------------------------------
@@ -754,12 +826,13 @@ test_quiesce_commits_stops_and_confirms() {
 }
 
 test_quiesce_confirms_nothing_when_the_run_will_not_stop() {
-  local dir rc
+  local dir rc out epoch
   dir=$(make_case quiesce-blocked)
   install_fake_no_mistakes "$dir/fakebin"
   write_task_meta "$dir" task-a
   printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
   run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  epoch=$(pause_epoch "$dir")
   touch "$dir/abort-fails"
 
   ( cd "$dir/wt" && PATH="$dir/fakebin:$PATH" \
@@ -768,9 +841,21 @@ test_quiesce_confirms_nothing_when_the_run_will_not_stop() {
     FM_NM_ABORT_TIMEOUT=5 "$QUIESCE" task-a >/dev/null 2>&1 )
   rc=$?
   expect_code 1 "$rc" "quiesce must fail when the run will not stop"
-  assert_absent "$dir/state/task-a.status" \
+  # It confirms nothing, but it does not go silent either: the worker obeyed the
+  # order to stop, and only a status line can say so.
+  assert_no_grep "[fleet-quiesced=" "$dir/state/task-a.status" \
     "a failed quiesce must append no confirmation at all"
-  pass "a worker that could not stop its run confirms nothing"
+  assert_grep "[fleet-stopped=$epoch]" "$dir/state/task-a.status" \
+    "a worker that stopped but could not quiesce must record that it stopped"
+  [ -z "$(status_quiesce_epoch "$dir/state/task-a.status")" ] \
+    || fail "the stopped marker must never read as a confirmation"
+
+  out=$(run_fleet "$dir" "$PAUSE" check 2>&1)
+  rc=$?
+  expect_code 3 "$rc" "a worker that could not quiesce must keep the fleet unsafe"
+  assert_contains "$out" "task-a: NOT CONFIRMED" "the task must still be named"
+  assert_contains "$out" "could not quiesce" "its own reason must be reported"
+  pass "a worker that could not stop its run confirms nothing, but says it stopped"
 }
 
 # --- the shared abort -------------------------------------------------------
@@ -862,6 +947,8 @@ test_resume_completes_when_a_paused_workers_window_is_gone
 test_resume_rerun_does_not_resteer_a_released_worker
 test_resume_reruns_never_accumulate_into_a_gone_verdict
 test_resume_releases_a_worker_whose_quiesce_refused
+test_resume_works_from_a_record_with_no_task_rows
+test_pause_check_between_resumes_does_not_resteer
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop

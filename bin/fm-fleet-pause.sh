@@ -34,7 +34,16 @@
 #     uncommitted work in the worktree.
 # Anything else - a worker that never answered, a steer that did not land, an
 # endpoint that died holding a run, a worktree still dirty - is reported by name
-# and keeps the fleet out of the `paused` phase.
+# and keeps the fleet out of the `paused` phase. A worker that stopped but could
+# not finish quiescing declares that itself, with its reason, through the second
+# `[fleet-stopped=<epoch>]` token (bin/fm-quiesce.sh writes it); that reason is
+# reported here in place of a bare "did not confirm", and it confirms nothing.
+#
+# The per-task rows written into the record are the captain's REPORT of that
+# verdict. Nothing reads them back to decide anything: bin/fm-fleet-resume.sh
+# works from the workers' own status streams, so a record whose rows are not
+# written yet - this command was interrupted between opening the pause and
+# finishing its first verify pass - cannot be mistaken for an empty fleet.
 #
 # WHAT A DEAD ENDPOINT MEANS. A task whose worker is already gone cannot be
 # asked anything, but it can still be holding a monitoring run - that is
@@ -133,7 +142,7 @@ VERDICT=
 DETAIL=
 
 verify_task() {  # <id>
-  local id=$1 meta kind wt home presence risk out rc child_state child_epoch
+  local id=$1 meta kind wt home presence risk out rc child_state child_epoch note
   VERDICT=unconfirmed
   DETAIL=
   meta="$STATE/$id.meta"
@@ -152,6 +161,14 @@ verify_task() {  # <id>
   presence=$(fm_quiesce_worker_presence "$STATE" "$meta" "$id")
 
   if ! fm_quiesce_task_confirms "$STATE" "$id"; then
+    # A worker that stopped for this pause but could not quiesce says so itself,
+    # and that reason is worth more to the captain than "did not confirm". It is
+    # still NOT CONFIRMED: only the quiesce token can make a fleet safe to close.
+    if fm_quiesce_task_stopped_short "$STATE" "$id"; then
+      note=$(status_line_note "$(last_status_line "$STATE/$id.status")")
+      DETAIL="stopped for this pause but ${note#fleet pause - }"
+      return 0
+    fi
     if [ "$kind" = secondmate ]; then
       DETAIL="secondmate has not confirmed its own fleet is quiesced"
       return 0

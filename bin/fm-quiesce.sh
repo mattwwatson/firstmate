@@ -28,10 +28,23 @@
 #      status_quiesce_epoch owns that token).
 #
 # The confirmation is appended ONLY after every step above actually succeeded
-# and was re-verified. Anything that cannot be finished - a worktree mid-rebase,
-# a run that will not abort, a commit that fails - exits non-zero with the
-# concrete reason and appends NOTHING, so a pause can never be completed by a
-# worker that merely tried.
+# and was re-verified, so a pause can never be completed by a worker that merely
+# tried.
+#
+# WHAT A REFUSAL SAYS. Something that cannot be finished - a worktree mid-rebase,
+# a run that will not abort, a commit that fails, a worktree still dirty
+# afterwards - still exits non-zero with the concrete reason, but it does NOT go
+# quiet: it first records the second token, `[fleet-stopped=<epoch>]`, saying the
+# worker obeyed the order to stop and is waiting even though it could not
+# quiesce. That is the whole difference between this worker and one that was
+# never asked, and bin/fm-fleet-resume.sh reads exactly that to decide who is
+# owed a resume. It never confirms anything: only the quiesce token can, so the
+# fleet stays unsafe to close and bin/fm-fleet-pause.sh names this task and its
+# reason (bin/fm-classify-lib.sh owns both tokens).
+#
+# A refusal BEFORE any of that - no pause open, no metadata, or the command run
+# outside the worktree - writes nothing at all. Those are not a stopped worker
+# reporting in, and the last of them is firstmate being told no.
 #
 # A kind=secondmate direct report does not use this script: it quiesces by
 # running bin/fm-fleet-pause.sh for its OWN home, because its work is a fleet,
@@ -56,6 +69,18 @@ usage() {
 die() {  # <reason>
   printf 'fm-quiesce: %s\n' "$1" >&2
   exit 1
+}
+
+# A refusal from a worker that has already STOPPED for this pause. It says so in
+# its own status stream before failing, then fails: the silence this replaces is
+# what left a stopped worker indistinguishable from one that was never asked.
+stop_short() {  # <reason>
+  local clean
+  clean=$(printf '%s' "$1" | fm_quiesce_clean_field)
+  printf 'paused: fleet pause - could not quiesce: %s [fleet-stopped=%s]\n' \
+    "$clean" "$EPOCH" >> "$STATE/$ID.status" 2>/dev/null \
+    || printf 'fm-quiesce: could not record the stop for %s\n' "$ID" >&2
+  die "$clean"
 }
 
 case "${1:-}" in
@@ -89,7 +114,7 @@ esac
 # --- 1. nothing mid-flight --------------------------------------------------
 
 ABORT_OUT=$("$SCRIPT_DIR/fm-nm-abort.sh" --worktree "$WT" --label "$ID") \
-  || die "could not stop the validation run for $ID: ${ABORT_OUT:-no output}"
+  || stop_short "could not stop the validation run for $ID: ${ABORT_OUT:-no output}"
 # The confirmation is one status line, so nothing quoted into it may carry a
 # newline or a tab.
 ABORT_OUT=$(printf '%s' "${ABORT_OUT:-no active run}" | fm_quiesce_clean_field)
@@ -104,16 +129,16 @@ BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 for op in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
   path=$(git -C "$WT" rev-parse --git-path "$op" 2>/dev/null) || continue
   case "$path" in /*) ;; *) path="$WT/$path" ;; esac
-  [ -e "$path" ] && die "worktree $WT is mid-$op; finish or abort that operation before pausing"
+  [ -e "$path" ] && stop_short "worktree $WT is mid-$op; finish or abort that operation before pausing"
 done
 
 COMMIT_NOTE="clean"
 SCRATCH_RETAINED=0
 if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
   if [ -n "$BRANCH" ]; then
-    git -C "$WT" add -A || die "git add failed in $WT"
+    git -C "$WT" add -A || stop_short "git add failed in $WT"
     git -C "$WT" commit -q -m "wip: fleet pause quiesce ($ID)" \
-      || die "could not commit work in progress in $WT"
+      || stop_short "could not commit work in progress in $WT"
     COMMIT_NOTE="work in progress committed to $BRANCH"
   elif [ "$KIND" = scout ]; then
     # A scout worktree is declared scratch and its deliverable is the report, so
@@ -122,7 +147,7 @@ if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
     SCRATCH_RETAINED=1
     COMMIT_NOTE="scratch worktree, uncommitted scratch retained"
   else
-    die "worktree $WT is dirty at a detached HEAD; there is no branch to commit the work to"
+    stop_short "worktree $WT is dirty at a detached HEAD; there is no branch to commit the work to"
   fi
 fi
 
@@ -130,7 +155,7 @@ fi
 
 if [ "$SCRATCH_RETAINED" -eq 0 ] \
    && [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
-  die "worktree $WT is still dirty after committing; not confirming a quiesce"
+  stop_short "worktree $WT is still dirty after committing; not confirming a quiesce"
 fi
 
 STATUS="$STATE/$ID.status"

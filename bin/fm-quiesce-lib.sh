@@ -31,15 +31,13 @@
 #   started  <epoch>              the pause instance identity, never rewritten
 #   phase    quiescing|paused|releasing
 #   reason   <free text>          why the captain paused; may be empty
-#   task     <id> <kind> <confirmed|unconfirmed|released> <detail>
+#   task     <id> <kind> <confirmed|unconfirmed> <detail>
 #
-# The task rows are a LEDGER, not decoration, and a writer that is only changing
-# the phase carries them across rather than dropping them. `unconfirmed` records
-# that firstmate ASKED this task to quiesce and it had not confirmed yet, which
-# is a different thing from a task that was never part of the pause at all - a
-# worker ordered to stop is waiting for the resume whether its quiesce succeeded
-# or not. `released` records that the resume has already steered it, so a re-run
-# cannot steer it twice.
+# The task rows are a REPORT for the captain - the last verify pass's verdict on
+# each task, with its reason - and nothing decides anything from them. A writer
+# that is only advancing the phase carries them across rather than dropping them,
+# so the report survives; but who is owed a resume comes from the workers' own
+# status streams, through fm_quiesce_task_stopped_for below.
 #
 # `phase` is the honest state of the pause, not a claim about safety:
 #   quiescing  a pause is under way or incomplete - at least one worker has not
@@ -121,25 +119,17 @@ fm_quiesce_task_rows() {  # <state-dir>
   awk -F '\t' '$1 == "task" { print $2 "\t" $3 "\t" $4 "\t" $5 }' "$record" 2>/dev/null || true
 }
 
-# Print <task>'s whole row exactly as the record holds it, or nothing when the
-# record does not list that task at all. Nothing is the meaningful answer: a task
-# with no row was never part of this pause, so nobody ever asked it to stop.
-fm_quiesce_task_row() {  # <state-dir> <task>
-  local record
-  record=$(fm_quiesce_record "$1")
-  [ -f "$record" ] || return 0
-  awk -F '\t' -v id="$2" '$1 == "task" && $2 == id { print; exit }' "$record" 2>/dev/null || true
-}
-
 # Copy the record's task rows verbatim into <file>, ready to hand back to
 # fm_quiesce_write. A caller that is only advancing the phase uses this so the
-# ledger survives the rewrite instead of being silently dropped.
+# captain's report survives the rewrite instead of being silently dropped.
+# Returns non-zero if the record exists but could not be read, so a caller that
+# is about to rewrite the record can stop instead of quietly emptying it.
 fm_quiesce_copy_task_rows() {  # <state-dir> <file>
   local record
   record=$(fm_quiesce_record "$1")
   : > "$2" || return 1
   [ -f "$record" ] || return 0
-  awk -F '\t' '$1 == "task"' "$record" >> "$2" 2>/dev/null || true
+  awk -F '\t' '$1 == "task"' "$record" >> "$2" 2>/dev/null
 }
 
 # 0 when <task>'s own status stream currently confirms THIS pause instance.
@@ -153,6 +143,38 @@ fm_quiesce_task_confirms() {  # <state-dir> <task>
   [ -n "$epoch" ] || return 1
   declared=$(status_quiesce_epoch "$state/$task.status")
   [ -n "$declared" ] && [ "$declared" = "$epoch" ]
+}
+
+# 0 when <task>'s own status stream currently declares it STOPPED for this pause
+# instance without having quiesced (bin/fm-quiesce.sh writes that token on every
+# path where it refuses). This never confirms anything - it is the opposite, a
+# worker that needs looking at - and bin/fm-fleet-pause.sh reports such a task by
+# name with its reason.
+fm_quiesce_task_stopped_short() {  # <state-dir> <task>
+  local state=$1 task=$2 epoch declared
+  [ -n "$task" ] || return 1
+  epoch=$(fm_quiesce_epoch "$state")
+  [ -n "$epoch" ] || return 1
+  declared=$(status_fleet_stopped_epoch "$state/$task.status")
+  [ -n "$declared" ] && [ "$declared" = "$epoch" ]
+}
+
+# 0 when <task> is stopped for THIS pause instance by either route: it quiesced
+# and confirmed, or it stopped and said it could not quiesce.
+#
+# THIS IS THE SINGLE SOURCE OF TRUTH FOR WHO IS OWED A RESUME, and it is
+# deliberately the worker's own live status stream and nothing else. The pause
+# record's task rows are a REPORT for the captain, never control state: four
+# rounds of fixes each closed one way for the release to reconcile a stale row
+# against a live token against a presence probe, and each opened the next, all
+# with the same failure - a resume reporting success while a stopped worker was
+# left with nothing to wake it. One source cannot disagree with itself.
+#
+# Idempotence falls out of it rather than being bookkept: a released worker
+# reports `working:`, which retires its token, so a re-run simply does not see it
+# as stopped. docs/fleet-pause.md records the reasoning.
+fm_quiesce_task_stopped_for() {  # <state-dir> <task>
+  fm_quiesce_task_confirms "$1" "$2" || fm_quiesce_task_stopped_short "$1" "$2"
 }
 
 # Every task this home records. Persistent secondmates are included: they are

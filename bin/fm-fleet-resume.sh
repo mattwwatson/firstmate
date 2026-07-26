@@ -13,19 +13,19 @@
 # 4 when a stopped worker could not be released, 1 on an operational error, 2 on
 # a usage error.
 #
-# WHO GETS RELEASED, and the LEDGER that decides it. The pause record's task rows
-# are carried through every rewrite here, because they are the durable answer to
-# "who did firstmate stop". A task is released when the record lists it AND it is
-# still waiting, which means either it currently carries a confirmation token for
-# this instance, or the record lists it as `unconfirmed`. That second case
-# matters: bin/fm-quiesce.sh refuses outright on a worktree mid-rebase, a run
-# that would not abort, or a commit that failed, appending no token at all, but
-# the worker was still told to stop and is still waiting for this instruction.
-# Three cases are therefore skipped, each named in the output rather than passed
-# over silently: a task the record never listed, one that has moved on under its
-# own steam, and one this resume already steered. That last is what makes a
-# re-run idempotent - a released task's row is rewritten to `released`, so it
-# cannot be steered twice even before the worker has answered.
+# WHO GETS RELEASED, from ONE source of truth. A task is released when its own
+# CURRENT status stream says it is stopped for this pause instance - either the
+# quiesce confirmation, or the `[fleet-stopped=<epoch>]` marker a worker leaves
+# when it obeyed the order to stop but could not finish quiescing. Nothing else
+# is consulted: bin/fm-quiesce-lib.sh's fm_quiesce_task_stopped_for is the whole
+# rule, and the pause record's task rows are a report for the captain rather than
+# control state here. A task that is not stopped for this pause is skipped and
+# named in the output, never passed over silently.
+#
+# That also makes a re-run idempotent without any bookkeeping: a released worker
+# reports `working: resumed after fleet pause`, which retires its token, so the
+# next run does not see it as stopped and cannot type a second instruction into a
+# turn already under way.
 #
 # EXIT 4 AND THE RECORD. A worker this pause stopped that could not be released
 # keeps the pause record KEPT (back in the `quiescing` phase) rather than
@@ -223,17 +223,16 @@ if ! run_readiness_checks; then
   exit 3
 fi
 
-# Only past this point does anything change. The ledger is carried across every
-# rewrite from here on: it is the record of who firstmate asked to stop, and
-# dropping it would lose the only durable answer to "who is still waiting".
-ROWS_IN=$(mktemp "$STATE/.fleet-paused.rows.XXXXXX") || exit 1
-ROWS_OUT=$(mktemp "$STATE/.fleet-paused.rows.XXXXXX") || { rm -f "$ROWS_IN"; exit 1; }
-trap 'rm -f "$FAILURES" "$ROWS_IN" "$ROWS_OUT"; fm_lock_release "$LOCK"' EXIT
-fm_quiesce_copy_task_rows "$STATE" "$ROWS_IN" \
-  || { echo "error: cannot read the pause ledger" >&2; exit 1; }
+# Only past this point does anything change. The record's task rows are the
+# captain's report and are carried across every rewrite here so they survive,
+# but nothing below decides anything from them.
+ROWS=$(mktemp "$STATE/.fleet-paused.rows.XXXXXX") || exit 1
+trap 'rm -f "$FAILURES" "$ROWS"; fm_lock_release "$LOCK"' EXIT
+fm_quiesce_copy_task_rows "$STATE" "$ROWS" \
+  || { echo "error: cannot read the pause record" >&2; exit 1; }
 
 REASON=$(fm_quiesce_field "$STATE" reason)
-fm_quiesce_write "$STATE" releasing "$REASON" "$ROWS_IN" \
+fm_quiesce_write "$STATE" releasing "$REASON" "$ROWS" \
   || { echo "error: cannot record the release" >&2; exit 1; }
 
 # UNRELEASED counts the workers this pause stopped that are still waiting and
@@ -244,24 +243,8 @@ while IFS= read -r id; do
   [ -n "$id" ] || continue
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || continue
-  row=$(fm_quiesce_task_row "$STATE" "$id")
-  if [ -z "$row" ]; then
-    printf '  %s: never part of this pause; nothing to release\n' "$id"
-    continue
-  fi
-  verdict=$(printf '%s' "$row" | cut -f4)
-  if [ "$verdict" = released ]; then
-    printf '  %s: already released by this resume; not steered again\n' "$id"
-    printf '%s\n' "$row" >> "$ROWS_OUT"
-    continue
-  fi
-  # A worker firstmate ORDERED to stop is waiting for this instruction whether
-  # its own quiesce succeeded or not: bin/fm-quiesce.sh has several paths that
-  # refuse and append no token at all (a worktree mid-rebase, a run that would
-  # not abort, a commit that failed), and that worker stopped all the same.
-  # Only a task that has since moved on under its own steam is left alone.
-  if ! fm_quiesce_task_confirms "$STATE" "$id" && [ "$verdict" != unconfirmed ]; then
-    printf '  %s: already back at work; nothing to release\n' "$id"
+  if ! fm_quiesce_task_stopped_for "$STATE" "$id"; then
+    printf '  %s: not stopped for this pause; nothing to release\n' "$id"
     continue
   fi
   presence=$(fm_quiesce_worker_confident_presence "$STATE" "$meta" "$id")
@@ -272,7 +255,6 @@ while IFS= read -r id; do
   if [ "$presence" != live ]; then
     printf '  %s: STILL WAITING - its endpoint did not answer and its liveness could not be established\n' "$id"
     UNRELEASED=$((UNRELEASED + 1))
-    printf '%s\n' "$row" >> "$ROWS_OUT"
     continue
   fi
   kind=$(fm_meta_get "$meta" kind)
@@ -284,11 +266,9 @@ while IFS= read -r id; do
   fi
   if FM_HOME="$FM_HOME" "$FM_SEND_BIN" "$id" "$text" >/dev/null 2>&1; then
     printf '  %s: released\n' "$id"
-    fm_quiesce_row "$ROWS_OUT" "$id" "$kind" released "resume instruction delivered"
   else
     printf '  %s: RESUME INSTRUCTION DID NOT LAND\n' "$id"
     UNRELEASED=$((UNRELEASED + 1))
-    printf '%s\n' "$row" >> "$ROWS_OUT"
   fi
 done <<EOF
 $(fm_quiesce_task_ids "$STATE")
@@ -304,7 +284,7 @@ if [ "$UNRELEASED" -eq 0 ]; then
   echo "fleet resumed: the pause is lifted and every stopped worker was released"
   exit 0
 fi
-fm_quiesce_write "$STATE" quiescing "$REASON" "$ROWS_OUT" \
+fm_quiesce_write "$STATE" quiescing "$REASON" "$ROWS" \
   || echo "error: cannot record the incomplete release" >&2
 printf 'NOT FULLY RESUMED: %s worker(s) are still waiting and were not released; the pause record is kept, so run this again once they are reachable\n' \
   "$UNRELEASED"
