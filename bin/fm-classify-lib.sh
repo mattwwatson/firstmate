@@ -329,6 +329,76 @@ status_observability() {  # <status-file>
   return 0
 }
 
+# --- the fleet-quiesce confirmation declaration -----------------------------
+#
+# A worker that has quiesced for a captain-invoked fleet pause says so in its own
+# status stream, reusing the declared-pause verb above rather than inventing a
+# second pause vocabulary, plus one token naming the pause instance it answers:
+#   paused: fleet pause - work committed, no run active [fleet-quiesced=1753400000]
+# The value is the pause record's `started` epoch (bin/fm-quiesce-lib.sh owns
+# that record), so a confirmation left behind by an EARLIER pause names a
+# different instance and can never be read as confirming the current one.
+# Like [observable=...] the token sits in the note, after the verb's colon, so
+# the verb parser and every existing pause consumer are untouched.
+FM_CLASSIFY_QUIESCE_TOKEN_RE='\[fleet-quiesced=[0-9][0-9]*\]'
+
+# The one reader behind both pause tokens below, private to this file. The two
+# tokens differ only in name, and their GRAMMAR must not be able to drift apart:
+# the release decision depends on one of them and the confirmation gate on the
+# other, so a rule tightened for one and not the other would silently change
+# which workers are owed a resume. The named wrappers stay the public vocabulary.
+_status_pause_token_epoch() {  # <status-file> <token-regex> <token-prefix>
+  local f=$1 re=$2 prefix=$3 line note count value
+  [ -f "$f" ] || return 0
+  line=$(last_status_line "$f")
+  [ -n "$line" ] || return 0
+  status_is_paused "$line" || return 0
+  case "$line" in *:*) ;; *) return 0 ;; esac
+  note=$(status_line_note "$line")
+  count=$(printf '%s' "$note" | grep -oE "$re" | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || return 0
+  value=$(printf '%s' "$note" | grep -oE "$re")
+  value=${value#"$prefix"}
+  printf '%s' "${value%\]}"
+}
+
+# Print the pause epoch a status FILE currently confirms, or nothing; always
+# exits 0.
+# Reads ONLY the last non-blank line, deliberately. The confirmation is a claim
+# about the crew's CURRENT state, so any later event - a done:, a blocked:, a
+# fresh working: - retires it at once, instead of leaving an older token line
+# standing as the newest one that happens to carry a token.
+# Refuses (prints nothing) when that line carries more than one token: a pause
+# whose confirmed instance is ambiguous is not a confirmation, and this decides
+# whether supervision stops watching a pane.
+status_quiesce_epoch() {  # <status-file>
+  _status_pause_token_epoch "$1" "$FM_CLASSIFY_QUIESCE_TOKEN_RE" '[fleet-quiesced='
+}
+
+# The pause's SECOND token, and deliberately not a second pause vocabulary: same
+# declared-pause verb, same position in the note, one different name.
+#   paused: fleet pause - could not quiesce: <reason> [fleet-stopped=1753400000]
+# It says the worker obeyed the order to stop and is waiting, but could not
+# finish quiescing - a worktree mid-rebase, a run that would not abort, a commit
+# that failed (bin/fm-quiesce.sh writes it on every path that refuses).
+#
+# The two tokens are never interchangeable. [fleet-quiesced=...] confirms the
+# pause and is the only thing that can let a fleet be reported safe to close;
+# this one NEVER confirms anything, and a task carrying it stays NOT CONFIRMED
+# with its reason named. What they share is that both mean "stopped for THIS
+# pause instance", which is what makes the worker owed a resume. Supervision
+# suppression stays keyed on the confirmation alone: a worker that could not
+# quiesce needs firstmate's attention, so it must keep surfacing.
+FM_CLASSIFY_STOPPED_TOKEN_RE='\[fleet-stopped=[0-9][0-9]*\]'
+
+# Print the pause epoch a status FILE currently declares it stopped-but-not-
+# quiesced for, or nothing; always exits 0. Same rules as status_quiesce_epoch
+# above and for the same reasons: the last non-blank line only, the pause verb
+# required, and nothing at all when that line is ambiguous.
+status_fleet_stopped_epoch() {  # <status-file>
+  _status_pause_token_epoch "$1" "$FM_CLASSIFY_STOPPED_TOKEN_RE" '[fleet-stopped='
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
@@ -423,12 +493,12 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
-# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
-# working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
-# same space-separated file list as signal_reason_is_actionable. Files are mapped to
-# task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
-# provably working must surface, so an empty/unresolvable list returns 1.
-signal_crew_provably_working() {  # <file> ...
+# The distinct task ids a "signal:" wake's file list refers to, one per line, in
+# first-seen order. Files are mapped by stripping the .status / .turn-ended
+# suffix; anything else in the list (a marker that carries no task) is skipped.
+# The single owner of that mapping, so every predicate over a signal's files
+# agrees on which crews the wake is about.
+signal_task_ids() {  # <file> ...
   local f base task seen=""
   for f in "$@"; do
     base=${f##*/}
@@ -440,10 +510,24 @@ signal_crew_provably_working() {  # <file> ...
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    printf '%s\n' "$task"
   done
-  [ -n "$seen" ] || return 1
-  return 0
+}
+
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
+# working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
+# same space-separated file list as signal_reason_is_actionable. A no-verb wake with
+# nothing provably working must surface, so an empty/unresolvable list returns 1.
+signal_crew_provably_working() {  # <file> ...
+  local task seen=0
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    seen=1
+    crew_is_provably_working "$task" || return 1
+  done <<EOF
+$(signal_task_ids "$@")
+EOF
+  [ "$seen" -eq 1 ]
 }
 
 # 0 (terminal/actionable) if a stale window's last status line is

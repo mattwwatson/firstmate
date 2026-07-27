@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
+# Tear down a finished task: stop any still-active no-mistakes run through
+# bin/fm-nm-abort.sh (see that script and the call site below for why a green PR
+# does not end a run, and why an unstoppable one refuses this teardown); return
+# the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
@@ -120,6 +123,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-quiesce-lib.sh
+. "$SCRIPT_DIR/fm-quiesce-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1185,7 +1190,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$(fm_quiesce_probe_file "$sub_state" "$child_id")"
   done
 }
 
@@ -1259,6 +1264,32 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+# Stop any still-active no-mistakes run BEFORE the worktree goes away. A run
+# whose PR is green does not end at green: it stays in its "monitoring until
+# merged or closed" phase holding the shared daemon, so a teardown that just
+# removed the worktree left the run monitoring something that no longer exists.
+# Seven such orphans accumulated behind one laptop-sleep incident on 24/07/2026.
+# bin/fm-nm-abort.sh is the single owner of the abort, shared with the fleet
+# pause. It runs only for ship tasks: scouts drive no validation of their own,
+# and a secondmate's worktree is a firstmate home, not a project checkout.
+# An active run that will NOT stop refuses the teardown, exactly as unlanded work
+# does - proceeding would create the orphan this exists to prevent. --force is
+# the explicit discard path and only warns.
+if [ "$KIND" = ship ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  if NM_ABORT_OUT=$("$SCRIPT_DIR/fm-nm-abort.sh" --worktree "$WT" --label "$ID" 2>&1); then
+    case "$NM_ABORT_OUT" in
+      aborted*) echo "teardown $ID: $NM_ABORT_OUT" ;;
+    esac
+  elif [ "$FORCE" = "--force" ]; then
+    echo "warning: $ID has a validation run that could not be stopped ($NM_ABORT_OUT); --force proceeds and it may keep monitoring" >&2
+  else
+    echo "REFUSED: $ID has a validation run that could not be stopped: $NM_ABORT_OUT" >&2
+    echo "Tearing the worktree down now would leave that run monitoring a worktree that no longer exists." >&2
+    echo "Resolve the run (or the daemon), then retry; --force proceeds only with explicit approval to abandon it." >&2
+    exit 1
   fi
 fi
 
@@ -1371,7 +1402,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$(fm_quiesce_probe_file "$STATE" "$ID")"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

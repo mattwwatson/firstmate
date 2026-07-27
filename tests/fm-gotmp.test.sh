@@ -65,6 +65,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-quiesce-lib.sh: teardown sources it for the quiesce probe-file path it
+  # clears alongside the rest of a task's volatile state. It in turn sources
+  # fm-classify-lib.sh from its own directory, so both must be siblings here.
+  ln -s "$ROOT/bin/fm-quiesce-lib.sh" "$fake/bin/fm-quiesce-lib.sh"
+  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -165,6 +170,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-quiesce-lib.sh (+ the fm-classify-lib.sh it sources): teardown sources it
+  # for the quiesce probe-file path.
+  ln -s "$ROOT/bin/fm-quiesce-lib.sh" "$fake/bin/fm-quiesce-lib.sh"
+  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

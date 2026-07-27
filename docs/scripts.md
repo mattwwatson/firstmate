@@ -68,6 +68,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
+| `fm-fleet-pause.sh`      | Captain-invoked fleet quiesce: ask every live worker to stop, then report safe-to-close only on verified confirmation |
+| `fm-fleet-resume.sh`     | Lift a fleet pause, but only after proving the forge and the shared validation daemon answer |
+| `fm-quiesce.sh`          | A crewmate's own side of a fleet pause: commit the work in progress, stop the validation run, confirm |
+| `fm-quiesce-lib.sh`      | Shared fleet-pause record, quiesce confirmation predicate, and bounded external-command runner |
+| `fm-nm-abort.sh`         | Cleanly stop a task's active no-mistakes run, shared by cleanup and the fleet pause  |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
@@ -96,7 +101,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full PR URL through its forge's path |
 | `fm-bb-pr-merge.sh`      | Merge a Bitbucket pull request with explicit protocol handling, reporting success only on a confirmed MERGED state |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-teardown.sh`         | Fail-closed teardown: stop a ship task's still-active validation run, return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
