@@ -504,6 +504,7 @@ FM_FLEET_PAUSE_TIMEOUT=300         # operator-facing: seconds /pause keeps re-ve
 FM_FLEET_PAUSE_POLL=5              # seconds between those verification passes; a blank, non-numeric, or zero value uses 5
 FM_FLEET_RESUME_CHECK_TIMEOUT=30   # seconds allowed per /resume readiness check (gh auth status, each Bitbucket credential check, no-mistakes daemon status); a timeout FAILS the check, because a sleep-wedged daemon stops answering rather than refusing
 FM_NM_ABORT_TIMEOUT=20             # seconds allowed per no-mistakes call inside bin/fm-nm-abort.sh; only silence past this bound is treated as unknown-and-unsafe, while a CLI that answers by declining is a legitimate no-run state
+FM_SEND_BIN=bin/fm-send.sh         # test override for the sender /pause and /resume use to steer and release workers
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort project refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count), counting clones and registered external paths
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_LANDED_PATCH_SCAN_LIMIT=1000          # most recent default-branch commits hashed by fm-teardown.sh's patch-id landed-work proof; 0 or a non-numeric value means unbounded, and truncation only makes teardown refuse
