@@ -342,6 +342,26 @@ status_observability() {  # <status-file>
 # the verb parser and every existing pause consumer are untouched.
 FM_CLASSIFY_QUIESCE_TOKEN_RE='\[fleet-quiesced=[0-9][0-9]*\]'
 
+# The one reader behind both pause tokens below, private to this file. The two
+# tokens differ only in name, and their GRAMMAR must not be able to drift apart:
+# the release decision depends on one of them and the confirmation gate on the
+# other, so a rule tightened for one and not the other would silently change
+# which workers are owed a resume. The named wrappers stay the public vocabulary.
+_status_pause_token_epoch() {  # <status-file> <token-regex> <token-prefix>
+  local f=$1 re=$2 prefix=$3 line note count value
+  [ -f "$f" ] || return 0
+  line=$(last_status_line "$f")
+  [ -n "$line" ] || return 0
+  status_is_paused "$line" || return 0
+  case "$line" in *:*) ;; *) return 0 ;; esac
+  note=$(status_line_note "$line")
+  count=$(printf '%s' "$note" | grep -oE "$re" | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || return 0
+  value=$(printf '%s' "$note" | grep -oE "$re")
+  value=${value#"$prefix"}
+  printf '%s' "${value%\]}"
+}
+
 # Print the pause epoch a status FILE currently confirms, or nothing; always
 # exits 0.
 # Reads ONLY the last non-blank line, deliberately. The confirmation is a claim
@@ -352,18 +372,7 @@ FM_CLASSIFY_QUIESCE_TOKEN_RE='\[fleet-quiesced=[0-9][0-9]*\]'
 # whose confirmed instance is ambiguous is not a confirmation, and this decides
 # whether supervision stops watching a pane.
 status_quiesce_epoch() {  # <status-file>
-  local f=$1 line note count value
-  [ -f "$f" ] || return 0
-  line=$(last_status_line "$f")
-  [ -n "$line" ] || return 0
-  status_is_paused "$line" || return 0
-  case "$line" in *:*) ;; *) return 0 ;; esac
-  note=$(status_line_note "$line")
-  count=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_QUIESCE_TOKEN_RE" | wc -l | tr -d ' ')
-  [ "$count" = 1 ] || return 0
-  value=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_QUIESCE_TOKEN_RE")
-  value=${value#\[fleet-quiesced=}
-  printf '%s' "${value%\]}"
+  _status_pause_token_epoch "$1" "$FM_CLASSIFY_QUIESCE_TOKEN_RE" '[fleet-quiesced='
 }
 
 # The pause's SECOND token, and deliberately not a second pause vocabulary: same
@@ -387,18 +396,7 @@ FM_CLASSIFY_STOPPED_TOKEN_RE='\[fleet-stopped=[0-9][0-9]*\]'
 # above and for the same reasons: the last non-blank line only, the pause verb
 # required, and nothing at all when that line is ambiguous.
 status_fleet_stopped_epoch() {  # <status-file>
-  local f=$1 line note count value
-  [ -f "$f" ] || return 0
-  line=$(last_status_line "$f")
-  [ -n "$line" ] || return 0
-  status_is_paused "$line" || return 0
-  case "$line" in *:*) ;; *) return 0 ;; esac
-  note=$(status_line_note "$line")
-  count=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_STOPPED_TOKEN_RE" | wc -l | tr -d ' ')
-  [ "$count" = 1 ] || return 0
-  value=$(printf '%s' "$note" | grep -oE "$FM_CLASSIFY_STOPPED_TOKEN_RE")
-  value=${value#\[fleet-stopped=}
-  printf '%s' "${value%\]}"
+  _status_pause_token_epoch "$1" "$FM_CLASSIFY_STOPPED_TOKEN_RE" '[fleet-stopped='
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped

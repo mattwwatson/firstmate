@@ -86,6 +86,16 @@ So the resume acts only on the confident reading, and anything less keeps the wo
 
 A task that is not stopped for this pause is named in the output rather than skipped silently, so "nothing happened for this task" is always visible and explained.
 
+**The ask-to-answer window is refused as a precondition, and the refusal is durable.**
+The pause writes its record and steers every live worker before any of them has answered, so for up to `FM_FLEET_PAUSE_TIMEOUT` the fleet can be full of workers under a stop order with no token in any status stream yet.
+A resume run inside that window finds nobody stopped, and reading that as an empty fleet would clear the record and report success while every worker sat waiting for an instruction already spent.
+So the resume decides "is anybody stopped for this pause" from the status streams before it writes anything, and refuses with exit 5 while the phase still says the pause never finished quiescing.
+Deciding it first is what makes the refusal survive a re-run: an earlier version checked after the record had been rewritten to `releasing`, so the very re-run the message asks for read that phase, skipped the guard, and claimed the fleet was back - the same false success, one command later.
+Nothing is written on the refusal, so a crash mid-run cannot leave that bypass behind either.
+The one state this would otherwise wedge is a fleet whose workers all went back to work by themselves and retired every token: no run could then ever find anybody stopped, and the home would sit under a record nothing could clear.
+`--anyway` is the explicit escape for exactly that, following the refuse-then-override shape `bin/fm-teardown.sh` already uses, and named for what it does rather than `--force`, because nothing is discarded.
+It permits one thing only - clearing the record when nobody was found stopped - and skips no readiness check, releases nobody a plain run would not, and does not clear the record when a stopped worker was found and could not be released.
+
 **Out of scope, deliberately.**
 Automatic lid-close detection (a system sleep/wake hook such as `sleepwatcher`) as an involuntary-drop safety net is not built here.
 The deliberate path lands and gets proven first.

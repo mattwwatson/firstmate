@@ -20,11 +20,19 @@ Read its `--help` before first use; it is the authority on what each check prove
 
 - `bin/fm-fleet-resume.sh` - check readiness, then lift the pause and release every worker.
 - `bin/fm-fleet-resume.sh check` - run the readiness checks only and report. Changes nothing, so it is the right answer to "is the network back yet?".
+- `bin/fm-fleet-resume.sh --anyway` - the narrow override for exit 5 below, and never a first move.
 
 Exit 0 means the pause is lifted and every stopped worker was released.
 Exit 3 means a check failed: **nothing was released and the fleet is still paused.**
 Exit 4 means a worker this pause stopped could not be released, so the fleet is not fully back and the pause record is deliberately kept: deal with that worker, then run `/resume` again to finish the lift.
-Re-running it is safe: a worker it has already steered is recorded as released and is never steered a second time, and a window it merely could not read never accumulates into a verdict that the worker is gone.
+Exit 5 means no worker is stopped for this pause at all while the pause never finished quiescing, so there is nothing to release and the fleet may still be under a stop order.
+That is the window between the pause steering the workers and the first one answering, and nothing was changed: running `/resume` again will refuse in exactly the same way for as long as that holds, so do not treat a re-run as the fix.
+Run `/pause check` first, because it settles who actually stopped; if a worker has since answered, a plain `/resume` then completes the lift normally.
+Only when that check agrees every worker went back to work by itself - so nobody is left waiting and no run could ever find anyone stopped - is `bin/fm-fleet-resume.sh --anyway` the right answer, and all it does is clear the record that would otherwise never close.
+It is not a general bypass: it skips no readiness check, releases nobody a plain run would not, and still keeps the record at exit 4 when a stopped worker was found and could not be released.
+
+Re-running it is safe: a released worker reports `working: resumed after fleet pause`, which retires its own token, so the next run does not see it as stopped and cannot type a second instruction into a turn already under way.
+A window it merely could not read never accumulates into a verdict that the worker is gone.
 
 Every worker the pause stopped is released, including one whose quiesce refused and left it stopped without confirming, because it was told to stop and wait for this instruction all the same.
 It works that out from one place only: each worker's own status stream, which says whether it is still stopped for this pause.

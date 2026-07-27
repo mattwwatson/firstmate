@@ -49,7 +49,8 @@
 #   aborted run <id>              an active run was found and is cancelled  exit 0
 #   active run <id>               --check only: a run is still active    exit 3
 #   abort failed: <reason>        the run is still active, or the CLI never
-#                                 answered within the bound              exit 1
+#                                 answered within the bound - before the abort
+#                                 or when asked to confirm it              exit 1
 # A usage error exits 2. A caller that must not proceed with an unreaped run
 # checks the exit status, never the text.
 #
@@ -190,6 +191,16 @@ fi
 # left the run monitoring is the orphan this script exists to prevent.
 VERIFY_OUT=$(nm axi status)
 VERIFY_RC=$?
+if [ "$VERIFY_RC" -eq 124 ]; then
+  # A verification that never answered has proved nothing, so it must not read as
+  # a stopped run. This is the same rule as the status call above and for the same
+  # reason: the daemon accepting an abort and then going silent is precisely the
+  # sleep-wedged symptom, and a caller told "aborted" here would remove the
+  # worktree or record the task quiet with a run still monitoring.
+  printf 'abort failed: no-mistakes did not answer within %ss to confirm run %s stopped for %s\n' \
+    "$NM_TIMEOUT" "$TARGET_RUN" "$LABEL"
+  exit 1
+fi
 if [ "$VERIFY_RC" -eq 0 ] && run_is_active "$VERIFY_OUT"; then
   printf 'abort failed: run %s for %s is still active after abort\n' "$TARGET_RUN" "$LABEL"
   exit 1

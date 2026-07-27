@@ -104,6 +104,9 @@ SH
 # A `no-mistakes` stub whose answer is data, not code: FM_FAKE_NM_STATUS names a
 # file holding the `axi status` TOON to print, FM_FAKE_NM_ABORT_FAILS makes the
 # abort refuse, and FM_FAKE_NM_HANG makes every call sleep past the bound.
+# FM_FAKE_NM_HANG_AFTER_ABORT names the flag file an accepted abort creates, so a
+# case can model the daemon that takes the abort and then goes silent - point it
+# at FM_FAKE_NM_HANG's own path to make only the calls AFTER the abort hang.
 # FM_FAKE_NM_LOG records every invocation, so a case can assert what was NOT
 # done - an abort that never happened leaves no other trace.
 install_fake_no_mistakes() {  # <fakebin>
@@ -119,6 +122,7 @@ case "${1:-} ${2:-}" in
     [ -e "${FM_FAKE_NM_ABORT_FAILS:-/nonexistent}" ] && exit 1
     # A successful abort makes the run terminal for any later status read.
     [ -n "${FM_FAKE_NM_STATUS:-}" ] && printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: cancelled\n  outcome: cancelled\n' > "$FM_FAKE_NM_STATUS"
+    [ -n "${FM_FAKE_NM_HANG_AFTER_ABORT:-}" ] && touch "$FM_FAKE_NM_HANG_AFTER_ABORT"
     exit 0 ;;
   "daemon status")
     [ -e "${FM_FAKE_NM_DAEMON_DOWN:-/nonexistent}" ] && exit 1
@@ -837,6 +841,20 @@ test_resume_refuses_before_any_worker_has_answered() {
   assert_contains "$out" "never finished quiescing" "it must say why it refused"
   assert_present "$dir/state/.fleet-paused" \
     "the record must survive: it is the only thing that can wake the stopped workers"
+  [ "$(record_phase "$dir")" = quiescing ] \
+    || fail "a refusal must write nothing at all, leaving the phase honest"
+
+  # The refusal has to be DURABLE. Re-running is the natural next action and the
+  # exit-5 text invites it, so a guard that fired once and then let the second run
+  # clear the record would only put the same false success one command away.
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  expect_code 5 "$rc" "a second resume inside the same window must refuse the same way"
+  assert_not_contains "$out" "fleet resumed" "the re-run must not claim the fleet is back"
+  assert_contains "$out" "never finished quiescing" "the re-run must give the same reason"
+  assert_present "$dir/state/.fleet-paused" \
+    "the re-run must leave the record that is still the only thing able to wake the workers"
+  [ ! -s "$dir/sent.log" ] || fail "a refusing resume must steer nobody"
 
   # Once a worker actually answers, the same command completes normally.
   confirm "$dir" task-a
@@ -846,6 +864,92 @@ test_resume_refuses_before_any_worker_has_answered() {
   assert_contains "$out" "fleet resumed" "the completed lift must be reported"
   assert_absent "$dir/state/.fleet-paused" "a completed resume clears the record"
   pass "a resume before any worker has answered refuses instead of claiming success"
+}
+
+test_resume_anyway_clears_a_record_nothing_else_could() {
+  local dir out rc
+  dir=$(make_case anyway-clears)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  : > "$dir/sent.log"
+
+  # The state a durable refusal would otherwise wedge: nobody is stopped for this
+  # pause, so no run could ever find anyone to release, and without an escape the
+  # home would sit under a record no command could clear.
+  out=$(run_fleet "$dir" "$RESUME" --anyway 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "--anyway must be able to clear a record nothing else could"
+  assert_contains "$out" "explicit say-so" \
+    "clearing on an override must say it was the operator's call"
+  assert_not_contains "$out" "every stopped worker was released" \
+    "no claim of a completed release may appear when nobody was stopped"
+  assert_absent "$dir/state/.fleet-paused" "--anyway must clear the record"
+  [ ! -s "$dir/sent.log" ] || fail "--anyway must release nobody a plain run would not"
+  pass "--anyway clears the one record a durable refusal would otherwise wedge"
+}
+
+test_resume_anyway_does_not_bypass_a_readiness_check() {
+  local dir out rc
+  dir=$(make_case anyway-forge-down)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  : > "$dir/sent.log"
+
+  # The override permits clearing a record, and nothing else. Resuming into a
+  # network that is not back is the failure the whole feature exists to prevent,
+  # so no flag may soften a check.
+  touch "$dir/gh-down"
+  export FM_FAKE_GH_DOWN="$dir/gh-down"
+  out=$(run_fleet "$dir" "$RESUME" --anyway 2>&1)
+  rc=$?
+  unset FM_FAKE_GH_DOWN
+  expect_code 3 "$rc" "--anyway must not turn a failed readiness check into a resume"
+  assert_contains "$out" "GitHub is unreachable" "the concrete missing requirement must still be named"
+  assert_present "$dir/state/.fleet-paused" "a blocked resume must keep the record even under --anyway"
+  [ ! -s "$dir/sent.log" ] || fail "a blocked resume must release nobody under --anyway"
+  pass "--anyway softens no readiness check: the forge being down still stops the resume"
+}
+
+test_resume_anyway_keeps_the_record_for_a_stranded_worker() {
+  local dir out rc
+  dir=$(make_case anyway-stranded)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  : > "$dir/sent.log"
+
+  # A worker WAS found stopped and could not be reached, so there really is one
+  # out there waiting. The override has nothing to say about that case: the record
+  # is the only thing left that can wake it.
+  touch "$dir/dead"
+  export FM_FAKE_ENDPOINT_DEAD="$dir/dead"
+  out=$(run_fleet "$dir" "$RESUME" --anyway 2>&1)
+  rc=$?
+  unset FM_FAKE_ENDPOINT_DEAD
+  expect_code 4 "$rc" "--anyway must not clear a record held open by a stranded worker"
+  assert_contains "$out" "task-a: STILL WAITING" "the stranded worker must still be named"
+  assert_not_contains "$out" "explicit say-so" \
+    "the override must not report a clearing it did not do"
+  assert_present "$dir/state/.fleet-paused" \
+    "the record that would later wake the stranded worker must survive --anyway"
+  pass "--anyway keeps the record when a stopped worker was found and could not be released"
+}
+
+test_resume_help_prints_the_whole_exit_list() {
+  local out
+  # The skill names --help as the authority on this command, so a range that
+  # stops mid-paragraph silently drops the meaning of the failing exits.
+  out=$("$RESUME" --help 2>&1 | tr '\n' ' ')
+  assert_contains "$out" "Only exit 0 ever means the fleet is back." \
+    "--help must print the exit-code paragraph through its last sentence"
+  assert_contains "$out" "--anyway" "--help must document the override it accepts"
+  pass "resume --help prints its exit-code paragraph in full"
 }
 
 test_quiesce_refuses_outside_the_worktree() {
@@ -953,6 +1057,27 @@ test_abort_reports_a_daemon_that_does_not_answer() {
   pass "silence from the validation daemon is reported, never read as no run"
 }
 
+test_abort_reports_a_verification_that_never_answered() {
+  local dir out rc
+  dir=$(make_case abort-verify-hang)
+  install_fake_no_mistakes "$dir/fakebin"
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
+
+  # The daemon accepts the abort and then stops answering, which is the exact
+  # sleep-wedged symptom. A verification that never came back has NOT proved the
+  # run stopped, and a caller told "aborted" here removes the worktree, or records
+  # the task quiet, with the run still monitoring - the orphan from the incident.
+  out=$( PATH="$dir/fakebin:$PATH" FM_FAKE_NM_STATUS="$dir/nm-status" \
+    FM_FAKE_NM_HANG="$dir/hang" FM_FAKE_NM_HANG_AFTER_ABORT="$dir/hang" \
+    FM_NM_ABORT_TIMEOUT=1 \
+    "$NM_ABORT" --worktree "$dir/wt" --label task-a 2>&1 )
+  rc=$?
+  expect_code 1 "$rc" "an unverified abort must not report success"
+  assert_contains "$out" "abort failed" "the failure must be reported in the abort-failed shape"
+  assert_not_contains "$out" "aborted run" "an unconfirmed abort must never read as done"
+  pass "an abort whose verification never answered fails instead of claiming the run stopped"
+}
+
 # --- supervision while paused -----------------------------------------------
 
 test_supervision_absorbs_a_confirmed_quiesce() {
@@ -1017,9 +1142,14 @@ test_resume_releases_a_worker_whose_quiesce_refused
 test_resume_works_from_a_record_with_no_task_rows
 test_pause_check_between_resumes_does_not_resteer
 test_resume_refuses_before_any_worker_has_answered
+test_resume_anyway_clears_a_record_nothing_else_could
+test_resume_anyway_does_not_bypass_a_readiness_check
+test_resume_anyway_keeps_the_record_for_a_stranded_worker
+test_resume_help_prints_the_whole_exit_list
 test_quiesce_refuses_outside_the_worktree
 test_quiesce_commits_stops_and_confirms
 test_quiesce_confirms_nothing_when_the_run_will_not_stop
 test_abort_is_a_noop_on_a_terminal_run
 test_abort_reports_a_daemon_that_does_not_answer
+test_abort_reports_a_verification_that_never_answered
 test_supervision_absorbs_a_confirmed_quiesce
