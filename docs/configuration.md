@@ -115,6 +115,29 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Board geometry (config/board-geometry)
+
+`data/board.md` is the captain's at-a-glance fleet board, watched in a terminal with `tail -f`.
+The [`board` skill](../.agents/skills/board/SKILL.md) owns its section contract and rebuild triggers, and `bin/fm-board.sh` owns the padding, the generation stamp, and the geometry check; this section owns only the geometry schema and its default.
+
+`config/board-geometry` (local, gitignored) declares the captain's terminal size as `key = value` lines, with `#` comments and blank lines ignored:
+
+```
+rows = 50
+columns = 150
+```
+
+`rows` is the visible height the board must fit in, and `columns` is the width no line may exceed in DISPLAY columns.
+The blank-line padding that scrolls the previous board out of the tail window is always `rows + 10`, so a terminal slightly taller than declared still clears.
+A malformed value, an unknown setting, or a `columns` too narrow for the board's own header is a hard failure rather than a silent fall back, because rendering against the wrong geometry is exactly the drift this file exists to prevent.
+
+An absent file means the universal 24x80 terminal.
+That default is deliberately conservative on both axes, because they fail asymmetrically: a board that fits 24x80 fits every terminal, whereas a too-wide default silently wraps and corrupts every line below the wrap.
+The `board` skill asks the captain for their real geometry the first time it runs in a home without this file.
+
+The geometry is NOT inherited into secondmate homes.
+It describes the captain's own terminal for the board the primary home renders, and a secondmate does not render that board.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
