@@ -15,7 +15,8 @@
 # render reads the board CONTENT - the sections alone, with no padding and no
 # header - from --content or stdin, prepends <rows + 10> blank lines and the
 # stamped header, checks the result, then writes it to --out. --out defaults to
-# $FM_HOME/data/board.md, and `--out -` writes to stdout. The write is atomic.
+# $FM_HOME/data/board.md, and `--out -` writes to stdout. The board is rewritten
+# IN PLACE rather than replaced by a rename; see the write site for why.
 #
 # A failing check REFUSES to write and reports every offending line, because a
 # board that wraps or overflows the captain's window is worse than one that is
@@ -37,8 +38,10 @@
 # blocks, with combining marks and variation selectors counted as zero. Ambiguous
 # -width characters are counted as one column, which is what a terminal does
 # unless it has been explicitly configured otherwise. Sequences joined with
-# U+200D are counted per component, so a multi-person emoji over-reports rather
-# than under-reports - the safe direction for a width ceiling.
+# U+200D are counted per component, and a character carrying the emoji-
+# presentation selector U+FE0F counts as two columns, so both over-report rather
+# than under-report - the safe direction for a width ceiling. A width that cannot
+# be measured at all is a violation, never a pass.
 #
 # geometry prints the resolved rows, columns and padding, and their source.
 #
@@ -92,8 +95,11 @@ GEOMETRY_SOURCE=default
 # ignored, later assignments winning. An unreadable or malformed value is a hard
 # failure rather than a silent fall back to the default, because rendering
 # against the wrong geometry is exactly the drift this file exists to prevent.
+# A file that declares only one axis is the same failure: falling back on the
+# other axis alone would report the file as the source while inventing half the
+# geometry, which also suppresses the skill's ask-the-captain-once trigger.
 load_geometry() {
-  local line key value
+  local line key value seen_rows=0 seen_columns=0
   [ -f "$GEOMETRY_FILE" ] || return 0
   GEOMETRY_SOURCE=$GEOMETRY_FILE
   while IFS= read -r line || [ -n "$line" ]; do
@@ -114,11 +120,15 @@ load_geometry() {
     esac
     [ "$value" -gt 0 ] || fail "$GEOMETRY_FILE: $key must be greater than zero: $value"
     case "$key" in
-      rows) ROWS=$value ;;
-      columns) COLUMNS=$value ;;
+      rows) ROWS=$value; seen_rows=1 ;;
+      columns) COLUMNS=$value; seen_columns=1 ;;
       *) fail "$GEOMETRY_FILE: unknown setting: $key" ;;
     esac
   done < "$GEOMETRY_FILE"
+  [ "$seen_rows" -eq 1 ] || \
+    fail "$GEOMETRY_FILE: rows is missing; the file must declare both rows and columns"
+  [ "$seen_columns" -eq 1 ] || \
+    fail "$GEOMETRY_FILE: columns is missing; the file must declare both rows and columns"
 }
 
 padding_lines() {
@@ -131,6 +141,10 @@ padding_lines() {
 # columns. Perl is already a firstmate dependency (bin/fm-watch.sh and friends)
 # and is the portable way to get exact codepoints; awk's string handling is
 # byte-oriented or locale-dependent depending on the build.
+#
+# Exits zero ONLY when every line was measured. A missing perl, an unusable
+# -CSD, or any other measurement failure exits non-zero, so callers can tell
+# "measured and fine" from "could not measure" - empty output alone cannot.
 over_width_lines() {  # <limit>
   perl -CSD -e '
     my $limit = shift @ARGV;
@@ -163,6 +177,29 @@ over_width_lines() {  # <limit>
       [0x1FA80, 0x1FA86], [0x1FA90, 0x1FAA8], [0x1FAB0, 0x1FAB6],
       [0x1FAC0, 0x1FAC2], [0x1FAD0, 0x1FAD6],
       [0x20000, 0x2FFFD], [0x30000, 0x3FFFD],
+      # Emoji whose DEFAULT presentation is text - narrow on paper, but drawn two
+      # columns wide by the terminals the board is read in, and two columns wide
+      # in every emoji-presentation sequence. Counted wide so a board carrying
+      # "warning sign", "heavy tick", "play" or "pause" over-reports instead of
+      # wrapping. Over-reporting only costs a refused render; under-reporting
+      # corrupts every line below the wrap.
+      [0x203C, 0x203C], [0x2049, 0x2049], [0x2122, 0x2122], [0x2139, 0x2139],
+      [0x2194, 0x21AA], [0x2328, 0x2328], [0x23CF, 0x23CF], [0x23ED, 0x23EF],
+      [0x23F1, 0x23F2], [0x23F8, 0x23FA], [0x24C2, 0x24C2], [0x25AA, 0x25AB],
+      [0x25B6, 0x25B6], [0x25C0, 0x25C0], [0x25FB, 0x25FC], [0x2600, 0x2604],
+      [0x260E, 0x260E], [0x2611, 0x2611], [0x2618, 0x2618], [0x261D, 0x261D],
+      [0x2620, 0x2620], [0x2622, 0x2623], [0x2626, 0x2626], [0x262A, 0x262A],
+      [0x262E, 0x262F], [0x2638, 0x263A], [0x2640, 0x2640], [0x2642, 0x2642],
+      [0x265F, 0x2660], [0x2663, 0x2663], [0x2665, 0x2666], [0x2668, 0x2668],
+      [0x267B, 0x267B], [0x267E, 0x267E], [0x2692, 0x2692], [0x2694, 0x2697],
+      [0x2699, 0x2699], [0x269B, 0x269C], [0x26A0, 0x26A0], [0x26A7, 0x26A7],
+      [0x26B0, 0x26B1], [0x26C8, 0x26C8], [0x26CF, 0x26CF], [0x26D1, 0x26D1],
+      [0x26D3, 0x26D3], [0x26E9, 0x26E9], [0x26F0, 0x26F1], [0x26F4, 0x26F4],
+      [0x26F7, 0x26F9], [0x26FB, 0x26FC], [0x2702, 0x2702], [0x2708, 0x2709],
+      [0x270C, 0x270D], [0x270F, 0x270F], [0x2712, 0x2712], [0x2714, 0x2714],
+      [0x2716, 0x2716], [0x271D, 0x271D], [0x2721, 0x2721], [0x2733, 0x2734],
+      [0x2744, 0x2744], [0x2747, 0x2747], [0x2763, 0x2764], [0x27A1, 0x27A1],
+      [0x2934, 0x2935], [0x2B05, 0x2B07], [0x3030, 0x3030],
     );
     my @zero = (
       [0x0300, 0x036F], [0x0483, 0x0489], [0x0591, 0x05BD], [0x0610, 0x061A],
@@ -179,10 +216,15 @@ over_width_lines() {  # <limit>
       return 0;
     }
     sub width {
+      my @c = split //, shift;
       my $w = 0;
-      for my $c (split //, shift) {
-        my $cp = ord $c;
+      for my $i (0 .. $#c) {
+        my $cp = ord $c[$i];
         next if $cp < 0x20 || $cp == 0x7F;
+        # U+FE0F asks for the EMOJI presentation, which is two columns wide
+        # however narrow the base character is on its own. U+FE0F itself is in
+        # @zero, so the pair is counted once, here, at its base.
+        if ($i < $#c && ord($c[$i + 1]) == 0xFE0F) { $w += 2; next; }
         next if in_ranges($cp, \@zero);
         $w += in_ranges($cp, \@wide) ? 2 : 1;
       }
@@ -193,6 +235,7 @@ over_width_lines() {  # <limit>
       my $w = width($line);
       printf "%d %d\n", $., $w if $w > $limit;
     }
+    exit 0;
   ' "$1"
 }
 
@@ -202,7 +245,7 @@ over_width_lines() {  # <limit>
 # the file to read, or "-" for stdin. Prints one diagnostic per violation and
 # returns non-zero when any rule is broken.
 check_stream() {  # <label> <source>
-  local label=$1 src=$2 tmp total leading body over lineno width required rc=0
+  local label=$1 src=$2 tmp total leading body over over_rc lineno width required rc=0
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-board-check.XXXXXX") || fail "could not create a temporary file"
   if [ "$src" = "-" ]; then
     cat > "$tmp"
@@ -229,8 +272,17 @@ check_stream() {  # <label> <source>
     rc=1
   fi
 
-  over=$(over_width_lines "$COLUMNS" < "$tmp")
-  if [ -n "$over" ]; then
+  # errexit is off inside a function called as `... || rc=$?`, so the exit status
+  # has to be captured by hand. An unmeasured board is a violation, not a pass:
+  # treating "could not measure" as "no over-wide lines" is how a fail-closed
+  # check silently becomes no check at all.
+  over_rc=0
+  over=$(over_width_lines "$COLUMNS" < "$tmp") || over_rc=$?
+  if [ "$over_rc" -ne 0 ]; then
+    printf '%s: could not measure display width (the perl width pass exited %s); refusing to treat an unmeasured board as fitting %s columns\n' \
+      "$label" "$over_rc" "$COLUMNS" >&2
+    rc=1
+  elif [ -n "$over" ]; then
     while read -r lineno width; do
       [ -n "$lineno" ] || continue
       printf '%s: line %s is %s display columns, %s over the %s configured in %s\n' \
@@ -251,20 +303,20 @@ EOF
 # "DD/MM h:mmam" - the date plus a 12-hour stamp with no leading zero on the
 # hour, so the captain can see at a glance how stale the tail window has become.
 board_stamp() {
-  local day month hour minute meridiem
+  local now date_part time_part
   if [ -n "${FM_BOARD_STAMP:-}" ]; then
     printf '%s\n' "$FM_BOARD_STAMP"
     return 0
   fi
-  day=$(date +%d)
-  month=$(date +%m)
-  hour=$(date +%I)
-  minute=$(date +%M)
-  meridiem=$(date +%p | tr '[:upper:]' '[:lower:]')
+  # ONE date call, not one per field: separate calls can straddle a minute, hour,
+  # meridiem or midnight boundary and compose a stamp that never existed, and the
+  # stamp is exactly what the captain reads to judge how stale the board is.
+  now=$(date '+%d/%m %I:%M%p' | tr '[:upper:]' '[:lower:]')
+  date_part="${now%% *}"
+  time_part="${now#* }"
   # %-I is a GNU extension; strip the leading zero by hand so BSD date matches.
-  hour="${hour#0}"
-  [ -n "$hour" ] || hour=12
-  printf '%s/%s %s:%s%s\n' "$day" "$month" "$hour" "$minute" "$meridiem"
+  time_part="${time_part#0}"
+  printf '%s %s\n' "$date_part" "$time_part"
 }
 
 # The stamped title, resolved ONCE per run into STAMP by render so the width
@@ -310,16 +362,6 @@ repeat_char() {  # <char> <count>
   printf '%s' "$out"
 }
 
-# Print an existing file's octal mode, or nothing when it does not exist.
-file_mode() {  # <path>
-  [ -f "$1" ] || return 0
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
-  else
-    stat -c %a "$1" 2>/dev/null
-  fi
-}
-
 blank_lines() {  # <count>
   local count=$1
   while [ "$count" -gt 0 ]; do
@@ -329,7 +371,7 @@ blank_lines() {  # <count>
 }
 
 render() {
-  local content_file='' out='' force=0 tmp rendered rc=0 first mode
+  local content_file='' out='' force=0 tmp rendered rc=0 first
   while [ $# -gt 0 ]; do
     case "$1" in
       --content) [ $# -ge 2 ] || fail "--content needs a path"; content_file=$2; shift 2 ;;
@@ -382,13 +424,24 @@ render() {
     rm -f "$rendered"
   else
     mkdir -p "$(dirname "$out")" || { rm -f "$rendered"; fail "could not create the directory for $out"; }
-    # mktemp creates at 0600. Carry the existing board's mode across the atomic
-    # replace, so rewriting the board never quietly tightens it; a new board
-    # takes the ordinary umask-derived mode instead.
-    mode=$(file_mode "$out")
-    [ -n "$mode" ] || mode=$(printf '%03o' "$((0666 & ~$(umask)))")
-    chmod "$mode" "$rendered" || { rm -f "$rendered"; fail "could not set the mode for $out"; }
-    mv -f "$rendered" "$out" || { rm -f "$rendered"; fail "could not write $out"; }
+    # DELIBERATELY not an atomic rename. The board is truncated and rewritten in
+    # place, keeping the same inode, because its only consumer is a `tail -f`
+    # window and BSD/GNU `tail -f` follows the DESCRIPTOR, not the name: a
+    # rename-replace detaches that window permanently, so the captain keeps
+    # reading a board that has silently stopped moving. A frozen board that is
+    # trusted is worse than a visibly broken one.
+    #
+    # The cost, accepted on purpose: there is no atomic swap, so a reader can
+    # momentarily catch a half-written board, and an interrupted write leaves a
+    # truncated one. Both self-heal on the next render; a detached tail never
+    # does. Do NOT "fix" this back into a rename.
+    #
+    # This runs only after the check above passed (or --force was given), so a
+    # refused board never truncates the good one it declined to replace. The
+    # redirect preserves an existing board's mode and gives a new one the
+    # ordinary umask-derived mode, so no chmod carry-over is needed.
+    cat "$rendered" > "$out" || { rm -f "$rendered"; fail "could not write $out"; }
+    rm -f "$rendered"
   fi
   return "$rc"
 }

@@ -129,7 +129,8 @@ columns = 150
 
 `rows` is the visible height the board must fit in, and `columns` is the width no line may exceed in DISPLAY columns.
 The blank-line padding that scrolls the previous board out of the tail window is always `rows + 10`, so a terminal slightly taller than declared still clears.
-A malformed value, an unknown setting, or a `columns` too narrow for the board's own header is a hard failure rather than a silent fall back, because rendering against the wrong geometry is exactly the drift this file exists to prevent.
+A malformed value, an unknown setting, a missing `rows` or `columns`, or a `columns` too narrow for the board's own header is a hard failure rather than a silent fall back, because rendering against the wrong geometry is exactly the drift this file exists to prevent.
+Once the file exists it must declare both axes: falling back on one axis alone would report the file as the geometry's source while inventing the other half of it.
 
 An absent file means the universal 24x80 terminal.
 That default is deliberately conservative on both axes, because they fail asymmetrically: a board that fits 24x80 fits every terminal, whereas a too-wide default silently wraps and corrupts every line below the wrap.

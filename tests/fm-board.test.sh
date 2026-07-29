@@ -41,6 +41,22 @@ content_file() {  # <home> <name>
   printf '%s\n' "$1/$2.content"
 }
 
+# The board's inode. `tail -f` follows the descriptor, so this number staying the
+# same across renders is the property that keeps the captain's window attached.
+board_inode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then stat -f %i "$1"; else stat -c %i "$1"; fi
+}
+
+# A directory holding a `perl` that always fails, so a test can prove the width
+# check cannot mistake "could not measure" for "no over-wide lines".
+broken_perl_dir() {  # <home>
+  local stub="$1/broken-perl"
+  mkdir -p "$stub"
+  printf '#!/bin/sh\nexit 127\n' > "$stub/perl"
+  chmod +x "$stub/perl"
+  printf '%s\n' "$stub"
+}
+
 test_script_is_executable() {
   assert_present "$BOARD" "bin/fm-board.sh is missing"
   [ -x "$BOARD" ] || fail "bin/fm-board.sh must be executable"
@@ -78,6 +94,23 @@ test_geometry_rejects_a_malformed_value() {
   [ "$RENDER_RC" -ne 0 ] || fail "a malformed geometry value must not be silently ignored"
   assert_contains "$RENDER_OUT" "positive whole number" "the malformed-value message must say what is wrong"
   pass "a malformed geometry value fails rather than falling back to the default"
+}
+
+test_geometry_rejects_a_file_missing_an_axis() {
+  local home
+  home=$(make_home halfgeometry)
+  printf 'rows = 50\n' > "$home/config/board-geometry"
+  run_board "$home" geometry
+  [ "$RENDER_RC" -ne 0 ] || fail "a geometry file declaring only rows must not be accepted"
+  assert_contains "$RENDER_OUT" "columns is missing" "the failure must name the missing key"
+  # Reporting the file as the source while defaulting the other axis would render
+  # forever at 80 columns AND suppress the skill's ask-the-captain-once trigger.
+  assert_not_contains "$RENDER_OUT" "columns=80" "a missing axis must never be silently defaulted"
+  printf 'columns = 150\n' > "$home/config/board-geometry"
+  run_board "$home" geometry
+  [ "$RENDER_RC" -ne 0 ] || fail "a geometry file declaring only columns must not be accepted"
+  assert_contains "$RENDER_OUT" "rows is missing" "the failure must name the missing key"
+  pass "config/board-geometry must declare both axes or fail naming the missing one"
 }
 
 test_render_pads_and_stamps() {
@@ -226,10 +259,78 @@ test_render_preserves_the_existing_board_mode() {
   run_board "$home" render < "$c"
   expect_code 0 "$RENDER_RC" "rendering over an existing board must succeed"
   if [ "$(uname)" = Darwin ]; then mode=$(stat -f %Lp "$out"); else mode=$(stat -c %a "$out"); fi
-  # The rendered board is moved in from a 0600 temporary file, so without an
-  # explicit carry-over a rewrite would silently tighten the captain's board.
+  # A rewrite in place leaves the mode alone; a replace would have to carry it
+  # across by hand or silently tighten the captain's board.
   [ "$mode" = 664 ] || fail "expected the existing 664 mode to survive the rewrite, got $mode"
   pass "rendering over an existing board keeps its mode"
+}
+
+test_render_keeps_the_board_inode() {
+  local home out c first second
+  home=$(make_home inode 50 150)
+  out="$home/data/board.md"
+  c=$(content_file "$home" board)
+  printf 'first board\n' > "$c"
+  run_board "$home" render < "$c"
+  expect_code 0 "$RENDER_RC" "the first render must succeed"
+  first=$(board_inode "$out")
+  printf 'second board\n' > "$c"
+  run_board "$home" render < "$c"
+  expect_code 0 "$RENDER_RC" "the second render must succeed"
+  second=$(board_inode "$out")
+  # `tail -f` follows the descriptor, not the name. A rename-replace would give a
+  # new inode here and detach the captain's window for good, so the board would
+  # look frozen rather than broken.
+  [ "$first" = "$second" ] || \
+    fail "the board must be rewritten in place; inode changed from $first to $second"
+  assert_grep "second board" "$out" "the second render must reach the same file"
+  pass "rendering twice rewrites the same inode, so a live tail -f stays attached"
+}
+
+test_width_check_fails_closed_when_it_cannot_measure() {
+  local home out c stub before rc text
+  home=$(make_home unmeasurable 50 150)
+  out="$home/data/board.md"
+  c=$(content_file "$home" board)
+  printf 'a board that fits\n' > "$c"
+  run_board "$home" render < "$c"
+  expect_code 0 "$RENDER_RC" "the seeding render must succeed"
+  before=$(board_inode "$out")
+  stub=$(broken_perl_dir "$home")
+
+  text=$(PATH="$stub:$PATH" FM_HOME="$home" FM_BOARD_STAMP='29/07 12:10pm' \
+    "$BOARD" render --content "$c" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unmeasurable width must not be read as 'no over-wide lines'"
+  assert_contains "$text" "could not measure display width" \
+    "the diagnostic must name the measurement failure, not stay silent"
+  assert_contains "$text" "refused to write" "a render that cannot measure must write nothing"
+  assert_grep "a board that fits" "$out" "the previous good board must survive a refused render"
+  [ "$(board_inode "$out")" = "$before" ] || fail "a refused render must not touch the board at all"
+
+  text=$(PATH="$stub:$PATH" FM_HOME="$home" FM_BOARD_STAMP='29/07 12:10pm' \
+    "$BOARD" check 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "check must fail closed under the same measurement failure as render"
+  assert_contains "$text" "could not measure display width" \
+    "check and render must report the same measurement failure"
+  pass "an unmeasurable width fails closed in both render and check"
+}
+
+test_width_counts_an_emoji_presentation_sequence_as_two_columns() {
+  local home c
+  home=$(make_home vs16 50 32)
+  c=$(content_file "$home" board)
+  # U+26A0 WARNING SIGN plus U+FE0F renders two columns wide, so sixteen of them
+  # are thirty-two columns and fit exactly. Counting U+FE0F as zero and its base
+  # as one would read sixteen and wrongly pass a board that wraps.
+  printf '\xe2\x9a\xa0\xef\xb8\x8f%.0s' $(seq 1 16) > "$c"
+  run_board "$home" render --out - < "$c"
+  expect_code 0 "$RENDER_RC" "sixteen emoji-presentation sequences must fit a 32-column board"
+  printf '\xe2\x9a\xa0\xef\xb8\x8f%.0s' $(seq 1 17) > "$c"
+  run_board "$home" render --out - < "$c"
+  [ "$RENDER_RC" -ne 0 ] || fail "seventeen emoji-presentation sequences must not fit a 32-column board"
+  assert_contains "$RENDER_OUT" "34 display columns" \
+    "an emoji-presentation sequence must measure two columns, not one"
+  pass "a base character carrying U+FE0F counts as two columns"
 }
 
 test_render_refuses_an_already_rendered_board() {
@@ -275,17 +376,21 @@ test_script_is_executable
 test_geometry_defaults_when_unconfigured
 test_geometry_reads_the_config_file
 test_geometry_rejects_a_malformed_value
+test_geometry_rejects_a_file_missing_an_axis
 test_render_pads_and_stamps
 test_header_fills_the_configured_width_exactly
 test_render_refuses_a_board_taller_than_the_terminal
 test_render_refuses_a_line_wider_than_the_terminal
 test_width_counts_wide_characters_as_two_columns
+test_width_counts_an_emoji_presentation_sequence_as_two_columns
+test_width_check_fails_closed_when_it_cannot_measure
 test_render_refuses_a_geometry_too_narrow_for_the_header
 test_width_counts_combining_marks_as_zero
 test_check_reports_too_few_blank_lines
 test_check_passes_a_rendered_board
 test_force_writes_a_failing_board_and_still_reports
 test_render_preserves_the_existing_board_mode
+test_render_keeps_the_board_inode
 test_render_refuses_an_already_rendered_board
 test_render_refuses_empty_content
 test_stamp_is_twelve_hour_with_no_leading_zero
