@@ -56,8 +56,17 @@
 # proof, not a single failed read. An endpoint probe that fails cannot tell a
 # closed pane from an unreadable one, so the reap waits for the CONFIDENT
 # reading bin/fm-quiesce-lib.sh's fm_quiesce_worker_presence defines: the
-# backend's own agent probe reading `dead`, or the endpoint absent across two
-# consecutive verify passes a poll interval apart. Until then the task is
+# backend's own agent probe PROVING there is no agent, or the endpoint absent
+# across two consecutive verify passes a poll interval apart.
+#
+# PROVEN ABSENT IS NOT "COULD NOT TELL", and the reap depends on the difference.
+# The backend proves absence two ways - the endpoint exists and confidently has
+# no agent (`dead`), or the endpoint is authoritatively absent from a successful
+# inventory or a definitive missing-session answer (`missing`) - and both mean
+# nobody is left to own the run, so it is an orphan and this command reaps it. A
+# read that failed or contradicted itself proves nothing (`ambiguous`,
+# `unreadable`, `unverified`) and is where the two-pass rule earns its keep: the
+# worker may be alive and mid-step driving that very run. Until then the task is
 # reported NOT CONFIRMED with its run untouched, which holds the fleet unsafe
 # rather than cancelling a live worker's pipeline on a momentary glitch. Every
 # pass therefore takes exactly one presence reading for EVERY task, confirmed or

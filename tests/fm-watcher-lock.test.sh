@@ -968,7 +968,7 @@ test_pid_identity_is_locale_invariant() {
   # program: a read that lands in the fork-before-exec window records the
   # launcher's command line instead, and the comparison fails for a reason that
   # has nothing to do with locale.
-  local live no_proc baseline via_lc_all via_lc_time
+  local live no_proc baseline via_lc_all via_lc_time fakebin locale_log real_first real_second
   fm_wake_start_peer "$TMP_ROOT/locale-peer.ready"
   live=$FM_WAKE_PEER_PID
   no_proc="$TMP_ROOT/no-proc"

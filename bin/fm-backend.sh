@@ -898,13 +898,15 @@ fm_backend_agent_state() {  # <backend> <target>
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
 #
-# CAUTION for new callers: this collapses `missing` into `dead`, so a caller
-# that reads `dead` as "confidently gone" also reads an endpoint it could not
-# inventory that way. That is right for recovery, which relaunches, and wrong
-# for anything that ACTS on absence - fm-quiesce-lib.sh's pause aborts a
-# validation run, fm-watch.sh's pause_declared_class suppresses a wake, and both
-# read fm_backend_agent_state directly for exactly this reason. Prefer the state
-# contract above and name the states you accept.
+# CAUTION for new callers: this folds `missing` into `dead` and every other
+# non-alive state into `unknown`, so a caller cannot tell WHICH fact it is being
+# handed. That is right for recovery, which only asks whether to relaunch, and
+# wrong for anything that ACTS on a specific state - fm-watch.sh's
+# pause_declared_class must surface a wake for an endpoint it merely could not
+# inventory, and fm-quiesce-lib.sh's pause must separate a read that proved
+# absence from one that failed. Both read fm_backend_agent_state directly for
+# exactly that reason. Prefer the state contract above and name the states you
+# accept.
 fm_backend_agent_alive() {  # <backend> <target>
   case "$(fm_backend_agent_state "$1" "$2")" in
     alive) printf 'alive' ;;

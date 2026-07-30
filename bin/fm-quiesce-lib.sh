@@ -246,25 +246,33 @@ FM_QUIESCE_GONE_PROBES=2
 # earlier readings:
 #   live      the recorded endpoint answered, or the backend's agent probe reads
 #             `alive`.
-#   gone      the backend's own agent probe reads `dead`, meaning the endpoint
-#             exists and confidently has no agent. This is the single CONFIDENT
-#             signal, and the only one a caller that does not run repeated
-#             verify passes of its own may ever act on.
+#   gone      the backend's own agent probe PROVES there is no agent: either the
+#             endpoint exists and confidently has no agent (`dead`), or the
+#             endpoint itself is authoritatively absent (`missing`). This is the
+#             CONFIDENT signal, and the only one a caller that does not run
+#             repeated verify passes of its own may ever act on.
 #   unproven  anything else - the endpoint did not answer, but nothing here
 #             proves the worker is gone rather than momentarily unreadable.
-# The distinction exists because acting on absence means reaching into work
-# firstmate may not own. bin/fm-backend.sh's fm_backend_agent_state is the
-# recovery-grade classifier this reads, and only its `alive` and `dead` states
-# are proven here. `missing`, `ambiguous`, `unreadable`, and `unverified` are
-# all unproven, including `missing`: it licenses RECOVERY, which relaunches a
-# worker, but this decision aborts a validation run that a still-live worker may
-# be driving, so it demands the stronger evidence. A genuinely absent worker
-# still reaches `gone` through the repeated-verify path below rather than on one
-# read.
+# The distinction that matters is PROVEN ABSENT versus COULD NOT TELL, and it is
+# not the same distinction as endpoint-exists versus endpoint-gone. Acting on
+# absence means reaching into work firstmate may not own, so only proof counts.
+# bin/fm-backend.sh's fm_backend_agent_state is the recovery-grade classifier
+# this reads, and exactly its `alive`, `dead`, and `missing` states are proven
+# here: a backend returns `missing` only from a SUCCESSFUL inventory that omits
+# the recorded endpoint, or from an authoritative "no server running" /
+# "can't find session" answer - both are evidence, not a failed read. A read
+# that failed or contradicted itself returns `ambiguous`, `unreadable`, or
+# `unverified` instead, and those are the unproven ones.
+# Collapsing those two facts in either direction breaks a different command:
+# calling a failed read proven would let one glitch reap a live worker's run,
+# and calling an authoritative absence unproven would leave
+# bin/fm-fleet-resume.sh holding a pause record that no re-run could ever close,
+# because a killed tmux server never becomes reachable.
 # Deliberately NOT fm_backend_agent_alive: that backward-compatible wrapper
-# collapses `missing` into `dead`, which would make a single unreadable probe
-# read as a confident death and let a pause report the fleet safe to close while
-# a worker was still running.
+# folds several states into `dead` for callers that only want a yes/no answer, so
+# which facts it calls a death is its own business and has changed under this
+# subsystem's feet before. This decision names the states it accepts so it cannot
+# drift when that wrapper is retuned for recovery.
 # The house rule this implements is that an unknown or unreadable reading must
 # NEVER on its own license an action, precisely so a momentary read glitch
 # cannot be mistaken for a death. `unproven` is therefore not a quiet pass - it
@@ -285,7 +293,7 @@ fm_quiesce_worker_confident_presence() {  # <state-dir> <meta> <id>
   backend=$(fm_backend_of_meta "$meta")
   reading=$(fm_backend_agent_state "$backend" "${target:-$window}" 2>/dev/null)
   case "$reading" in
-    dead) printf 'gone'; return 0 ;;
+    dead|missing) printf 'gone'; return 0 ;;
     alive) fm_quiesce_probe_reset "$state" "$id"; printf 'live'; return 0 ;;
   esac
   printf 'unproven'

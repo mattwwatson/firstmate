@@ -51,9 +51,12 @@ A live worker's run is only checked, never aborted from outside: that run belong
 
 **Gone has to be proven, because reaping is an action.**
 An endpoint probe that fails cannot tell a pane that is closed from one that merely could not be read, and the reap cancels a pipeline.
-So a single failed probe never licenses it: the worker counts as gone only on the backend's own agent probe reading `dead`, or on the endpoint being absent across two consecutive verify passes a poll interval apart.
+So a single failed probe never licenses it: the worker counts as gone only on the backend's own agent probe proving there is no agent, or on the endpoint being absent across two consecutive verify passes a poll interval apart.
 Anything short of that is reported as a worker whose liveness could not be established, which holds the fleet unsafe with the run untouched.
-This is the same rule `bin/fm-backend.sh`'s `fm_backend_agent_alive` already records for the secondmate-liveness sweep, and for the same reason: a momentary read glitch must never be mistaken for a death.
+The reading is `bin/fm-backend.sh`'s `fm_backend_agent_state`, and the line it draws is proven absent versus could not tell, not endpoint-present versus endpoint-gone.
+`dead` (the endpoint exists and confidently has no agent) and `missing` (a successful inventory omitted the recorded endpoint, or the backend answered definitively that the session or server is gone) are both proof, so both count.
+`ambiguous`, `unreadable`, and `unverified` are reads that failed or contradicted themselves and never count on their own.
+Not the `fm_backend_agent_alive` wrapper: it folds those states together for callers that only need a yes/no answer, and a momentary read glitch must never be mistaken for a death.
 
 **A worker that cannot be released keeps the pause record, unless it is confidently gone.**
 The mirror of a false safe-to-close is a false "everything is back".

@@ -49,8 +49,10 @@ test_owner_and_always_loaded_boundary() {
   assert_grep 'user-invocable: false' "$OWNER" "ask-user authority skill must be agent-only"
   assert_grep 'single owner of the decision procedure for ask-user findings' "$OWNER" \
     "ask-user authority skill does not declare ownership"
-  assert_grep 'With `yolo` off, every ask-user finding belongs to the captain' "$OWNER" \
-    "detailed procedure permits autonomous ask-user decisions with yolo off"
+  assert_grep 'Without the `findings` grant, every ask-user finding belongs to the captain' "$OWNER" \
+    "detailed procedure permits autonomous ask-user decisions without the findings grant"
+  assert_grep 'governs answering an ask-user finding is `findings` and nothing else' "$OWNER" \
+    "detailed procedure lets a non-findings grant authorize an ask-user answer"
   trigger_count=$(grep -Fc -- '- `ask-user-authority` -' "$AGENTS")
   [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 13 trigger, found $trigger_count"
   assert_no_grep 'Hi Bit' "$AGENTS" "AGENTS.md encoded an incident-specific authority rule"
@@ -61,9 +63,9 @@ test_owner_and_always_loaded_boundary() {
 test_concrete_required_defect_stays_autonomous() {
   assert_grep 'genuinely necessary to satisfy the accepted contract' "$OWNER" \
     "required concrete corrections no longer stay within standing authority"
-  assert_grep 'Fixing a concrete defect that violates an original acceptance criterion stays within `yolo` authority' "$OWNER" \
+  assert_grep 'Fixing a concrete defect that violates an original acceptance criterion stays within `findings` authority' "$OWNER" \
     "concrete acceptance-criterion defect scenario is missing"
-  pass "required concrete defect correction stays within yolo authority"
+  pass "required concrete defect correction stays within findings authority"
 }
 
 test_continuous_monitoring_expansion_escalates() {
