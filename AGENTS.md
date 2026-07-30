@@ -95,7 +95,7 @@ state/               volatile runtime signals; gitignored
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
-  <id>.bb-poll-warned.*  watcher one-shot markers so a Bitbucket poll's credential or visibility warning wakes firstmate once, not every cycle; removed by teardown
+  <id>.bb-poll-warned.*  watcher one-shot markers so a Bitbucket poll's terminal verdict (declined, superseded) or credential/visibility warning wakes firstmate once, not every cycle; removed at retirement, at arm time, and by teardown
   <id>-manual-testing-section.md  the ship crewmate's Manual-testing section, written at PR-ready off its single observability judgement; fm-pr-comment.sh posts it to the PR as a comment; removed by teardown
   <id>.manual-testing-posted  fm-pr-comment.sh idempotency marker so a re-armed pr-check never double-posts the section; removed by teardown
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration

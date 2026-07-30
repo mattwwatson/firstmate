@@ -88,6 +88,8 @@ $ fm-bb-pr-poll.sh --validated bitbucket https://bitbucket.org/atlassian/atlaski
 
 The state vocabulary is exactly `OPEN`, `MERGED`, `DECLINED`, `SUPERSEDED`; only the three terminal values print (`merged`, `declined`, `superseded`), `SUPERSEDED` is never treated as merged, and everything else - including every error - is silent.
 `declined` and `superseded` wake firstmate because the watch would otherwise stay silent forever on a pull request that can no longer merge.
+Each wakes once, guarded by a `state/<id>.bb-poll-warned.declined` or `state/<id>.bb-poll-warned.superseded` marker, rather than every sweep: the verdict is terminal, so repeating it every 300 seconds adds nothing the first report did not carry.
+Neither retires the watch, because deciding that a declined pull request ends the watch is a separate call the captain owns; only `merged` retires the poll.
 
 The same bytes work in the watcher's manual sidecar-driven mode, where the published check locates its own record:
 
@@ -133,7 +135,7 @@ $ FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/false fm-bb-pr-poll.sh --validated bi
 bitbucket-auth-missing
 ```
 
-When the watcher executes the poll it wakes firstmate on that line once per task and kind, guarded by a `state/<id>.bb-poll-warned.*` marker, because the warning is news the first time and unactionable wallpaper every 300 seconds after; the marker is removed with the task's other poll artifacts at teardown.
+When the watcher executes the poll it wakes firstmate on that line once per task and kind, guarded by a `state/<id>.bb-poll-warned.*` marker, because the warning is news the first time and unactionable wallpaper every 300 seconds after; the marker is removed with the task's other poll artifacts when the poll retires, when the task is re-armed, and at teardown, so a task re-armed onto a new pull request never inherits the previous arm's suppression.
 `tests/fm-bb-merge-watch.test.sh` pins both halves of that: the first lost-credential cycle wakes and leaves the marker, and the next one stays silent.
 
 Arming is still the load-bearing refusal - a watch that could never report is never armed, and the diagnostic names the failing requirement without ever printing a credential value:

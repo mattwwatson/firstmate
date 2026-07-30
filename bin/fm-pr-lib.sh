@@ -1007,6 +1007,12 @@ fm_pr_poll_retirement_recover_one() {
   fi
   fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
     "$receipt_identity" "$receipt_hash" || return 1
+  # The .bb-poll-warned markers are the watcher's one-shot dedupe for a
+  # Bitbucket poll's terminal verdicts and its credential and visibility
+  # warnings (bin/fm-watch.sh); they are empty and carry no trust, so their
+  # removal needs no validation and must not gate this function's success.
+  rm -f "$state/$id.bb-poll-warned.auth" "$state/$id.bb-poll-warned.gone" \
+    "$state/$id.bb-poll-warned.declined" "$state/$id.bb-poll-warned.superseded" || true
   [ ! -e "$check" ] && [ ! -L "$check" ] \
     && [ ! -e "$registration" ] && [ ! -L "$registration" ] \
     && [ ! -e "$data" ] && [ ! -L "$data" ] \

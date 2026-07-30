@@ -675,6 +675,131 @@ test_watcher_warns_once_on_lost_credential() {
   pass "a lost bitbucket credential wakes firstmate once and is suppressed thereafter"
 }
 
+# A declined or superseded pull request is terminal, so the verdict is news
+# exactly once: without a marker the watcher would re-poll the same dead state
+# and wake again every cycle forever. Only merged retires a poll, so the watch
+# stays armed - ending it on a decline is a separate decision.
+assert_terminal_verdict_wakes_once() {  # <case-name> <bb-state> <verdict> <marker>
+  local name=$1 bb_state=$2 verdict=$3 marker=$4 dir state rc
+  dir=$(make_case "$name")
+  state="$dir/home/state"
+  arm_bb_fixture "$dir" task-a
+
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_BB_PR_BODY=$(pr_body "$bb_state") run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch1.out" 2> "$dir/watch1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
+  [ "$(grep -c "^check: .*: $verdict\$" "$dir/watch1.out")" -eq 1 ] \
+    || fail "the $verdict verdict did not wake firstmate exactly once"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch1.out" \
+    || fail "the armed bitbucket poll was rejected as unauthenticated"
+  assert_present "$state/task-a.bb-poll-warned.$marker" \
+    "the $verdict verdict left no one-shot marker"
+
+  # The second run must find the marker and stay silent, so nothing ends the
+  # cycle and the bounded runner times out.
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_BB_PR_BODY=$(pr_body "$bb_state") run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch2.out" 2> "$dir/watch2.err"
+  rc=$?
+  set -e
+  expect_code 124 "$rc" "$name-second-run"
+  ! grep -q "$verdict" "$dir/watch2.out" \
+    || fail "the $verdict verdict woke firstmate a second time"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch2.out" \
+    || fail "the suppressed $verdict verdict left the poll refused as unauthenticated"
+
+  assert_present "$state/task-a.check.sh" "the $verdict verdict removed the runnable check"
+  assert_present "$state/task-a.pr-poll" "the $verdict verdict removed the data sidecar"
+  assert_present "$state/task-a.pr-poll-registration" "the $verdict verdict removed the registration"
+  assert_absent "$state/task-a.pr-poll-retirement" \
+    "the $verdict verdict retired the poll instead of leaving it armed"
+  assert_no_credential_leak "$(cat "$dir/watch1.out" "$dir/watch1.err")" \
+    "the watcher $verdict output"
+}
+
+test_watcher_wakes_once_on_declined() {
+  assert_terminal_verdict_wakes_once watcher-declined-once DECLINED declined declined
+  pass "a declined bitbucket pull request wakes firstmate once and leaves the watch armed"
+}
+
+test_watcher_wakes_once_on_superseded() {
+  assert_terminal_verdict_wakes_once watcher-superseded-once SUPERSEDED superseded superseded
+  pass "a superseded bitbucket pull request wakes firstmate once and leaves the watch armed"
+}
+
+# The one-shot marker belongs to the watch that produced it, not to the task
+# id: a task re-armed onto a new pull request must be free to report its own
+# credential loss, or the new watch could neither warn nor ever report merged.
+test_rearm_clears_the_warning_marker() {
+  local dir state rc next_url
+  dir=$(make_case rearm-clears-marker)
+  state="$dir/home/state"
+  arm_bb_fixture "$dir" task-a
+
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_KEYCHAIN_SECRET=absent run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch1.out" 2> "$dir/watch1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
+  assert_present "$state/task-a.bb-poll-warned.auth" "the warning left no one-shot marker"
+
+  next_url='https://bitbucket.org/mattw_watson/hexbattle/pull-requests/13'
+  FAKE_BB_PR_BODY=$(pr_body OPEN) run_check_entry "$dir" task-a "$next_url" \
+    > "$dir/rearm.out" 2> "$dir/rearm.err" \
+    || fail "could not re-arm the bitbucket poll onto a new pull request"
+  assert_absent "$state/task-a.bb-poll-warned.auth" \
+    "the re-armed watch inherited the previous arm's suppression"
+
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_KEYCHAIN_SECRET=absent run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch2.out" 2> "$dir/watch2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher run after the re-arm did not complete cleanly (rc=$rc)"
+  grep -q '^check: .*: bitbucket-auth-missing$' "$dir/watch2.out" \
+    || fail "the re-armed watch could not report its own lost credential"
+  assert_present "$state/task-a.bb-poll-warned.auth" \
+    "the re-armed watch's warning left no one-shot marker"
+  assert_no_credential_leak "$(cat "$dir/watch2.out" "$dir/watch2.err")" \
+    "the re-armed watcher credential-warning output"
+  pass "re-arming a task clears the previous arm's one-shot marker so the new watch can warn again"
+}
+
+# Retirement removes the poll the markers belong to, so it must take them with
+# it: they are empty, carry no trust, and their removal never gates recovery.
+test_retirement_clears_the_warning_markers() {
+  local dir state rc marker
+  dir=$(make_case retirement-clears-markers)
+  state="$dir/home/state"
+  arm_bb_fixture "$dir" task-a
+  : > "$state/task-a.bb-poll-warned.auth"
+
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_BB_PR_BODY=$(pr_body MERGED) run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
+  grep -q '^check: .*: merged$' "$dir/watch.out" \
+    || fail "the merged bitbucket poll did not wake with a marker present"
+  assert_absent "$state/task-a.check.sh" "the merged bitbucket poll stayed runnable"
+  assert_absent "$state/task-a.pr-poll-retirement" "the bitbucket retirement receipt was not consumed"
+  for marker in auth gone declined superseded; do
+    assert_absent "$state/task-a.bb-poll-warned.$marker" \
+      "retirement left the $marker one-shot marker behind"
+  done
+  pass "retiring a merged bitbucket poll clears the one-shot markers that belonged to it"
+}
+
 test_migration_rebuilds_bb_and_leaves_github_untouched() {
   local dir state before after rc
   dir=$(make_case migration-template-set)
@@ -800,6 +925,10 @@ test_build_status_verdicts
 test_merge_refuses_not_green_and_dispatches_green
 test_watcher_selects_bb_template_and_wakes_merged
 test_watcher_warns_once_on_lost_credential
+test_watcher_wakes_once_on_declined
+test_watcher_wakes_once_on_superseded
+test_rearm_clears_the_warning_marker
+test_retirement_clears_the_warning_markers
 test_migration_rebuilds_bb_and_leaves_github_untouched
 test_migration_completes_over_a_bitbucket_poll
 test_watcher_discards_superseded_bb_receipt

@@ -1043,14 +1043,32 @@ while :; do
           run_check_capture "$poll_template" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
-          # A Bitbucket poll also reports a credential or visibility problem,
-          # which is news exactly once: unlike merged it does not end the
-          # task, so without a marker it would wake firstmate every cycle
-          # forever. First report per task and kind wakes; the marker is
-          # removed with the task's other poll artifacts at teardown.
+          # Every line bin/fm-bb-pr-poll.sh can print, and whether it wakes
+          # firstmate once or forever. Only merged ends the task, so every
+          # other reported line needs a marker or it becomes unactionable
+          # wallpaper every cycle forever:
+          #   merged - wakes once, and the poll retires behind that wake.
+          #   declined - wakes once, guarded by the .declined marker;
+          #     terminal, and deliberately not retired.
+          #   superseded - wakes once, guarded by the .superseded marker;
+          #     terminal, and deliberately not retired.
+          #   bitbucket-auth-missing - wakes once, guarded by the .auth marker.
+          #   bitbucket-pr-unreachable - wakes once, guarded by the .gone marker.
+          #   every other outcome is silence by design and produces no wake at
+          #     all: an invalid or unreadable sidecar, a provider or URL that
+          #     fails revalidation, missing python3, an unresolvable credential
+          #     resolver, an inconclusive forge read, and any state that is not
+          #     exactly MERGED, DECLINED or SUPERSEDED, including OPEN.
+          # That list is exhaustive for the poll's current output contract, so
+          # any new terminal verdict added to the poll must answer the same
+          # question here. The markers are removed with the task's other poll
+          # artifacts at retirement, at arm time, and at teardown, so a task
+          # re-armed onto a new pull request never inherits this suppression.
           case "$out" in
             bitbucket-auth-missing) bb_warned="$STATE/$id.bb-poll-warned.auth" ;;
             bitbucket-pr-unreachable) bb_warned="$STATE/$id.bb-poll-warned.gone" ;;
+            declined) bb_warned="$STATE/$id.bb-poll-warned.declined" ;;
+            superseded) bb_warned="$STATE/$id.bb-poll-warned.superseded" ;;
             *) bb_warned= ;;
           esac
           if [ -n "$bb_warned" ]; then

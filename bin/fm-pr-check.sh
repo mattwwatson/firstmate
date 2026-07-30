@@ -180,6 +180,14 @@ fm_pr_metadata_identity_parse "$META" || exit 1
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
+# The .bb-poll-warned markers are the watcher's one-shot dedupe for the
+# previous arm's Bitbucket poll (bin/fm-watch.sh); they are empty and carry no
+# trust, so their removal needs no validation and must not fail the arm. This
+# watch is a new pull request, whose own warnings and terminal verdicts must be
+# free to report once each.
+rm -f "$STATE/$ID.bb-poll-warned.auth" "$STATE/$ID.bb-poll-warned.gone" \
+  "$STATE/$ID.bb-poll-warned.declined" "$STATE/$ID.bb-poll-warned.superseded" || true
+
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
