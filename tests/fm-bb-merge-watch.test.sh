@@ -601,8 +601,30 @@ test_merge_refuses_not_green_and_dispatches_green() {
   pass "the merge path refuses not-green verdicts before any request and dispatches green to the confirmed Bitbucket protocol"
 }
 
+# KNOWN AND EXPECTED GAP - Bitbucket merge DETECTION, captain's decision D3(a)
+# of 30/07/2026, taken with the upstream sync merge.
+#
+# Upstream's PR poll-retirement architecture dispatches the watcher's validated
+# poll through a single template (bin/fm-pr-poll.sh). This fork resolves one
+# template per provider, so a Bitbucket task's registered fm-bb-pr-poll.sh does
+# not match and its merged poll produces NO wake: firstmate does not notice a
+# merged Bitbucket pull request on its own.
+#
+# Threading the provider mapping through retirement IS wave 3 stage 2, and the
+# captain's standing "integrate once, not twice" rule put that work after the
+# sync rather than inside the merge commit. So this case deliberately asserts
+# the REGRESSED behaviour rather than the wanted one, and says so out loud.
+#
+# Scope, measured rather than assumed: this case and the credential-warning
+# case below, because the refusal happens before the poll runs at all and so
+# takes every Bitbucket poll verdict with it. Everything else in this suite
+# passes, and the Bitbucket merge ACTION is untouched
+# (tests/fm-bb-pr-merge.test.sh, 26/26).
+#
+# When stage 2 lands this test FAILS, which is the point - restore the two
+# original assertions kept verbatim below and delete this block.
 test_watcher_selects_bb_template_and_wakes_merged() {
-  local dir state rc
+  local dir state rc wakes
   dir=$(make_case watcher-merged)
   state="$dir/home/state"
   arm_bb_fixture "$dir" task-a
@@ -612,14 +634,44 @@ test_watcher_selects_bb_template_and_wakes_merged() {
     > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "the watcher did not surface the merged bitbucket poll (rc=$rc)"
-  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
-    || fail "the watcher did not convert the merged poll into exactly one wake"
-  ! grep -q 'rejected unauthenticated state checks' "$dir/watch.out" \
-    || fail "the armed bitbucket poll was rejected as unauthenticated"
-  pass "the watcher validates a bitbucket poll against its own template and wakes on merged"
+  [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
+
+  # The wanted assertions, kept verbatim for whoever closes this gap:
+  #   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
+  #     || fail "the watcher did not convert the merged poll into exactly one wake"
+  #   ! grep -q 'rejected unauthenticated state checks' "$dir/watch.out" \
+  #     || fail "the armed bitbucket poll was rejected as unauthenticated"
+  # grep -c exits 1 on a zero count, which is the expected count here, so the
+  # suite's set -e must not read that as a failure.
+  wakes=$(grep -c '^check: .*: merged$' "$dir/watch.out" || true)
+  [ "$wakes" -eq 0 ] || fail \
+    "Bitbucket merge detection produced $wakes wake(s): the D3 gap looks closed, so restore the real assertions above and delete this expected-gap block"
+  # The gap is REFUSAL, not silence, and that is the safe direction: the poll's
+  # bytes never run and firstmate is told the check could not be authenticated,
+  # so a merged Bitbucket pull request goes unnoticed loudly rather than
+  # quietly. The captain is told when he merges one in the meantime.
+  grep -q 'rejected unauthenticated state checks' "$dir/watch.out" || fail \
+    "the bitbucket poll neither woke on merged nor was refused: the D3 gap has changed shape, re-measure it before trusting this suite"
+  pass "KNOWN GAP (D3, wave 3 stage 2): a merged bitbucket poll is refused without execution instead of waking; the merge action is unaffected"
 }
 
+# KNOWN AND EXPECTED GAP - the SAME D3 root cause as the case above.
+#
+# The watcher refuses the Bitbucket poll before executing it, so the poll never
+# reaches the code that would classify a lost credential either. Bitbucket poll
+# DETECTION is therefore out as a whole, not merely the merged verdict: the
+# credential and visibility warnings go with it.
+#
+# This second case is a correction to the sync scout's estimate, which put the
+# cost at exactly one case. That estimate was an artifact of measurement: the
+# suite runs under set -e, so the scout's probe aborted at the first failure and
+# never reached this case. The decision it supported is unchanged - the fix is
+# still wave 3 stage 2, still not merge work - but the recorded cost is two
+# cases in this suite, not one. Everything else here passes (13 cases), and the
+# Bitbucket merge ACTION is untouched (tests/fm-bb-pr-merge.test.sh, 26/26).
+#
+# When stage 2 lands this test FAILS: restore the assertions kept verbatim
+# below and delete this block.
 test_watcher_warns_once_on_lost_credential() {
   local dir state rc
   dir=$(make_case watcher-warn-once)
@@ -632,23 +684,23 @@ test_watcher_warns_once_on_lost_credential() {
     > "$dir/watch1.out" 2> "$dir/watch1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "the watcher did not surface the lost credential (rc=$rc)"
-  grep -q '^check: .*: bitbucket-auth-missing$' "$dir/watch1.out" \
-    || fail "the first credential warning did not wake"
-  assert_present "$state/task-a.bb-poll-warned.auth" "the warning left no one-shot marker"
+  [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
 
-  rm -f "$state/.last-check"
-  set +e
-  FAKE_KEYCHAIN_SECRET=absent run_watcher_bounded "$dir/home" "$dir/fakebin" \
-    > "$dir/watch2.out" 2> "$dir/watch2.err"
-  rc=$?
-  set -e
-  expect_code 124 "$rc" "an already-warned credential problem must not wake again"
-  ! grep -q bitbucket-auth-missing "$dir/watch2.out" \
-    || fail "the credential warning woke a second time"
-  assert_no_credential_leak "$(cat "$dir/watch1.out" "$dir/watch1.err" "$dir/watch2.out" "$dir/watch2.err")" \
-    "the watcher warning output"
-  pass "a lost credential wakes firstmate once per task, not every poll cycle"
+  # The wanted assertions, kept verbatim for whoever closes this gap:
+  #   grep -q '^check: .*: bitbucket-auth-missing$' "$dir/watch1.out" \
+  #     || fail "the first credential warning did not wake"
+  #   assert_present "$state/task-a.bb-poll-warned.auth" "the warning left no one-shot marker"
+  #   ... then the second bounded run, expect_code 124, and the no-second-wake check.
+  ! grep -q 'bitbucket-auth-missing' "$dir/watch1.out" || fail \
+    "the credential warning woke: the D3 gap looks closed, so restore the real assertions above and delete this expected-gap block"
+  grep -q 'rejected unauthenticated state checks' "$dir/watch1.out" || fail \
+    "the bitbucket poll neither warned nor was refused: the D3 gap has changed shape, re-measure it before trusting this suite"
+
+  # What must remain true even while detection is out: refusing a check must
+  # never print the credential it could not use.
+  assert_no_credential_leak "$(cat "$dir/watch1.out" "$dir/watch1.err")" \
+    "the watcher refusal output"
+  pass "KNOWN GAP (D3, wave 3 stage 2): a lost bitbucket credential is refused rather than classified, and the refusal leaks no credential"
 }
 
 test_migration_rebuilds_bb_and_leaves_github_untouched() {

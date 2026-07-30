@@ -45,6 +45,8 @@
 #
 # No grant ever covers destructive, irreversible, or security-sensitive decisions,
 # and neither merge grant ever covers a red PR; all of those escalate to the captain.
+# AGENTS.md section 7 is the single owner of authority exceptions, including
+# ask-user contract expansion and the stronger captain boundaries.
 #
 # persona (@<slug>, at most one per line) = which of the captain's git
 # identities the project uses. bin/fm-persona.sh owns detection, application,

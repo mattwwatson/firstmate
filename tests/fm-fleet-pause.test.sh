@@ -58,8 +58,30 @@ make_case() {  # <name>
   # case that wants the backend to report a CONFIDENT dead agent instead sets
   # FM_FAKE_AGENT_DEAD, and the pane_current_command probe then answers with a
   # bare shell, exactly as a real pane whose agent has exited does.
+  #
+  # list-windows must be answered too, because the agent-state classifier
+  # (bin/backends/tmux.sh) inventories the session BEFORE probing the pane and
+  # reads an omitted window as an authoritative `missing`. A fake that stayed
+  # silent here would report every endpoint missing and collapse the two cases
+  # above into one, which is exactly the distinction these tests exist to draw.
+  # The window is therefore always listed as present: these cases are about a
+  # pane whose agent state cannot be read, not about a vanished window.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+    exit 0
+  fi
+  # Every task that has a meta has its window, so the inventory never invents an
+  # authoritative absence a case did not ask for.
+  for m in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
+    [ -e "$m" ] || continue
+    b=${m##*/}
+    printf 'fm-%s\n' "${b%.meta}"
+  done
+  exit 0
+fi
 if [ "${1:-}" = display-message ]; then
   target=
   fmt=

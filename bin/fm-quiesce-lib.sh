@@ -246,17 +246,29 @@ FM_QUIESCE_GONE_PROBES=2
 # earlier readings:
 #   live      the recorded endpoint answered, or the backend's agent probe reads
 #             `alive`.
-#   gone      the backend's own agent probe reads `dead`. This is the single
-#             CONFIDENT signal, and the only one a caller that does not run
-#             repeated verify passes of its own may ever act on.
+#   gone      the backend's own agent probe reads `dead`, meaning the endpoint
+#             exists and confidently has no agent. This is the single CONFIDENT
+#             signal, and the only one a caller that does not run repeated
+#             verify passes of its own may ever act on.
 #   unproven  anything else - the endpoint did not answer, but nothing here
 #             proves the worker is gone rather than momentarily unreadable.
 # The distinction exists because acting on absence means reaching into work
-# firstmate may not own. bin/fm-backend.sh's fm_backend_agent_alive states the
-# house rule this implements: an unknown or unreadable reading must NEVER on its
-# own license an action, precisely so a momentary read glitch cannot be mistaken
-# for a death. `unproven` is therefore not a quiet pass - it holds the fleet
-# unsafe until the reading resolves one way or the other.
+# firstmate may not own. bin/fm-backend.sh's fm_backend_agent_state is the
+# recovery-grade classifier this reads, and only its `alive` and `dead` states
+# are proven here. `missing`, `ambiguous`, `unreadable`, and `unverified` are
+# all unproven, including `missing`: it licenses RECOVERY, which relaunches a
+# worker, but this decision aborts a validation run that a still-live worker may
+# be driving, so it demands the stronger evidence. A genuinely absent worker
+# still reaches `gone` through the repeated-verify path below rather than on one
+# read.
+# Deliberately NOT fm_backend_agent_alive: that backward-compatible wrapper
+# collapses `missing` into `dead`, which would make a single unreadable probe
+# read as a confident death and let a pause report the fleet safe to close while
+# a worker was still running.
+# The house rule this implements is that an unknown or unreadable reading must
+# NEVER on its own license an action, precisely so a momentary read glitch
+# cannot be mistaken for a death. `unproven` is therefore not a quiet pass - it
+# holds the fleet unsafe until the reading resolves one way or the other.
 #
 # A live reading clears the absence run below, because it is proof of life
 # wherever it is seen. It never EXTENDS that run: only a repeated verify pass may
@@ -271,7 +283,7 @@ fm_quiesce_worker_confident_presence() {  # <state-dir> <meta> <id>
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
   backend=$(fm_backend_of_meta "$meta")
-  reading=$(fm_backend_agent_alive "$backend" "${target:-$window}" 2>/dev/null)
+  reading=$(fm_backend_agent_state "$backend" "${target:-$window}" 2>/dev/null)
   case "$reading" in
     dead) printf 'gone'; return 0 ;;
     alive) fm_quiesce_probe_reset "$state" "$id"; printf 'live'; return 0 ;;

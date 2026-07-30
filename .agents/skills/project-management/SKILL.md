@@ -39,7 +39,7 @@ The optional autonomy grants change routine approval authority but do not change
 `merge-unobservable` suits a project whose work is often invisible to the captain: firstmate merges a green PR itself only when the crewmate that built the change declared it has nothing the captain could hand-test, and everything he could see or exercise still waits for him.
 Offer it when the captain says he is a merge bottleneck for work he cannot review by eye, and name `merge` instead when he means any green PR.
 Confirm which grants the captain intends rather than assuming a single posture, default them all off, and add them only on the captain's explicit instruction.
-Destructive, irreversible, and security-sensitive decisions still require captain approval under every combination of grants.
+`AGENTS.md` section 7 owns the complete authority boundary and its exceptions, including destructive, irreversible, and security-sensitive decisions, which require captain approval under every combination of grants.
 
 ## Add or clone an existing project
 
