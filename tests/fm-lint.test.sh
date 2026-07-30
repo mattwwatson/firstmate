@@ -267,7 +267,11 @@ test_source_graph_boundaries_keep_every_owner() {
     grep -q '^[[:space:]]*# shellcheck source=bin/' "$file" || continue
     production_context_tests="${production_context_tests}$(basename "$file")|"
   done
-  [ "$production_context_tests" = 'fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
+  # Every entry here dot-sources a production owner to call its functions or
+  # read its variables directly; the fork's four (bb-merge-watch, fleet-pause,
+  # merge-decision, watch-false-wedge) do the same against fm-pr-lib.sh,
+  # fm-classify-lib.sh, and the watcher's triage functions.
+  [ "$production_context_tests" = 'fm-backend-herdr.test.sh|fm-bb-merge-watch.test.sh|fm-daemon.test.sh|fm-fleet-pause.test.sh|fm-merge-decision.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|fm-watch-false-wedge.test.sh|' ] \
     || fail "only callback/variable interop tests may retain production source context: $production_context_tests"
   pass "dispatcher, adapters, production owner, and tests have explicit lint boundaries"
 }
