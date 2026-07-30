@@ -13,7 +13,7 @@ The credential and visibility warnings recorded below reach firstmate too, once 
 The 30/07/2026 upstream sync merge had left that broken for one release, because the watcher's dispatch and the retirement recovery family validated every armed poll against the single `bin/fm-pr-poll.sh` name instead of the per-provider template selected under "Why Bitbucket has its own byte-static poll" below.
 An armed Bitbucket poll could not match, so the watcher refused it as an unauthenticated state check without executing it, and no Bitbucket verdict - `merged` or warning - could reach firstmate.
 That refusal carried no one-shot dedupe, unlike the credential warning guarded by a `state/<id>.bb-poll-warned.*` marker, so a rejected Bitbucket check re-woke firstmate on every slow sweep indefinitely, with all rejected checks batched into a single wake per sweep.
-Arming a Bitbucket watch during that release was therefore not harmless, and any note recording it as harmless was wrong.
+Arming a Bitbucket watch during that release was therefore not harmless: it cost a recurring wake that reported nothing actionable.
 
 Retirement recovery reads the script directory rather than one template path, because a receipt authorizes its own removals from the hashes and identities it recorded, and the directory is needed only to select a superseded receipt's replacement poll.
 That second half is not cosmetic: without it, publishing a Bitbucket receipt would have created a state nothing could clear, and every watcher start would reject it before any check was allowed to run.

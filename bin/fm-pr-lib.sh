@@ -64,7 +64,9 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 # Consumed by bin/fm-pr-check.sh, bin/fm-watch.sh, and
-# bin/fm-pr-check-migrate.sh after the template-selection helpers below set it.
+# bin/fm-pr-check-migrate.sh, and inside this library by
+# fm_pr_poll_retirement_discard_obsolete, after the template-selection helpers
+# below set it.
 # shellcheck disable=SC2034
 FM_PR_POLL_TASK_TEMPLATE=
 FM_PR_POLL_SNAPSHOT_ID=
