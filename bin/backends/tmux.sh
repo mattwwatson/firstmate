@@ -154,9 +154,15 @@ fm_backend_tmux_current_command() {  # <target>
 # the empirical basis. Tmux silently falls back to the active window when a
 # named target is absent, so the exact recorded window must appear in a
 # successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
-# `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
+# `missing` means PROVEN ABSENT, so it is reserved for the answers where tmux
+# itself spoke about the recorded target: an omitted window in a successful
+# inventory, `can't find session:`, or `no server running on <socket>`.
+# Everything else is `unreadable`, including the `error connecting to <socket>`
+# forms, which are facts about the CALLER's socket reachability ($TMUX,
+# TMUX_TMPDIR, -S) rather than about the endpoint - a restarting server leaves a
+# stale socket answering ECONNREFUSED, and a command aimed at the wrong socket
+# fails identically while every pane is still alive. So a transient tmux problem
+# never licenses a duplicate, and never licenses reaping a live worker's run.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
   case "$target" in
@@ -173,7 +179,7 @@ fm_backend_tmux_agent_state() {  # <target>
   fi
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      *"can't find session:"*|*"no server running on "*)
         printf 'missing'
         ;;
       *)

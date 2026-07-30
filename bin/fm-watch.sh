@@ -604,12 +604,16 @@ pause_declared_class() {  # <window> <key> <task>
   fi
   # Only a CONFIDENTLY dead agent licenses skipping the one live-agent sighting:
   # with the agent gone there is nothing left for that sighting to reveal.
-  # Read fm_backend_agent_state, not the fm_backend_agent_alive wrapper, because
-  # that wrapper collapses `missing` into `dead` - so an endpoint that merely
-  # could not be inventoried would suppress the sighting and hide a paused crew
-  # the captain still needs to see. Every other state surfaces, which is the
-  # safe direction: showing one extra sighting costs a wake, hiding one costs
-  # the captain the pause.
+  # This is deliberately stricter than the fleet pause's rule, which also acts on
+  # `missing`. `missing` is proof the endpoint is absent, but absence is not an
+  # answer to the question asked here - whether the captain still needs to see
+  # this pause - so this consumer declines to act on it, and `ambiguous`,
+  # `unreadable`, and `unverified` are failed reads that prove nothing either way.
+  # Every state but `dead` therefore surfaces, which is the safe direction:
+  # showing one extra sighting costs a wake, hiding one costs the captain the
+  # pause. Read fm_backend_agent_state, not the fm_backend_agent_alive wrapper,
+  # because that wrapper folds `missing` in with `dead` and this decision needs
+  # them apart.
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
   [ "$agent_state" = dead ] && { printf 'paused'; return; }
   printf 'surface'

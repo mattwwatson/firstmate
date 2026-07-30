@@ -878,12 +878,17 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
-# successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# Only `dead` and `missing` license recovery. `missing` is PROVEN ABSENT and
+# nothing weaker: an adapter may only return it when the backend itself answered
+# about the recorded target - a successful inventory that omits the exact window,
+# or a definitive "this session/server does not exist". A failure that describes
+# the CALLER's own reach instead - an unreachable or stale control socket, a
+# wrong socket path, a permission refusal - is `unreadable`, because the endpoint
+# and its agent may be perfectly alive behind it. The tmux adapter draws that
+# line at its `error connecting to <socket>` answers; the Herdr adapter reuses
+# its husk classifier. Zellij remains unverified because its secondmate ghost-tab
+# and agent-process recovery path has not been empirically validated. Orca and
+# cmux do not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

@@ -82,7 +82,8 @@ case "\${1:-}" in
       missing) printf '%s\n' main ; exit 0 ;;
       missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
       missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
-      missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
+      socket-absent) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
+      socket-refused) printf '%s\n' "error connecting to /tmp/tmux-test/default (Connection refused)" >&2; exit 1 ;;
       present) printf '%s\n' fm-sm1 ; exit 0 ;;
       *) printf '%s\n' "permission denied" >&2; exit 1 ;;
     esac
@@ -121,17 +122,31 @@ test_tmux_agent_state_classifies() {
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:fm-sm1' "$ROOT")" = dead ] \
     || fail "the compatibility view should treat an authoritatively missing target as dead"
 
-  for inventory in present unreadable; do
+  # An `error connecting to <socket>` answer is a fact about the CALLER's reach,
+  # not about the recorded endpoint: a restarting server leaves a stale socket
+  # answering ECONNREFUSED, and a command aimed at the wrong TMUX_TMPDIR fails
+  # the same way while every pane is alive. Reading absence from it would let one
+  # such answer relaunch a second agent over a live one, and let the fleet pause
+  # reap a live worker's validation run on a single read.
+  for inventory in present unreadable socket-absent socket-refused; do
     fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
     [ "$out" = unreadable ] || fail "a $inventory inventory case should stay unreadable, got '$out'"
   done
 
-  for inventory in missing-session missing-server missing-socket; do
+  # The other side of that boundary: tmux answering about the target itself is
+  # proof, and the lid-close and reboot cases both land here, which is what lets
+  # bin/fm-fleet-resume.sh close a pause record nobody is left to be released
+  # from.
+  for inventory in missing-session missing-server; do
     fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
     [ "$out" = missing ] || fail "a confirmed $inventory inventory failure should classify as missing, got '$out'"
   done
+
+  fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-socket-absent-view" socket-absent)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:fm-sm1' "$ROOT")" = unknown ] \
+    || fail "the compatibility view must not report an unreachable socket as a death"
 
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
@@ -248,8 +263,10 @@ SH
 }
 
 # make_liveness_tmux <dir>: a controllable tmux stub. FM_TEST_PANE_CMD may be
-# a foreground command, `missing` (readable inventory omits the window), or
-# `unreadable` (both pane and inventory reads fail).
+# a foreground command, `missing` (readable inventory omits the window),
+# `unreadable` (both pane and inventory reads fail), or `socket-refused` (the
+# control socket answers ECONNREFUSED, as a restarting server's stale socket
+# does, which says nothing about whether the pane is alive behind it).
 make_liveness_tmux() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -265,6 +282,7 @@ case "${1:-}" in
           case "$mode" in
             missing) printf '%s\n' node; exit 0 ;;
             unreadable) exit 1 ;;
+            socket-refused) printf '%s\n' "error connecting to /tmp/tmux-1/default (Connection refused)" >&2; exit 1 ;;
             *) printf '%s\n' "$mode"; exit 0 ;;
           esac
           ;;
@@ -276,6 +294,7 @@ case "${1:-}" in
     case "$mode" in
       missing) printf '%s\n' main; exit 0 ;;
       unreadable) exit 1 ;;
+      socket-refused) printf '%s\n' "error connecting to /tmp/tmux-1/default (Connection refused)" >&2; exit 1 ;;
       *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
     esac
     ;;
@@ -440,6 +459,25 @@ test_sweep_never_acts_on_transient_unreadability() {
   pass "sweep: transient target unreadability never licenses recovery"
 }
 
+test_sweep_never_acts_on_an_unreachable_control_socket() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-socket-refused)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # A stale socket left by a restarting server answers ECONNREFUSED for every
+  # call, and so does a command aimed at the wrong TMUX_TMPDIR - while the real
+  # server and its panes are still alive. Reading that as an absent endpoint
+  # would start a second supervisor over a live one.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" socket-refused "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: endpoint probe unreadable" \
+    "an unreachable control socket must read as unproven, not as an absent endpoint"
+  [ ! -s "$log" ] || fail "an unreachable control socket must never trigger kill or relaunch: $(cat "$log")"
+  pass "sweep: an unreachable control socket never licenses a duplicate supervisor"
+}
+
 test_sweep_reports_missing_endpoint_relaunch_failure() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-failure)
@@ -536,6 +574,7 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
+test_sweep_never_acts_on_an_unreachable_control_socket
 test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
