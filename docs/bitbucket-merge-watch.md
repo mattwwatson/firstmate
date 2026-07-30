@@ -5,6 +5,15 @@ Every live command below was run on 2026-07-22 against the live Bitbucket Cloud 
 The stage-4 merge action section is dated where it appears and its evidence is stubbed, for the reason recorded there.
 The stubbed no-network coverage for the same behavior lives in `tests/fm-bb-merge-watch.test.sh`.
 
+## Current status: the watcher does not execute the Bitbucket poll
+
+Since the 30/07/2026 upstream sync merge, the watcher validates every task poll against the single `bin/fm-pr-poll.sh` template that upstream's poll-retirement subsystem is keyed on, while this fork resolves one template per provider.
+An armed Bitbucket poll no longer matches there, so the watcher refuses it as an unauthenticated state check without executing it: a merged Bitbucket pull request produces no `merged` wake, and the credential and visibility warnings recorded below never reach firstmate either, because the poll never runs to print them.
+The refusal is loud rather than silent - the wake firstmate receives is `check: rejected unauthenticated state checks:` naming the task's own `<id>.check.sh` path, instead of a merge - so a merged pull request goes unnoticed by the watch rather than being quietly assumed unmerged.
+Nothing else in this record changed: arming still verifies the pull request and still refuses rather than arming a watch that could never report, the poll bytes still work when run directly as shown below, `bin/fm-bb-build-status.sh` still reads build verdicts, and the stage-4 merge action is untouched.
+Closing the gap means threading the per-provider template through retirement, which is deliberately separate work (captain's decision D3(a), taken with the sync so the merge integrated once rather than twice).
+Until it lands, a merged Bitbucket pull request is something the captain notices, not the watch; the two expected-gap cases in `tests/fm-bb-merge-watch.test.sh` assert the regressed behavior on purpose and fail loudly once the follow-up closes it.
+
 ## Versions
 
 ```
@@ -27,7 +36,8 @@ Reading them needs only firstmate's read-only credential, and the poll never fal
 
 GitHub and GitLab share `bin/fm-pr-poll.sh`, which shells out to their credential-owning CLIs (`gh`, `glab`).
 Bitbucket has no such CLI, so its poll resolves a credential through `bin/fm-forge-credential.sh` and parses JSON with python3 - machinery the audited gh/glab poll must not absorb, which is why `bin/fm-bb-pr-poll.sh` is a separate byte-static program.
-The registration record's provider tag selects which template a task's check must match byte-for-byte and which program the watcher executes; `fm_pr_poll_template_for_provider` in `bin/fm-pr-lib.sh` is the single owner of that mapping, and every trust property still rests on the unchanged artifact validation against the selected template.
+The registration record's provider tag selects which template a task's check must match byte-for-byte when it is armed, rebuilt, or migrated; `fm_pr_poll_template_for_provider` in `bin/fm-pr-lib.sh` is the single owner of that mapping, and every trust property still rests on the unchanged artifact validation against the selected template.
+The watcher's own dispatch no longer consults that mapping, which is the gap recorded under "Current status" above.
 Existing GitHub and GitLab polls therefore keep their bytes, their v2 registrations, and their armed state through this change; `tests/fm-bb-merge-watch.test.sh` asserts a canonical GitHub poll rides through the migration byte-identical.
 
 ## End to end: arming and polling a real pull request
@@ -59,7 +69,7 @@ pr_head=68443e3d6f3d12efa5dbb361aab24c768df5240e
 
 The `pr_head` line is why the expansion step exists: the pull-request object abbreviates `source.commit.hash` to 12 characters (`68443e3d6f3d`), `fm_pr_head_valid` rightly refuses anything shorter than a full commit id, and one deterministic read of `/2.0/repositories/{ws}/{repo}/commit/{hash}` returns the full 40-character id recorded above.
 
-Running the poll the way the watcher does, against each state - an empty result means the poll stayed silent and produced no wake:
+Running the poll with the validated arguments the watcher's dispatch passes it, against each state - an empty result means the poll stayed silent and produced no wake:
 
 ```
 $ fm-bb-pr-poll.sh --validated bitbucket https://bitbucket.org/atlassian/atlaskit-mk-2/pull-requests/5157 bitbucket.org atlassian/atlaskit-mk-2 5157
@@ -103,7 +113,7 @@ A statuses hiccup at arm time surfaces `build: unknown` without unarming the mer
 The merge path refuses anything not provably green before any merge request exists, naming the failing build; `tests/fm-bb-merge-watch.test.sh` pins those refusals and asserts no request reaches the merge endpoint until the verdict passes.
 A green pull request proceeds into the stage-4 merge action below.
 
-## A missing credential produces one wake, never a false merge and never a silent never-merge
+## A missing credential is classified, never a false merge and never a silent never-merge
 
 The GitHub and GitLab polls treat every failure as silence, which is correct for them: a missing CLI is refused at arm time, and nothing can quietly revoke their credentials between polls.
 A Bitbucket credential can be revoked, expire, or lose its keychain entry after arming, and pure silence would mean merge detection quietly never fires - the exact failure the arm-time verification exists to prevent.
@@ -116,7 +126,8 @@ $ FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/false fm-bb-pr-poll.sh --validated bi
 bitbucket-auth-missing
 ```
 
-The watcher wakes firstmate on that line once per task and kind, guarded by a `state/<id>.bb-poll-warned.*` marker, because the warning is news the first time and unactionable wallpaper every 300 seconds after; the marker is removed with the task's other poll artifacts at teardown.
+When the watcher executes the poll it wakes firstmate on that line once per task and kind, guarded by a `state/<id>.bb-poll-warned.*` marker, because the warning is news the first time and unactionable wallpaper every 300 seconds after; the marker is removed with the task's other poll artifacts at teardown.
+That consumption is dormant while the dispatch gap under "Current status" stands: the poll is refused before it can classify anything, so neither the warning line nor the marker is produced.
 
 Arming is still the load-bearing refusal - a watch that could never report is never armed, and the diagnostic names the failing requirement without ever printing a credential value:
 

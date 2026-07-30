@@ -13,6 +13,25 @@ set -u
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
 
+# Insert <line> immediately after the first line matching <pattern>, in place.
+#
+# Deliberately NOT `sed '/pattern/a\'`: BSD sed (every macOS box, and the
+# macos-stock-bash CI job) SWALLOWS the line following the append. Editing a
+# backlog fixture that way silently ate the blank line before "## Queued", and a
+# second edit then glued the appended item onto the "## Queued" heading itself -
+# destroying the section, so a queued captain hold stopped parsing as queued and
+# the projection under test was fed a corrupt fixture rather than the intended
+# one. GNU sed does not do this, so the suite passed on Linux and failed on
+# macOS for a reason that had nothing to do with the code under test.
+backlog_insert_after() {  # <file> <pattern> <line>
+  local file=$1 pattern=$2 line=$3
+  awk -v pat="$pattern" -v ins="$line" '
+    { print }
+    !done && index($0, pat) { print ins; done = 1 }
+  ' "$file" > "$file.next"
+  mv "$file.next" "$file"
+}
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 # A fakebin that stubs the local tools the canonical snapshot may reach for, plus a
@@ -1664,10 +1683,8 @@ EOF
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
-  sed '/unreadable-child/a\
-- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
-  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+  backlog_insert_after "$sshhip/data/backlog.md" 'unreadable-child' \
+    '- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)'
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -1703,10 +1720,8 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
-  sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
-  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+  backlog_insert_after "$sshhip/data/backlog.md" '## In flight' \
+    '- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)'
 
   fm_write_meta "$wheel/state/production-observation.meta" \
     "window=firstmate:fm-production-observation" "worktree=$wheel/projects/worker" "project=wheelhouse" \
@@ -1863,8 +1878,8 @@ EOF
 
 # The /bearings skill is the one owner of the four-section chat-response contract.
 # Assert it states exactly the four fixed sections in order, each with its explicit
-# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
-# materially shorter than and links to the report file.
+# empty-state sentence, documents the At Anchor exclusion, and keeps file-mode links
+# inside the four-section digest.
 test_chat_contract_four_sections() {
   local skill body headings report_headings expected
   skill="$ROOT/.agents/skills/bearings/SKILL.md"
@@ -1885,8 +1900,8 @@ test_chat_contract_four_sections() {
   assert_contains "$(cat "$skill")" 'Never read an earlier `data/status-report-*.md`' "prior reports must not influence current output"
   assert_contains "$(cat "$skill")" "bounded current recent-completions baseline" "Recently Landed must be a current baseline"
   assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
-  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
-  assert_contains "$body" "links to" "the chat must link to the report file"
+  assert_contains "$body" "materially shorter" "the file-mode chat must be materially shorter than the report file"
+  assert_contains "$body" "report path or link" "file mode must link the report from inside the digest"
   pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
 }
 

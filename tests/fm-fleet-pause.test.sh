@@ -58,8 +58,40 @@ make_case() {  # <name>
   # case that wants the backend to report a CONFIDENT dead agent instead sets
   # FM_FAKE_AGENT_DEAD, and the pane_current_command probe then answers with a
   # bare shell, exactly as a real pane whose agent has exited does.
+  #
+  # list-windows must be answered too, because the agent-state classifier
+  # (bin/backends/tmux.sh) inventories the session BEFORE probing the pane and
+  # reads an omitted window as an authoritative `missing`. A fake that stayed
+  # silent here would report every endpoint missing and collapse the two cases
+  # above into one, which is exactly the distinction these tests exist to draw.
+  # The window is therefore always listed as present by default: those cases are
+  # about a pane whose agent state cannot be read, not about a vanished window.
+  #
+  # FM_FAKE_TMUX_NO_SERVER is the OTHER fact - the lid-close case, where the
+  # session or the whole server is gone. Real tmux answers that authoritatively
+  # on stderr with a non-zero exit and every call fails the same way, which is
+  # proof of absence rather than a failed read, so the classifier reads it as
+  # `missing`. It is set as a flag file so a case can lose the server mid-run.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ -e "${FM_FAKE_TMUX_NO_SERVER:-/nonexistent}" ]; then
+  printf 'no server running on /tmp/tmux-501/default\n' >&2
+  exit 1
+fi
+if [ "${1:-}" = list-windows ]; then
+  if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+    exit 0
+  fi
+  # Every task that has a meta has its window, so the inventory never invents an
+  # authoritative absence a case did not ask for.
+  for m in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
+    [ -e "$m" ] || continue
+    b=${m##*/}
+    printf 'fm-%s\n' "${b%.meta}"
+  done
+  exit 0
+fi
 if [ "${1:-}" = display-message ]; then
   target=
   fmt=
@@ -191,6 +223,7 @@ run_fleet() {  # <dir> <script> [args...]
     FM_FAKE_ENDPOINT_DEAD="${FM_FAKE_ENDPOINT_DEAD:-/nonexistent}" \
     FM_FAKE_DEAD_DIR="${FM_FAKE_DEAD_DIR:-}" \
     FM_FAKE_AGENT_DEAD="${FM_FAKE_AGENT_DEAD:-/nonexistent}" \
+    FM_FAKE_TMUX_NO_SERVER="${FM_FAKE_TMUX_NO_SERVER:-/nonexistent}" \
     FM_FAKE_SEND_FAILS="${FM_FAKE_SEND_FAILS:-/nonexistent}" \
     "$script" "$@" )
 }
@@ -718,6 +751,61 @@ test_resume_reruns_never_accumulate_into_a_gone_verdict() {
   pass "re-running the resume cannot stack unreadable probes into a gone worker"
 }
 
+# Proven absent and could-not-tell are two different facts, and this is where the
+# pause and the resume disagree about them if they are conflated. The resume acts
+# ONLY on the confident reading, so an absence it cannot prove becomes exit 4 -
+# and exit 4 asks the captain to re-run once the worker is reachable, which a
+# killed tmux server never becomes. The pause, meanwhile, reaps a validation run
+# on that same reading, so a read that merely FAILED must never reach it.
+test_proven_absence_is_not_the_same_fact_as_an_unreadable_read() {
+  local dir out rc
+
+  # (a) The lid-close case. The tmux server is gone, so every probe answers
+  # authoritatively rather than failing: that is proof nobody is left to release,
+  # and the record must be closed here or no command ever could.
+  dir=$(make_case absent-endpoint)
+  install_fake_no_mistakes "$dir/fakebin"
+  install_fake_gh "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  run_fleet "$dir" "$PAUSE" --reason "lid" >/dev/null 2>&1
+  confirm "$dir" task-a
+  touch "$dir/no-server"
+  export FM_FAKE_TMUX_NO_SERVER="$dir/no-server"
+  out=$(run_fleet "$dir" "$RESUME" 2>&1)
+  rc=$?
+  unset FM_FAKE_TMUX_NO_SERVER
+  expect_code 0 "$rc" "an authoritatively absent endpoint must not deadlock the resume at exit 4"
+  assert_contains "$out" "task-a: worker is gone" \
+    "an authoritatively absent worker must read as gone, not as still waiting"
+  assert_not_contains "$out" "STILL WAITING" \
+    "a worker whose session is proven gone must not be reported as waiting"
+  assert_absent "$dir/state/.fleet-paused" \
+    "a pause nobody is left to be released from must not survive a lid close"
+
+  # (b) The same shape of absence, but only a FAILED read: the server answers,
+  # the window is listed, and just the pane probe fails. The worker may be alive
+  # and mid-step driving this run, so nothing may be reaped and the fleet stays
+  # unsafe until the reading resolves.
+  dir=$(make_case absent-vs-unreadable)
+  install_fake_no_mistakes "$dir/fakebin"
+  write_task_meta "$dir" task-a
+  printf 'run:\n  id: "R1"\n  branch: fm/task-a\n  status: ci\n' > "$dir/nm-status"
+  touch "$dir/dead"
+  : > "$dir/nm.log"
+  export FM_FAKE_NM_STATUS="$dir/nm-status" FM_FAKE_ENDPOINT_DEAD="$dir/dead" \
+    FM_FAKE_NM_LOG="$dir/nm.log"
+  out=$(run_fleet "$dir" "$PAUSE" --reason "lid" 2>&1)
+  rc=$?
+  unset FM_FAKE_NM_STATUS FM_FAKE_ENDPOINT_DEAD FM_FAKE_NM_LOG
+  expect_code 3 "$rc" "an unreadable endpoint must still hold the fleet unsafe"
+  assert_contains "$out" "liveness could not be established" \
+    "an unreadable read must stay unproven rather than borrow the absent verdict"
+  assert_no_grep "abort" "$dir/nm.log" \
+    "a read that only failed must never reap a live worker's validation run"
+
+  pass "an authoritatively absent endpoint is proven gone, while an unreadable one is not"
+}
+
 test_resume_releases_a_worker_whose_quiesce_refused() {
   local dir out rc
   dir=$(make_case resume-unconfirmed)
@@ -1138,6 +1226,7 @@ test_resume_keeps_the_record_for_a_worker_it_could_not_release
 test_resume_completes_when_a_paused_workers_window_is_gone
 test_resume_rerun_does_not_resteer_a_released_worker
 test_resume_reruns_never_accumulate_into_a_gone_verdict
+test_proven_absence_is_not_the_same_fact_as_an_unreadable_read
 test_resume_releases_a_worker_whose_quiesce_refused
 test_resume_works_from_a_record_with_no_task_rows
 test_pause_check_between_resumes_does_not_resteer

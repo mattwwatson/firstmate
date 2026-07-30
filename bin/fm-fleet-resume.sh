@@ -47,11 +47,25 @@
 # WHAT COUNTS AS GONE HERE, and why it is stricter than the pause's rule. This
 # command runs once on demand, so it acts only on the confident reading -
 # bin/fm-quiesce-lib.sh's fm_quiesce_worker_confident_presence, which is `gone`
-# only when the backend's own agent probe says so. It must NOT use the pause's
-# repeated-verify-pass reading: that one counts consecutive absences, and since
-# exit 4 asks the captain to run this command again, an endpoint that is merely
-# unreadable would supply its own second absence across two runs and manufacture
-# the `gone` verdict that clears the record out from under a live worker.
+# only when the backend's own agent probe PROVES there is no agent. It must NOT
+# use the pause's repeated-verify-pass reading: that one counts consecutive
+# absences, and since exit 4 asks the captain to run this command again, an
+# endpoint that is merely unreadable would supply its own second absence across
+# two runs and manufacture the `gone` verdict that clears the record out from
+# under a live worker.
+#
+# PROVEN ABSENT IS NOT "COULD NOT TELL", and this command is where conflating
+# them bites hardest. Because it consumes ONLY the confident reading, every
+# absence it cannot prove becomes exit 4 - so a state that is genuine proof of
+# absence must be read as proof. The lid-close case is the one to hold in mind: a
+# killed tmux server or session answers authoritatively, the confident reading
+# calls it `gone`, and this command closes the pause. Were that authoritative
+# absence classified as merely unproven, this command would report exit 4 and ask
+# the captain to re-run once the worker is reachable - and a killed session never
+# becomes reachable, so the record could never be closed by any command, which is
+# exactly what the exception below exists to prevent. A read that FAILED or
+# contradicted itself is a different fact and stays unproven, so the guarantee
+# above is untouched.
 #
 # WHY IT CHECKS FIRST. Resuming into a network that is not really back recreates
 # the failure the pause exists to prevent: pushes, forge calls, and no-mistakes
