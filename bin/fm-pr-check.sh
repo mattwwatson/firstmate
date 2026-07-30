@@ -48,7 +48,7 @@ fi
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
-fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
+fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR" || {
   echo "error: pending PR poll retirement could not be validated" >&2
   exit 1
 }
@@ -152,6 +152,22 @@ fm_pr_poll_template_for_provider "$SCRIPT_DIR" "$PROVIDER" \
   || { echo "error: invalid PR check request" >&2; exit 2; }
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$FM_PR_POLL_TASK_TEMPLATE" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
+
+# The .bb-poll-warned markers are the watcher's one-shot dedupe for the
+# previous arm's Bitbucket poll (bin/fm-watch.sh); they are empty and carry no
+# trust, so their removal needs no validation and must not fail the arm. This
+# watch is a new pull request, whose own warnings and terminal verdicts must be
+# free to report once each.
+# The clearing must stay AHEAD of the metadata commit below. If metadata already
+# names the new pull request while a previous arm's marker survives - an arm
+# interrupted between the two - that arm's suppression applies to the new watch
+# and its first credential or visibility warning is never reported, the
+# never-reporting watch arming exists to prevent. The asymmetry makes this order
+# the safe one: clearing early costs at worst one DUPLICATE warning if the arm
+# then fails and the previous watch stays armed, while clearing late can cost a
+# MISSED warning, and a duplicate is recoverable where a miss is not.
+rm -f "$STATE/$ID.bb-poll-warned.auth" "$STATE/$ID.bb-poll-warned.gone" \
+  "$STATE/$ID.bb-poll-warned.declined" "$STATE/$ID.bb-poll-warned.superseded" || true
 
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1

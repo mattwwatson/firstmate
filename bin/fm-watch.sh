@@ -958,7 +958,7 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
-if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR"; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
@@ -1017,24 +1017,58 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+        # Which byte-static poll this task's check must equal comes from its own
+        # registration's provider tag (bin/fm-pr-lib.sh owns the mapping), not
+        # from a fixed name: GitHub and GitLab share fm-pr-poll.sh while
+        # Bitbucket has its own. Selection is the ONLY thing the tag decides -
+        # the snapshot below still validates the published check byte-for-byte
+        # against whatever was selected, so a doctored tag can at worst pick a
+        # template the check then fails to match. A task whose template cannot
+        # be selected has no armed poll to run and falls through to the
+        # custom-check path exactly as before.
+        poll_template=
+        if fm_pr_poll_task_template "$STATE" "$id" "$SCRIPT_DIR"; then
+          poll_template=$FM_PR_POLL_TASK_TEMPLATE
+        fi
+        if [ -n "$poll_template" ] \
+          && fm_pr_poll_snapshot_capture "$STATE" "$id" "$poll_template"; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          # The program executed is the same variable the snapshot validated, so
+          # the watcher can never run bytes it did not just prove canonical.
+          run_check_capture "$poll_template" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
-          # A Bitbucket poll also reports a credential or visibility problem,
-          # which is news exactly once: unlike merged it does not end the
-          # task, so without a marker it would wake firstmate every cycle
-          # forever. First report per task and kind wakes; the marker is
-          # removed with the task's other poll artifacts at teardown.
+          # Every line bin/fm-bb-pr-poll.sh can print, and whether it wakes
+          # firstmate once or forever. Only merged ends the task, so every
+          # other reported line needs a marker or it becomes unactionable
+          # wallpaper every cycle forever:
+          #   merged - wakes once, and the poll retires behind that wake.
+          #   declined - wakes once, guarded by the .declined marker;
+          #     terminal, and deliberately not retired.
+          #   superseded - wakes once, guarded by the .superseded marker;
+          #     terminal, and deliberately not retired.
+          #   bitbucket-auth-missing - wakes once, guarded by the .auth marker.
+          #   bitbucket-pr-unreachable - wakes once, guarded by the .gone marker.
+          #   every other outcome is silence by design and produces no wake at
+          #     all: an invalid or unreadable sidecar, a provider or URL that
+          #     fails revalidation, missing python3, an unresolvable credential
+          #     resolver, an inconclusive forge read, and any state that is not
+          #     exactly MERGED, DECLINED or SUPERSEDED, including OPEN.
+          # That list is exhaustive for the poll's current output contract, so
+          # any new terminal verdict added to the poll must answer the same
+          # question here. The markers are removed with the task's other poll
+          # artifacts at retirement, at arm time, and at teardown, so a task
+          # re-armed onto a new pull request never inherits this suppression.
           case "$out" in
             bitbucket-auth-missing) bb_warned="$STATE/$id.bb-poll-warned.auth" ;;
             bitbucket-pr-unreachable) bb_warned="$STATE/$id.bb-poll-warned.gone" ;;
+            declined) bb_warned="$STATE/$id.bb-poll-warned.declined" ;;
+            superseded) bb_warned="$STATE/$id.bb-poll-warned.superseded" ;;
             *) bb_warned= ;;
           esac
           if [ -n "$bb_warned" ]; then
@@ -1059,8 +1093,8 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
-          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
-            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+          if fm_pr_poll_retirement_publish "$STATE" "$id" "$poll_template" "$out"; then
+            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
           else
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"

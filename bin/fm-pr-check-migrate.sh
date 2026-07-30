@@ -343,16 +343,13 @@ if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
 fi
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ -n "$STATE_DEVICE" ] || exit 1
-# Retirement recovery is passed the GitHub/GitLab poll template by name rather
-# than the per-provider template this script resolves elsewhere (line 811). The
-# retirement subsystem arrived from upstream keyed on a single template, while
-# this fork resolves one per provider, so a Bitbucket task's registered poll is
-# fm-bb-pr-poll.sh and will not match here: its poll simply does not retire.
-# That is a deliberate, recorded limitation, not an oversight - the provider
-# mapping is threaded through retirement as its own change rather than inside a
-# merge. Until then a Bitbucket poll is left in place, which is the safe
-# direction: nothing is retired on a mismatched template.
-if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+# Retirement recovery is passed this script's directory, not one template name:
+# each receipt authorizes its own removals from the hashes and identities it
+# recorded, and the directory is needed only to select a superseded receipt's
+# replacement poll template from that task's own provider (same mapping as
+# task_poll_canonical above). A Bitbucket task therefore retires and yields
+# through this path exactly as a GitHub or GitLab one does.
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR"; then
   echo "PR_CHECK_MIGRATION: pending PR poll retirement could not be validated:$FM_PR_POLL_RETIREMENT_REJECTED" >&2
   exit 1
 fi
