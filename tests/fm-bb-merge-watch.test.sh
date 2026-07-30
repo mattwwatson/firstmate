@@ -2,9 +2,9 @@
 # Behavior tests for the Bitbucket merge watch and build results: canonical
 # URL parsing and provider dispatch, the byte-static bin/fm-bb-pr-poll.sh
 # verdicts, arm-time verification in bin/fm-pr-check.sh, watcher template
-# selection with the one-shot warning dedupe, bin/fm-bb-build-status.sh
-# verdicts, the merge path's not-green refusal, and the migration's
-# per-provider template set.
+# selection with the one-shot warning dedupe, watcher-start discard of a
+# superseded retirement receipt, bin/fm-bb-build-status.sh verdicts, the merge
+# path's not-green refusal, and the migration's per-provider template set.
 #
 # Every case runs against a DUMMY credential pair through a fake keychain tool
 # and a fake curl, so no case needs a real token or the network, and every
