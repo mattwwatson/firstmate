@@ -16,6 +16,9 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
+# Retirement recovery selects each task's own template from its registration, so
+# it takes the installed script directory rather than one template path.
+BIN="$ROOT/bin"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
@@ -3078,7 +3081,7 @@ test_retirement_crash_recovery() {
   [ "$rc" -eq 0 ] || fail "post-check-removal restart failed: $(cat "$dir/restart.err")"
   case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
-  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "completed retirement was not idempotent"
+  fm_pr_poll_retirement_recover_one "$state" task-a "$BIN" || fail "completed retirement was not idempotent"
 
   dir=$(make_case retirement-after-registration-removal)
   state="$dir/home/state"
@@ -3187,7 +3190,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
   local dir state before rc replacement_check replacement_data replacement_registration replacement_meta
-  local historical_poll current_poll
+  local historical_poll current_poll current_bin
   dir=$(make_case retirement-replacement)
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/6
@@ -3226,7 +3229,7 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   replacement_data=$(shasum -a 256 "$state/task-a.pr-poll")
   replacement_registration=$(shasum -a 256 "$state/task-a.pr-poll-registration")
   replacement_meta=$(shasum -a 256 "$state/task-a.meta")
-  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "stale receipt did not yield to a canonical replacement"
+  fm_pr_poll_retirement_recover_one "$state" task-a "$BIN" || fail "stale receipt did not yield to a canonical replacement"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "stale receipt survived canonical replacement recovery"
   [ "$(shasum -a 256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "stale receipt changed replacement check"
   [ "$(shasum -a 256 "$state/task-a.pr-poll")" = "$replacement_data" ] || fail "stale receipt changed replacement data"
@@ -3237,7 +3240,12 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   dir=$(make_case retirement-template-update-rearm-race)
   state="$dir/home/state"
   historical_poll="$dir/historical-fm-pr-poll.sh"
-  current_poll="$dir/current-fm-pr-poll.sh"
+  # The updated template is installed under its real name in a stand-in script
+  # directory, because recovery selects the replacement poll's template from the
+  # task's own registration rather than from a path the caller names.
+  current_bin="$dir/current-bin"
+  current_poll="$current_bin/fm-pr-poll.sh"
+  mkdir -p "$current_bin"
   cp "$POLL" "$historical_poll"
   cp "$POLL" "$current_poll"
   printf '\n' >> "$current_poll"
@@ -3254,7 +3262,7 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   replacement_data=$(shasum -a 256 "$state/task-a.pr-poll")
   replacement_registration=$(shasum -a 256 "$state/task-a.pr-poll-registration")
   replacement_meta=$(shasum -a 256 "$state/task-a.meta")
-  fm_pr_poll_retirement_recover_one "$state" task-a "$current_poll" \
+  fm_pr_poll_retirement_recover_one "$state" task-a "$current_bin" \
     || fail "template update blocked stale receipt recovery"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "pre-update receipt survived canonical replacement recovery"
   [ "$(shasum -a 256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "pre-update receipt changed replacement check"
@@ -3303,7 +3311,7 @@ test_retirement_queue_failure_and_receipt_tampering() {
   fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged || fail "could not publish receipt tamper fixture"
   printf 'extra\n' >> "$state/task-a.pr-poll-retirement"
   before=$(state_snapshot "$state")
-  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" \
+  fm_pr_poll_retirement_recover_one "$state" task-a "$BIN" \
     && fail "malformed receipt authorized poll deletion"
   [ "$(state_snapshot "$state")" = "$before" ] || fail "malformed receipt changed poll state"
   set +e
@@ -3320,7 +3328,7 @@ test_retirement_queue_failure_and_receipt_tampering() {
   printf 'external\n' > "$external"
   ln -s "$external" "$state/task-a.pr-poll-retirement"
   before=$(state_snapshot "$state")
-  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" \
+  fm_pr_poll_retirement_recover_one "$state" task-a "$BIN" \
     && fail "receipt symlink authorized poll deletion"
   [ "$(state_snapshot "$state")" = "$before" ] || fail "receipt symlink changed poll state"
   [ "$(cat "$external")" = external ] || fail "receipt symlink target was changed"

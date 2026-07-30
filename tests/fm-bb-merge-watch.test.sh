@@ -601,30 +601,8 @@ test_merge_refuses_not_green_and_dispatches_green() {
   pass "the merge path refuses not-green verdicts before any request and dispatches green to the confirmed Bitbucket protocol"
 }
 
-# KNOWN AND EXPECTED GAP - Bitbucket merge DETECTION, captain's decision D3(a)
-# of 30/07/2026, taken with the upstream sync merge.
-#
-# Upstream's PR poll-retirement architecture dispatches the watcher's validated
-# poll through a single template (bin/fm-pr-poll.sh). This fork resolves one
-# template per provider, so a Bitbucket task's registered fm-bb-pr-poll.sh does
-# not match and its merged poll produces NO wake: firstmate does not notice a
-# merged Bitbucket pull request on its own.
-#
-# Threading the provider mapping through retirement IS wave 3 stage 2, and the
-# captain's standing "integrate once, not twice" rule put that work after the
-# sync rather than inside the merge commit. So this case deliberately asserts
-# the REGRESSED behaviour rather than the wanted one, and says so out loud.
-#
-# Scope, measured rather than assumed: this case and the credential-warning
-# case below, because the refusal happens before the poll runs at all and so
-# takes every Bitbucket poll verdict with it. Everything else in this suite
-# passes, and the Bitbucket merge ACTION is untouched
-# (tests/fm-bb-pr-merge.test.sh, 26/26).
-#
-# When stage 2 lands this test FAILS, which is the point - restore the two
-# original assertions kept verbatim below and delete this block.
 test_watcher_selects_bb_template_and_wakes_merged() {
-  local dir state rc wakes
+  local dir state rc
   dir=$(make_case watcher-merged)
   state="$dir/home/state"
   arm_bb_fixture "$dir" task-a
@@ -636,42 +614,26 @@ test_watcher_selects_bb_template_and_wakes_merged() {
   set -e
   [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
 
-  # The wanted assertions, kept verbatim for whoever closes this gap:
-  #   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
-  #     || fail "the watcher did not convert the merged poll into exactly one wake"
-  #   ! grep -q 'rejected unauthenticated state checks' "$dir/watch.out" \
-  #     || fail "the armed bitbucket poll was rejected as unauthenticated"
-  # grep -c exits 1 on a zero count, which is the expected count here, so the
-  # suite's set -e must not read that as a failure.
-  wakes=$(grep -c '^check: .*: merged$' "$dir/watch.out" || true)
-  [ "$wakes" -eq 0 ] || fail \
-    "Bitbucket merge detection produced $wakes wake(s): the D3 gap looks closed, so restore the real assertions above and delete this expected-gap block"
-  # The gap is REFUSAL, not silence, and that is the safe direction: the poll's
-  # bytes never run and firstmate is told the check could not be authenticated,
-  # so a merged Bitbucket pull request goes unnoticed loudly rather than
-  # quietly. The captain is told when he merges one in the meantime.
-  grep -q 'rejected unauthenticated state checks' "$dir/watch.out" || fail \
-    "the bitbucket poll neither woke on merged nor was refused: the D3 gap has changed shape, re-measure it before trusting this suite"
-  pass "KNOWN GAP (D3, wave 3 stage 2): a merged bitbucket poll is refused without execution instead of waking; the merge action is unaffected"
+  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "the watcher did not convert the merged poll into exactly one wake"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch.out" \
+    || fail "the armed bitbucket poll was rejected as unauthenticated"
+
+  # Exactly one wake means the poll must also be retired behind it: the durable
+  # wake is queued, then the runnable check and its sidecars go, so no later
+  # cycle can report the same merge again.
+  [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the merged bitbucket poll did not queue exactly one durable wake"
+  assert_absent "$state/task-a.check.sh" "the merged bitbucket poll stayed runnable"
+  assert_absent "$state/task-a.pr-poll" "the merged bitbucket poll kept its data sidecar"
+  assert_absent "$state/task-a.pr-poll-registration" "the merged bitbucket poll kept its registration"
+  assert_absent "$state/task-a.pr-poll-retirement" "the bitbucket retirement receipt was not consumed"
+  grep -qxF "pr=$BB_URL" "$state/task-a.meta" \
+    || fail "retirement removed the pull-request evidence from task metadata"
+  assert_no_credential_leak "$(cat "$dir/watch.out" "$dir/watch.err")" "the watcher merge output"
+  pass "a merged bitbucket poll wakes firstmate exactly once and retires behind that wake"
 }
 
-# KNOWN AND EXPECTED GAP - the SAME D3 root cause as the case above.
-#
-# The watcher refuses the Bitbucket poll before executing it, so the poll never
-# reaches the code that would classify a lost credential either. Bitbucket poll
-# DETECTION is therefore out as a whole, not merely the merged verdict: the
-# credential and visibility warnings go with it.
-#
-# This second case is a correction to the sync scout's estimate, which put the
-# cost at exactly one case. That estimate was an artifact of measurement: the
-# suite runs under set -e, so the scout's probe aborted at the first failure and
-# never reached this case. The decision it supported is unchanged - the fix is
-# still wave 3 stage 2, still not merge work - but the recorded cost is two
-# cases in this suite, not one. Everything else here passes (13 cases), and the
-# Bitbucket merge ACTION is untouched (tests/fm-bb-pr-merge.test.sh, 26/26).
-#
-# When stage 2 lands this test FAILS: restore the assertions kept verbatim
-# below and delete this block.
 test_watcher_warns_once_on_lost_credential() {
   local dir state rc
   dir=$(make_case watcher-warn-once)
@@ -685,22 +647,32 @@ test_watcher_warns_once_on_lost_credential() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the watcher run did not complete cleanly (rc=$rc)"
+  grep -q '^check: .*: bitbucket-auth-missing$' "$dir/watch1.out" \
+    || fail "the first credential warning did not wake"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch1.out" \
+    || fail "the armed bitbucket poll was rejected as unauthenticated"
+  assert_present "$state/task-a.bb-poll-warned.auth" "the warning left no one-shot marker"
 
-  # The wanted assertions, kept verbatim for whoever closes this gap:
-  #   grep -q '^check: .*: bitbucket-auth-missing$' "$dir/watch1.out" \
-  #     || fail "the first credential warning did not wake"
-  #   assert_present "$state/task-a.bb-poll-warned.auth" "the warning left no one-shot marker"
-  #   ... then the second bounded run, expect_code 124, and the no-second-wake check.
-  ! grep -q 'bitbucket-auth-missing' "$dir/watch1.out" || fail \
-    "the credential warning woke: the D3 gap looks closed, so restore the real assertions above and delete this expected-gap block"
-  grep -q 'rejected unauthenticated state checks' "$dir/watch1.out" || fail \
-    "the bitbucket poll neither warned nor was refused: the D3 gap has changed shape, re-measure it before trusting this suite"
+  # The second run must find the marker and stay silent, so nothing ends the
+  # cycle and the bounded runner times out - the warning is news exactly once.
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_KEYCHAIN_SECRET=absent run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch2.out" 2> "$dir/watch2.err"
+  rc=$?
+  set -e
+  expect_code 124 "$rc" "warn-once-second-run"
+  ! grep -q 'bitbucket-auth-missing' "$dir/watch2.out" \
+    || fail "the credential warning woke a second time"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch2.out" \
+    || fail "the suppressed warning left the poll refused as unauthenticated"
 
-  # What must remain true even while detection is out: refusing a check must
-  # never print the credential it could not use.
+  # A credential the poll could not use must never be printed by either run.
   assert_no_credential_leak "$(cat "$dir/watch1.out" "$dir/watch1.err")" \
-    "the watcher refusal output"
-  pass "KNOWN GAP (D3, wave 3 stage 2): a lost bitbucket credential is refused rather than classified, and the refusal leaks no credential"
+    "the watcher credential-warning output"
+  assert_no_credential_leak "$(cat "$dir/watch2.out" "$dir/watch2.err")" \
+    "the watcher suppressed-warning output"
+  pass "a lost bitbucket credential wakes firstmate once and is suppressed thereafter"
 }
 
 test_migration_rebuilds_bb_and_leaves_github_untouched() {
@@ -736,6 +708,74 @@ test_migration_rebuilds_bb_and_leaves_github_untouched() {
   pass "migration rebuilds a legacy bitbucket poll from its own template without touching github polls"
 }
 
+# The migration runs at session start, so a state directory holding an
+# already-canonical armed Bitbucket poll must ride through it untouched.
+test_migration_completes_over_a_bitbucket_poll() {
+  local dir state before rc
+  dir=$(make_case migration-bb-canonical)
+  state="$dir/home/state"
+  arm_bb_fixture "$dir" task-a
+  before=$(state_snapshot "$state")
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "migration refused a canonical bitbucket poll: $(cat "$dir/migrate.err")"
+  [ "$(state_snapshot "$state")" = "$before" ] \
+    || fail "migration changed an already-canonical bitbucket poll"
+  pass "session-start migration completes over a canonical bitbucket poll and leaves it alone"
+}
+
+# A merged poll can leave a receipt behind and then be superseded by a re-arm.
+# Every watcher start finishes pending retirements before any check may run, and
+# it can only discard such a receipt by validating the REPLACEMENT poll, which
+# is canonical against its own provider's template. A Bitbucket receipt whose
+# template cannot be selected is rejected on every start instead, which both
+# floods firstmate and stops the startup recovery sweep.
+test_watcher_discards_superseded_bb_receipt() {
+  local dir state rc next_url replacement
+  dir=$(make_case watcher-superseded-receipt)
+  state="$dir/home/state"
+  arm_bb_fixture "$dir" task-a
+  fm_pr_poll_snapshot_capture "$state" task-a "$BB_POLL" \
+    || fail "could not snapshot the bitbucket retirement fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$BB_POLL" merged \
+    || fail "could not publish the bitbucket retirement receipt"
+
+  # The replacement is published through the library rather than the arming
+  # entry point, because arming runs recovery itself and would consume the
+  # receipt before the watcher ever saw it.
+  next_url='https://bitbucket.org/mattw_watson/hexbattle/pull-requests/13'
+  fm_write_meta "$state/task-a.meta" 'window=fm-task-a' "worktree=$dir/wt" 'kind=ship' \
+    "pr=$next_url"
+  chmod 0600 "$state/task-a.meta"
+  fm_pr_poll_prepare "$state" task-a bitbucket "$next_url" bitbucket.org "$BB_PATH" 13 "$BB_POLL" \
+    || fail "could not prepare the replacement bitbucket poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the replacement bitbucket poll"
+  assert_present "$state/task-a.pr-poll-retirement" "the superseded receipt fixture was consumed early"
+  replacement=$(state_snapshot "$state" | grep 'task-a.check.sh')
+
+  # The replacement pull request is open, so after the receipt is cleared the
+  # poll stays silent and nothing ends the cycle - the bounded runner times out.
+  rm -f "$state/.last-check"
+  set +e
+  FAKE_BB_PR_BODY=$(pr_body OPEN) run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  expect_code 124 "$rc" "superseded-receipt-watcher"
+  ! grep -q 'rejected unauthenticated PR poll retirement receipts' "$dir/watch.out" \
+    || fail "the superseded bitbucket receipt was rejected instead of discarded"
+  assert_absent "$state/task-a.pr-poll-retirement" "the superseded bitbucket receipt survived"
+  [ "$(state_snapshot "$state" | grep 'task-a.check.sh')" = "$replacement" ] \
+    || fail "discarding the stale receipt changed the replacement bitbucket poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$BB_POLL" \
+    || fail "the replacement bitbucket poll lost canonical provenance"
+  grep -qxF "pr=$next_url" "$state/task-a.meta" \
+    || fail "discarding the stale receipt changed the replacement pull-request record"
+  pass "a superseded bitbucket receipt is discarded at watcher start, leaving its replacement watch armed"
+}
+
 test_bb_poll_contains_no_secret_machinery() {
   # The poll must never read the keychain or hold a token itself; the resolver
   # is its only credential path, and nothing in it may print a token. These are
@@ -761,6 +801,8 @@ test_merge_refuses_not_green_and_dispatches_green
 test_watcher_selects_bb_template_and_wakes_merged
 test_watcher_warns_once_on_lost_credential
 test_migration_rebuilds_bb_and_leaves_github_untouched
+test_migration_completes_over_a_bitbucket_poll
+test_watcher_discards_superseded_bb_receipt
 test_bb_poll_contains_no_secret_machinery
 
 echo "fm-bb-merge-watch: all tests passed"

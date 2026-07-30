@@ -958,7 +958,7 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
-if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR"; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
@@ -1017,14 +1017,30 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+        # Which byte-static poll this task's check must equal comes from its own
+        # registration's provider tag (bin/fm-pr-lib.sh owns the mapping), not
+        # from a fixed name: GitHub and GitLab share fm-pr-poll.sh while
+        # Bitbucket has its own. Selection is the ONLY thing the tag decides -
+        # the snapshot below still validates the published check byte-for-byte
+        # against whatever was selected, so a doctored tag can at worst pick a
+        # template the check then fails to match. A task whose template cannot
+        # be selected has no armed poll to run and falls through to the
+        # custom-check path exactly as before.
+        poll_template=
+        if fm_pr_poll_task_template "$STATE" "$id" "$SCRIPT_DIR"; then
+          poll_template=$FM_PR_POLL_TASK_TEMPLATE
+        fi
+        if [ -n "$poll_template" ] \
+          && fm_pr_poll_snapshot_capture "$STATE" "$id" "$poll_template"; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          # The program executed is the same variable the snapshot validated, so
+          # the watcher can never run bytes it did not just prove canonical.
+          run_check_capture "$poll_template" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
           # A Bitbucket poll also reports a credential or visibility problem,
@@ -1059,8 +1075,8 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
-          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
-            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+          if fm_pr_poll_retirement_publish "$STATE" "$id" "$poll_template" "$out"; then
+            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
           else
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"

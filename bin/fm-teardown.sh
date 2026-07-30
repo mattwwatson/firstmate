@@ -301,7 +301,7 @@ remove_pr_poll_artifacts() {
   # The .bb-poll-warned markers are the watcher's one-shot dedupe for a
   # Bitbucket poll's credential and visibility warnings (bin/fm-watch.sh);
   # they are empty and carry no trust, so removal needs no validation.
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" \

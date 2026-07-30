@@ -900,7 +900,7 @@ fm_pr_poll_retirement_remove_exact() {
 }
 
 fm_pr_poll_retirement_discard_obsolete() {
-  local state=$1 id=$2 template=$3 receipt registration state_device
+  local state=$1 id=$2 script_dir=$3 receipt registration state_device
   local receipt_hash receipt_identity current_reg_hash current_reg_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -911,7 +911,14 @@ fm_pr_poll_retirement_discard_obsolete() {
   [ "$FM_PR_RETIRE_ID" = "$id" ] || return 1
   receipt_hash=$(fm_pr_sha256 "$receipt") || return 1
   receipt_identity=$(fm_pr_file_identity "$receipt") || return 1
-  fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  # The replacement poll is canonical against ITS OWN provider's template, which
+  # may differ from the retired receipt's: a task can be re-armed onto another
+  # forge. Selecting from the live registration rather than a caller-named path
+  # is what lets a superseded Bitbucket receipt yield to its replacement instead
+  # of being rejected forever; an unreadable registration fails selection
+  # exactly as it fails the validation below.
+  fm_pr_poll_task_template "$state" "$id" "$script_dir" || return 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$FM_PR_POLL_TASK_TEMPLATE" || return 1
   registration="$state/$id.pr-poll-registration"
   current_reg_hash=$(fm_pr_sha256 "$registration") || return 1
   current_reg_identity=$(fm_pr_file_identity "$registration") || return 1
@@ -964,8 +971,12 @@ fm_pr_poll_retirement_publish() {
   fm_pr_poll_retirement_receipt_valid "$state" "$id" || return 1
 }
 
+# Finish one task's pending retirement. The receipt's own recorded hashes and
+# identities authorize every removal, so recovery never depends on the installed
+# template - script_dir is used only to select the replacement poll's template
+# when a superseded receipt must be discarded instead.
 fm_pr_poll_retirement_recover_one() {
-  local state=$1 id=$2 template=$3 receipt state_device check data registration
+  local state=$1 id=$2 script_dir=$3 receipt state_device check data registration
   local receipt_hash receipt_identity
   fm_pr_task_id_valid "$id" || return 1
   receipt="$state/$id.pr-poll-retirement"
@@ -973,7 +984,7 @@ fm_pr_poll_retirement_recover_one() {
     return 0
   fi
   if ! fm_pr_poll_retirement_state_valid "$state" "$id"; then
-    fm_pr_poll_retirement_discard_obsolete "$state" "$id" "$template" && return 0
+    fm_pr_poll_retirement_discard_obsolete "$state" "$id" "$script_dir" && return 0
     return 1
   fi
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -1003,13 +1014,13 @@ fm_pr_poll_retirement_recover_one() {
 }
 
 fm_pr_poll_retirement_recover_all() {
-  local state=$1 template=$2 receipt id
+  local state=$1 script_dir=$2 receipt id
   FM_PR_POLL_RETIREMENT_REJECTED=
   for receipt in "$state"/*.pr-poll-retirement; do
     [ -e "$receipt" ] || [ -L "$receipt" ] || continue
     id=$(basename "$receipt" .pr-poll-retirement)
     if ! fm_pr_task_id_valid "$id" \
-      || ! fm_pr_poll_retirement_recover_one "$state" "$id" "$template"; then
+      || ! fm_pr_poll_retirement_recover_one "$state" "$id" "$script_dir"; then
       FM_PR_POLL_RETIREMENT_REJECTED="$FM_PR_POLL_RETIREMENT_REJECTED $receipt"
     fi
   done

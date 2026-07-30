@@ -5,14 +5,20 @@ Every live command below was run on 2026-07-22 against the live Bitbucket Cloud 
 The stage-4 merge action section is dated where it appears and its evidence is stubbed, for the reason recorded there.
 The stubbed no-network coverage for the same behavior lives in `tests/fm-bb-merge-watch.test.sh`.
 
-## Current status: the watcher does not execute the Bitbucket poll
+## Current status: the watcher executes the Bitbucket poll like any other (30/07/2026)
 
-Since the 30/07/2026 upstream sync merge, the watcher validates every task poll against the single `bin/fm-pr-poll.sh` template that upstream's poll-retirement subsystem is keyed on, while this fork resolves one template per provider.
-An armed Bitbucket poll no longer matches there, so the watcher refuses it as an unauthenticated state check without executing it: a merged Bitbucket pull request produces no `merged` wake, and the credential and visibility warnings recorded below never reach firstmate either, because the poll never runs to print them.
-The refusal is loud rather than silent - the wake firstmate receives is `check: rejected unauthenticated state checks:` naming the task's own `<id>.check.sh` path, instead of a merge - so a merged pull request goes unnoticed by the watch rather than being quietly assumed unmerged.
-Nothing else in this record changed: arming still verifies the pull request and still refuses rather than arming a watch that could never report, the poll bytes still work when run directly as shown below, `bin/fm-bb-build-status.sh` still reads build verdicts, and the stage-4 merge action is untouched.
-Closing the gap means threading the per-provider template through retirement, which is deliberately separate work (captain's decision D3(a), taken with the sync so the merge integrated once rather than twice).
-Until it lands, a merged Bitbucket pull request is something the captain notices, not the watch; the two expected-gap cases in `tests/fm-bb-merge-watch.test.sh` assert the regressed behavior on purpose and fail loudly once the follow-up closes it.
+A merged Bitbucket pull request wakes firstmate exactly once and its poll retires behind that wake, the same as a GitHub pull request or a GitLab merge request.
+The credential and visibility warnings recorded below reach firstmate too, once per task and kind.
+
+The 30/07/2026 upstream sync merge had left that broken for one release: upstream's poll-retirement subsystem is keyed on the single `bin/fm-pr-poll.sh` template, and the watcher's dispatch validated every armed poll against that one name while this fork resolves one template per provider.
+An armed Bitbucket poll could not match, so the watcher refused it as an unauthenticated state check without executing it and no Bitbucket verdict - `merged` or warning - could reach firstmate.
+The dispatch and retirement paths now select each task's template from its own registration through `fm_pr_poll_template_for_provider`, which was already the single owner of that mapping and simply was not consulted there.
+The watcher executes the same variable it just byte-validated, so it cannot run a program it has not proven canonical, and the two cases in `tests/fm-bb-merge-watch.test.sh` that recorded the regression now assert the working behavior.
+
+Retirement recovery reads the script directory rather than one template path, because a receipt authorizes its own removals from the hashes and identities it recorded, and the directory is needed only to select a superseded receipt's replacement poll.
+That second half is not cosmetic: without it, publishing a Bitbucket receipt would have created a state nothing could clear, and every watcher start would reject it before any check was allowed to run.
+`tests/fm-bb-merge-watch.test.sh` pins that a superseded Bitbucket receipt is discarded at watcher start with its replacement watch left armed, and that `bin/fm-pr-check-migrate.sh` rides through a canonical Bitbucket poll untouched.
+Existing GitHub and GitLab polls are unaffected - they keep their bytes, their v2 registrations, and their armed state, since resolving `github` or `gitlab` returns exactly the name those paths passed before.
 
 ## Versions
 
@@ -36,8 +42,9 @@ Reading them needs only firstmate's read-only credential, and the poll never fal
 
 GitHub and GitLab share `bin/fm-pr-poll.sh`, which shells out to their credential-owning CLIs (`gh`, `glab`).
 Bitbucket has no such CLI, so its poll resolves a credential through `bin/fm-forge-credential.sh` and parses JSON with python3 - machinery the audited gh/glab poll must not absorb, which is why `bin/fm-bb-pr-poll.sh` is a separate byte-static program.
-The registration record's provider tag selects which template a task's check must match byte-for-byte when it is armed, rebuilt, or migrated; `fm_pr_poll_template_for_provider` in `bin/fm-pr-lib.sh` is the single owner of that mapping, and every trust property still rests on the unchanged artifact validation against the selected template.
-The watcher's own dispatch no longer consults that mapping, which is the gap recorded under "Current status" above.
+The registration record's provider tag selects which template a task's check must match byte-for-byte when it is armed, rebuilt, migrated, dispatched, or retired; `fm_pr_poll_template_for_provider` in `bin/fm-pr-lib.sh` is the single owner of that mapping, and every trust property still rests on the unchanged artifact validation against the selected template.
+Selection is all the tag decides, and it cannot name a path of its own: `fm_pr_poll_registration_parse` accepts a provider only when it equals the one `fm_pr_url_parse` derives from the recorded URL, so the value is always exactly `github`, `gitlab`, or `bitbucket`, and the mapping refuses anything else.
+A doctored tag can therefore at worst select a template whose bytes the published check then fails to match.
 Existing GitHub and GitLab polls therefore keep their bytes, their v2 registrations, and their armed state through this change; `tests/fm-bb-merge-watch.test.sh` asserts a canonical GitHub poll rides through the migration byte-identical.
 
 ## End to end: arming and polling a real pull request
@@ -127,7 +134,7 @@ bitbucket-auth-missing
 ```
 
 When the watcher executes the poll it wakes firstmate on that line once per task and kind, guarded by a `state/<id>.bb-poll-warned.*` marker, because the warning is news the first time and unactionable wallpaper every 300 seconds after; the marker is removed with the task's other poll artifacts at teardown.
-That consumption is dormant while the dispatch gap under "Current status" stands: the poll is refused before it can classify anything, so neither the warning line nor the marker is produced.
+`tests/fm-bb-merge-watch.test.sh` pins both halves of that: the first lost-credential cycle wakes and leaves the marker, and the next one stays silent.
 
 Arming is still the load-bearing refusal - a watch that could never report is never armed, and the diagnostic names the failing requirement without ever printing a credential value:
 
