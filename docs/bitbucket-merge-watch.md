@@ -10,14 +10,14 @@ The stubbed no-network coverage for the same behavior lives in `tests/fm-bb-merg
 A merged Bitbucket pull request wakes firstmate exactly once and its poll retires behind that wake, the same as a GitHub pull request or a GitLab merge request.
 The credential and visibility warnings recorded below reach firstmate too, once per task and kind.
 
-The 30/07/2026 upstream sync merge had left that broken for one release: upstream's poll-retirement subsystem is keyed on the single `bin/fm-pr-poll.sh` template, and the watcher's dispatch validated every armed poll against that one name while this fork resolves one template per provider.
-An armed Bitbucket poll could not match, so the watcher refused it as an unauthenticated state check without executing it and no Bitbucket verdict - `merged` or warning - could reach firstmate.
-The dispatch and retirement paths now select each task's template from its own registration through `fm_pr_poll_template_for_provider`, which was already the single owner of that mapping and simply was not consulted there.
-The watcher executes the same variable it just byte-validated, so it cannot run a program it has not proven canonical, and the two cases in `tests/fm-bb-merge-watch.test.sh` that recorded the regression now assert the working behavior.
+The 30/07/2026 upstream sync merge had left that broken for one release, because the watcher's dispatch and the retirement recovery family validated every armed poll against the single `bin/fm-pr-poll.sh` name instead of the per-provider template selected under "Why Bitbucket has its own byte-static poll" below.
+An armed Bitbucket poll could not match, so the watcher refused it as an unauthenticated state check without executing it, and no Bitbucket verdict - `merged` or warning - could reach firstmate.
+That refusal carried no one-shot dedupe, unlike the credential warning guarded by a `state/<id>.bb-poll-warned.*` marker, so a rejected Bitbucket check re-woke firstmate on every slow sweep indefinitely, with all rejected checks batched into a single wake per sweep.
+Arming a Bitbucket watch during that release was therefore not harmless, and any note recording it as harmless was wrong.
 
 Retirement recovery reads the script directory rather than one template path, because a receipt authorizes its own removals from the hashes and identities it recorded, and the directory is needed only to select a superseded receipt's replacement poll.
 That second half is not cosmetic: without it, publishing a Bitbucket receipt would have created a state nothing could clear, and every watcher start would reject it before any check was allowed to run.
-`tests/fm-bb-merge-watch.test.sh` pins that a superseded Bitbucket receipt is discarded at watcher start with its replacement watch left armed, and that `bin/fm-pr-check-migrate.sh` rides through a canonical Bitbucket poll untouched.
+`tests/fm-bb-merge-watch.test.sh` pins that a merged Bitbucket poll wakes firstmate exactly once and retires behind that wake, that a lost credential warns once and then stays silent, that a superseded Bitbucket receipt is discarded at watcher start with its replacement watch left armed, and that `bin/fm-pr-check-migrate.sh` rides through a canonical Bitbucket poll untouched.
 Existing GitHub and GitLab polls are unaffected - they keep their bytes, their v2 registrations, and their armed state, since resolving `github` or `gitlab` returns exactly the name those paths passed before.
 
 ## Versions
@@ -150,6 +150,15 @@ ls: /tmp/bb-e2e/state/e2.check.sh: No such file or directory
 Nothing changes for armed GitHub and GitLab polls: their template bytes and v2 registrations are untouched, so they validate exactly as before with no re-arm and no migration event.
 A legacy Bitbucket check (arbitrary bytes with a canonical `pr=` in task metadata) is handled by the existing non-executing migration, which now selects the rebuild template from the recorded URL's provider: the legacy bytes are quarantined unrun and a canonical poll is rebuilt against `bin/fm-bb-pr-poll.sh`.
 `tests/fm-bb-merge-watch.test.sh` pins both properties in one migration run.
+
+An already-armed Bitbucket watch whose check file is intact needs no re-arm and produces no migration event.
+Its check bytes already equal `bin/fm-bb-pr-poll.sh` and its v2 registration is untouched, so the first slow sweep after this change detects the merge and retires the poll.
+Verified by arming with the pre-change code and then running the fixed watcher over that same state with no re-arm and no migration: it reported `merged`, removed the check and both sidecars, and kept the `pr=` line in task metadata.
+
+A watch whose check file was removed by hand, leaving its `<id>.pr-poll` and `<id>.pr-poll-registration` sidecars behind, needs an explicit re-arm with `bin/fm-pr-check.sh`.
+The session-start migration completes over that shape and deliberately leaves the orphaned sidecars alone rather than rebuilding them, and the watcher stays silent because it sweeps check files only.
+Leaving it alone is intentional: rebuilding a watch an operator disarmed by hand would restore the very wake churn that removal was meant to stop.
+All three behaviors were verified against that exact state.
 
 ## Stage 4: the merge action (23/07/2026)
 
