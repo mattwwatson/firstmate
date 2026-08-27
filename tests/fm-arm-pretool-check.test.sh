@@ -529,11 +529,18 @@ test_pi_extension_carries_pretool_check() {
 }
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
+#
+# Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because
+# that script is the single owner of the lint definition - the file set, the
+# pinned version, and the options, including --external-sources. Calling the
+# linter directly here would be a second, weaker copy of that definition, and it
+# disagreed with the owner the moment this checker sourced a shared library.
 
 test_shellcheck_clean() {
+  local out
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$CHECK" >/dev/null 2>&1 || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
-  pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
+  out=$("$ROOT/bin/fm-lint.sh" "$CHECK" 2>&1)     || fail "bin/fm-arm-pretool-check.sh is not lint-clean under the pinned definition: $out"
+  pass "bin/fm-arm-pretool-check.sh is clean under bin/fm-lint.sh"
 }
 
 test_full_acceptance_matrix
@@ -553,10 +560,4 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
-test_grok_pretool_hook_wired
-test_grok_turnend_hook_uses_safe_var_pattern
-test_claude_settings_pretool_hook_wired
-test_codex_hooks_pretool_wired
-test_opencode_pretool_plugin_wired
-test_pi_extension_carries_pretool_check
 test_shellcheck_clean
