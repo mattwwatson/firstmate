@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 # Ensure a project worktree follows the agent-memory file convention.
 # AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md is a
-# relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
+# real regular file whose canonical content is the two-line @AGENTS.md pointer
+# that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present, and refuses to clobber distinct real files or wrong symlinks.
-# A real CLAUDE.md that only includes AGENTS.md is the same convention expressed
-# without a symlink, so it is accepted and left untouched rather than refused;
-# see claude_md_is_pointer_only for exactly what still counts as real content.
+# file present (unless it is already the canonical pointer), converts a correct
+# CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
+# distinct real files or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
-# Refuses a case-variant real memory file such as a lowercase agents.md, whose
-# CLAUDE.md symlink would carry an uppercase literal target that dangles on a
-# case-sensitive filesystem (issue #389).
+# Owns the canonical CLAUDE.md pointer content (the exact two-line @AGENTS.md
+# form). A real-file pointer cannot follow a write into AGENTS.md, which is why
+# the installer never creates a CLAUDE.md symlink.
+# Refuses a case-variant real memory file such as a lowercase agents.md, so the
+# pointer's @AGENTS.md import resolves to a real AGENTS.md on a case-sensitive
+# filesystem (issue #389). The real-file pointer also eliminates the old
+# uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
+# link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -95,37 +100,34 @@ EOF
   ensure_maintenance_section
 }
 
-# Decide whether a real CLAUDE.md file is the captain's pointer-only convention
-# rather than a second competing memory file. A pointer-only CLAUDE.md carries no
-# knowledge of its own: every line is either blank or an "@AGENTS.md" include, and
-# at least one include is present.
-#
-# The rule tolerates exactly the incidental bytes an editor or a checkout adds
-# without changing meaning: a leading UTF-8 byte-order mark, CRLF line endings, a
-# missing final newline, blank lines, and leading or trailing whitespace on the
-# include line. Everything else - prose, a heading, an HTML comment, a second
-# include of another file - counts as real content and keeps the refusal, because
-# a human wrote it to be read and merging it away would lose it. Erring strict is
-# the safe direction here: the fallback is the existing explicit refusal, which
-# asks a human to reconcile, and never touches either file.
-claude_md_is_pointer_only() {
-  local line first=1 saw_include=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$first" -eq 1 ]; then
-      first=0
-      line=${line#$'\xef\xbb\xbf'}
-    fi
-    line=${line%$'\r'}
-    # Trim leading and trailing spaces and tabs.
-    line=${line#"${line%%[![:space:]]*}"}
-    line=${line%"${line##*[![:space:]]}"}
-    [ -n "$line" ] || continue
-    case "$line" in
-      "@$AGENTS"|"@./$AGENTS") saw_include=1 ;;
-      *) return 1 ;;
-    esac
-  done < "$CLAUDE"
-  [ "$saw_include" -eq 1 ]
+# Canonical CLAUDE.md pointer: a real file, never a symlink. Byte-identical
+# two-line form so a stray write clobbers only this recoverable pointer.
+claude_pointer_content() {
+  cat <<'EOF'
+<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+@AGENTS.md
+EOF
+}
+
+is_canonical_claude_pointer() {
+  [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
+  claude_pointer_content | cmp -s - "$CLAUDE"
+}
+
+# Write the canonical pointer as a regular file. Unlink a symlink first so the
+# write cannot follow it and destroy AGENTS.md. Never overwrite a distinct real
+# file; callers classify that as a conflict before invoking this.
+install_claude_pointer() {
+  if is_canonical_claude_pointer; then
+    return 0
+  fi
+  if [ -L "$CLAUDE" ]; then
+    rm -- "$CLAUDE"
+  elif [ -e "$CLAUDE" ]; then
+    echo "error: internal: refuse to overwrite existing CLAUDE.md" >&2
+    exit 1
+  fi
+  claude_pointer_content > "$CLAUDE"
 }
 
 is_correct_claude_symlink() {
@@ -148,10 +150,11 @@ PY
 
 # Refuse a case-variant real memory file (issue #389). On a case-insensitive
 # filesystem an existing lowercase agents.md satisfies every [ -e AGENTS.md ]
-# test below, so the script would emit a CLAUDE.md symlink whose uppercase
-# literal target dangles once the tree is checked out on a case-sensitive
-# filesystem. Reading the real directory entries catches the mismatch on both
-# filesystem kinds; surface it for manual reconciliation instead of linking blindly.
+# test below, so the script would emit a CLAUDE.md pointer whose @AGENTS.md
+# import dangles once the tree is checked out on a case-sensitive filesystem.
+# Reading the real directory entries catches the mismatch on both filesystem
+# kinds; surface it for manual reconciliation instead of writing the pointer
+# against the wrong name.
 for entry in *; do
   if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
     continue
@@ -159,7 +162,7 @@ for entry in *; do
   if [ "$entry" != "$AGENTS" ]; then
     case "$entry" in
       [Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd])
-        echo "conflict: memory file is named $entry in $DIR but the convention is AGENTS.md; rename it to AGENTS.md so CLAUDE.md links portably" >&2
+        echo "conflict: memory file is named $entry in $DIR but the convention is AGENTS.md; rename it to AGENTS.md so CLAUDE.md's @AGENTS.md pointer resolves portably" >&2
         exit 1
         ;;
     esac
@@ -179,10 +182,11 @@ if [ -e "$AGENTS" ]; then
   if [ -L "$CLAUDE" ]; then
     if is_correct_claude_symlink; then
       ensure_maintenance_section
+      install_claude_pointer
       if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
+        echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
       else
-        echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md in $DIR"
+        echo "updated: replaced CLAUDE.md symlink with @AGENTS.md pointer in $DIR"
       fi
       exit 0
     fi
@@ -191,28 +195,25 @@ if [ -e "$AGENTS" ]; then
   fi
   if [ ! -e "$CLAUDE" ]; then
     ensure_maintenance_section
-    ln -s "$AGENTS" "$CLAUDE"
+    install_claude_pointer
     if [ "$MAINT_INJECTED" -eq 1 ]; then
-      echo "updated: added ## Maintaining this file to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
+      echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
     else
-      echo "symlinked: CLAUDE.md -> AGENTS.md in $DIR"
+      echo "wrote: CLAUDE.md @AGENTS.md pointer in $DIR"
     fi
     exit 0
   fi
   if [ -f "$CLAUDE" ]; then
-    # A pointer-only CLAUDE.md is the convention, not a conflict: AGENTS.md holds
-    # the content and CLAUDE.md only includes it. Proceed against AGENTS.md and
-    # leave the pointer exactly as the project wrote it.
-    if claude_md_is_pointer_only; then
+    if is_canonical_claude_pointer; then
       ensure_maintenance_section
       if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR (CLAUDE.md includes AGENTS.md)"
+        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
       else
-        echo "unchanged: AGENTS.md with CLAUDE.md including AGENTS.md in $DIR"
+        echo "unchanged: AGENTS.md with CLAUDE.md @AGENTS.md pointer in $DIR"
       fi
       exit 0
     fi
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files with their own content in $DIR; reconcile them manually" >&2
+    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
     exit 1
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
@@ -222,7 +223,8 @@ fi
 if [ -L "$CLAUDE" ]; then
   if is_correct_claude_symlink; then
     write_skeleton
-    echo "created: AGENTS.md and kept CLAUDE.md -> AGENTS.md in $DIR"
+    install_claude_pointer
+    echo "created: AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md is a symlink in $DIR but AGENTS.md is missing and the link does not point to AGENTS.md" >&2
@@ -231,10 +233,15 @@ fi
 
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
+    if is_canonical_claude_pointer; then
+      write_skeleton
+      echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
+      exit 0
+    fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
-    ln -s "$AGENTS" "$CLAUDE"
-    echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
+    install_claude_pointer
+    echo "promoted: moved CLAUDE.md to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
@@ -242,5 +249,5 @@ if [ -e "$CLAUDE" ]; then
 fi
 
 write_skeleton
-ln -s "$AGENTS" "$CLAUDE"
-echo "created: AGENTS.md and CLAUDE.md -> AGENTS.md in $DIR"
+install_claude_pointer
+echo "created: AGENTS.md and CLAUDE.md @AGENTS.md pointer in $DIR"

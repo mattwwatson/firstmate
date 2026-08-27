@@ -208,6 +208,17 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    # TEMPORARY - delete these two cases when this file is replaced by upstream's
+    # spawn, which implements both flags. They exist only because the default
+    # case below absorbs an unrecognised flag into the positional arguments: a
+    # caller passing one of these would otherwise have it silently become the
+    # project directory or be overwritten by --harness, and the spawn would
+    # either die on an unrelated line or appear to succeed while dropping the
+    # value. Refusing by name says which flag and why, and refuses nothing else.
+    --relaunch|--relaunch=*|--traceparent|--traceparent=*)
+      echo "error: ${a%%=*} is not supported by this version of fm-spawn.sh" >&2
+      exit 1
+      ;;
     *) POS+=("$a") ;;
   esac
 done
