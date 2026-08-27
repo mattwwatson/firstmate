@@ -524,7 +524,6 @@ owned_child_finished() {
       return 0
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
-    fail_unexplained_cycle
     return 1
   fi
 
