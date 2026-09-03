@@ -24,7 +24,8 @@ The findings log alone is 60% of the description.
 It is the round-by-round record of what review, test and document raised and how each was answered, which is the history of *building* the change sitting in the field a reviewer opens to find out what the change *is*.
 
 Keeping What Changed and Risk Assessment unchanged, with a one-line summary and an intent of about four sentences above them, produces a description of about 3,000 characters.
-A dry run of `bin/fm-pr-reshape.sh` against that exact description produced 3,272 bytes from 39,502, with 37,299 bytes moved to the comment.
+A dry run of `bin/fm-pr-reshape.sh` at commit 75f2f9d, the first version of that script, against that exact description produced 3,272 bytes from 39,502, with 37,299 bytes moved to the comment.
+For that particular description the split's output is byte-identical under the current script, because the body carries no `## ` heading inside a fenced block - its one heading-looking line inside a fence carries three hashes, which the split does not route on - no attestation line, and no whitespace-only lines in its kept sections, so none of the fence-aware routing, the restricted attestation lift or the blank-line preservation changes it; the one difference is the description footer, which now reads "the original Intent" where it read "Intent".
 The same run against pull request 95's description gives about 2,700.
 
 ## Why the detail moves to a comment rather than a collapsible section
