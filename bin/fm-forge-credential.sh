@@ -48,7 +48,7 @@
 #          python3 cannot read the body, so both are "unknown" rather than a
 #          guess; a caller warning on "no" therefore never warns speculatively,
 #          and the merge POST itself still fails closed on a real 403.
-# pr-merge One of the two write actions this script can perform: a single POST
+# pr-merge One of the three write actions this script can perform: a single POST
 #          of the pull-request merge endpoint for <repository> and <number> with
 #          the named merge <strategy>. It deliberately supports no other method,
 #          path, or body, so no caller can turn this credential into a general
@@ -130,16 +130,17 @@
 # WHAT IT WILL NOT TOUCH. For Bitbucket, firstmate holds its OWN Atlassian
 # account API token under the keychain services firstmate-bitbucket-email and
 # firstmate-bitbucket-token, used with HTTP Basic (email as username, token as
-# password). Whether that one credential can write - merge a pull request or
-# comment on one, both gated by pullrequest:write - is the captain's
+# password). Whether that one credential can write - merge a pull request,
+# comment on one, or replace its description, each gated by pullrequest:write -
+# is the captain's
 # provisioning choice, detected from its real scopes by merge-capable rather
 # than assumed; with the recommended read-only scopes every write is refused by
-# the forge itself and both write actions stay dormant. no-mistakes' separate
+# the forge itself and the write actions stay dormant. no-mistakes' separate
 # write-capable credential is deliberately out of reach - this script must
 # never read it - because the two credentials serve different systems and must
 # rotate independently. For GitHub, firstmate holds no credential at all; the
-# gh CLI owns it, so the GitHub comment path lives in bin/fm-pr-comment.sh and
-# never reaches this script.
+# gh CLI owns it, so the GitHub comment path runs through fm_pr_post_comment in
+# bin/fm-pr-lib.sh and never reaches this script.
 #
 # SECRET HANDLING. The resolved pair never reaches stdout, stderr, a log, argv,
 # or a file. It leaves the store through a private FIFO, which carries it in

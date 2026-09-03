@@ -365,8 +365,8 @@ FOOTER_LIST=$(printf '%s' "$MOVED_LIST" \
   # however many the removed section happened to leave behind; blank lines
   # inside a kept section are untouched.
   awk '
-/^[ \t\r]*$/ { blank++; next }
-{ while (blank-- > 0) print ""; blank = 0; print }
+/^[ \t\r]*$/ { blank[++blanks] = $0; next }
+{ for (i = 1; i <= blanks; i++) { print blank[i] } blanks = 0; print }
 ' "$WORK/keep.md"
   printf '\n---\n\n'
   printf '%s%s. ' "$RESHAPE_FOOTER_PREFIX" "$FOOTER_LIST"

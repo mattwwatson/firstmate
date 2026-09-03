@@ -9,7 +9,8 @@
 #
 # The properties pinned here are the ones the mechanism depends on:
 #   - Testing, Pipeline and the original Intent move; every other section stays,
-#     including one a human added by hand
+#     including one a human added by hand, and a kept line comes back byte for
+#     byte even when it is whitespace only
 #   - the no-mistakes attestation comment stays in the description, while a
 #     findings line that merely quotes its token stays in the moved record
 #   - a "## " heading quoted inside a fenced code block does not reroute the
@@ -663,6 +664,48 @@ MD
   pass "fm-pr-reshape.sh: an opening's own fence is not rebalanced by a kept code block"
 }
 
+test_a_kept_whitespace_only_line_comes_back_verbatim() {
+  local dir
+  dir=$(new_case)
+  # The single-space line is a diff's context line for an empty source line. It
+  # sits in a KEPT section, so the reshaped description must carry those bytes.
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed:
+
+```diff
+-old
+ 
++new
+```
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+Round one raised these.
+MD
+  run_reshape "$dir" "$GH_URL" >/dev/null
+  awk '
+{ line[NR] = $0 }
+END {
+  for (i = 1; i <= NR; i++) {
+    if (line[i] == "-old" && line[i + 1] == " " && line[i + 2] == "+new") { exit 0 }
+  }
+  exit 1
+}
+' "$dir/forge-body.md" || \
+    fail "a whitespace-only line in a kept section must come back verbatim, not as an empty line"
+  pass "fm-pr-reshape.sh: a kept whitespace-only line comes back verbatim"
+}
+
 test_nothing_to_move_is_reported_and_writes_nothing() {
   local dir record
   dir=$(new_case)
@@ -743,6 +786,7 @@ test_an_unclosed_fence_refuses_rather_than_moving_a_hand_added_section
 test_a_findings_line_quoting_the_marker_is_still_reshaped
 test_an_unusable_opening_is_refused_before_anything_is_posted
 test_an_opening_fence_is_not_rebalanced_by_a_kept_code_block
+test_a_kept_whitespace_only_line_comes_back_verbatim
 test_nothing_to_move_is_reported_and_writes_nothing
 test_an_oversized_detail_refuses_rather_than_truncating
 test_a_dry_run_writes_nothing
