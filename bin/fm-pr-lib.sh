@@ -148,10 +148,12 @@ fm_pr_opening_path() {  # <state-dir> <id>
 # that string. It is deliberately visible text rather than an HTML comment,
 # because Bitbucket escapes HTML in a pull-request description and would print a
 # comment marker as literal characters to every reviewer
-# (docs/pr-description-reshape.md records that measurement). Consumers match this
-# token to decide that a body is already reshaped.
-# Consumed by bin/fm-pr-reshape.sh, which writes it into a reshaped description
-# and matches it to decline a second run.
+# (docs/pr-description-reshape.md records that measurement).
+# Consumed by bin/fm-pr-reshape.sh, which writes it into the footer line of a
+# reshaped description and matches that whole line - not the bare token - to
+# decide a body is already reshaped and decline a second run. Because the token
+# is visible text, a findings log discussing this mechanism can quote it in
+# prose, and such a body has not been reshaped.
 # shellcheck disable=SC2034
 FM_PR_RESHAPE_MARKER='fm-pr-reshape:v1'
 
