@@ -29,6 +29,11 @@ Reshape when a pull request is open or recently opened, its description carries 
 Do not reshape a description a human wrote by hand: the mechanism is aimed at generated build history, and a hand-written body has no such section to move.
 The script refuses that case on its own, but choosing not to run it is better than relying on the refusal.
 
+**One thing to know before running it on Bitbucket.**
+The write sends the new description and no other field.
+Whether that leaves an assigned reviewer list untouched has not been proven against a live pull request, so on a repository where reviewers are assigned, check them afterwards.
+It is unproven rather than known to go wrong.
+
 **A reshape is worth doing after the work is finished, not while it is still moving.**
 A pipeline run that reaches its pull-request step rewrites the description wholesale, so a reshape applied while further runs are expected will be undone by the next one.
 That is not a failure to work around - it is why this is an explicit action the captain takes rather than something that happens automatically at every pull request.

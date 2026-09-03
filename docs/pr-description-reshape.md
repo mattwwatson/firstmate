@@ -101,6 +101,10 @@ At least 2 of those 11 pull requests would have lost a reshape applied once thei
 **The consequence for the design.** A reshape is an explicit action taken when the work is finished, not an automatic step at every pull request, because an automatic one cannot know whether a further run will follow and would be silently undone when one did.
 Re-running the reshape is the remedy, which is why `bin/fm-pr-reshape.sh` is idempotent in both directions: it declines an already-reshaped body, and it re-trims a restored one without posting the same detail twice.
 
+**What the 10:42:59 row does and does not establish about the write.** It shows Bitbucket recording a change to a description alone, as its own activity entry naming no other field, so a description that changes on its own is a shape the forge records.
+It says nothing about the request that produced it: that trim was made by hand, and, as this document's opening states, no command used to establish anything recorded here changed anything on either forge.
+So what Bitbucket does with the fields a description-only PUT omits - an assigned reviewer list among them - is not established by anything below, and `bin/fm-pr-reshape.sh`'s read-back confirms the description rather than the rest of the pull request.
+
 The same two write modes are visible in finer detail on GitHub, where `userContentEdits` exposes each body version.
 Upstream pull request 3508 recorded seven versions: two replaced the visible sections wholesale, and three changed only the hidden `no-mistakes-pipeline-attestation:v1` comment, swapping its `head_sha` and leaving every other byte identical.
 A reshape survives that second kind and is lost to the first.

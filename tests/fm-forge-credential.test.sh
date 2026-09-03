@@ -69,8 +69,11 @@ SH
 }
 
 # A fake curl that records HOW it was called without ever recording the
-# credential: it writes the literal argv it received (asserted credential-free)
-# and a boolean for whether the expected Basic-auth config arrived on stdin.
+# credential: it writes the literal argv it received (asserted credential-free),
+# a boolean for whether the expected Basic-auth config arrived on stdin, and,
+# when FAKE_CURL_BODY_LOG is set, a copy of the request body the caller named
+# with --data @<file>. The body has to be copied during the call, because the
+# script deletes that temporary file as soon as curl returns.
 # FAKE_CURL_STATUS sets the HTTP status it reports; FAKE_CURL_EXIT makes it fail
 # like a transport error; FAKE_CURL_404_MATCH answers 404 for just the requests
 # whose argv contains that substring, so one run can hold a repository the
@@ -91,13 +94,20 @@ else
   printf '%s\n' AUTH_ABSENT >> "\$stdin_log"
 fi
 out=
+data=
 while [ "\$#" -gt 0 ]; do
   case "\$1" in
     --output) out=\$2; shift 2 ;;
+    --data) data=\$2; shift 2 ;;
     *) shift ;;
   esac
 done
 [ -z "\$out" ] || printf '%s\n' '{"fake":"body"}' > "\$out"
+if [ -n "\${FAKE_CURL_BODY_LOG:-}" ]; then
+  case "\$data" in
+    @*) cp -- "\${data#@}" "\$FAKE_CURL_BODY_LOG" ;;
+  esac
+fi
 if [ -n "\${FAKE_CURL_EXIT:-}" ] && [ "\${FAKE_CURL_EXIT}" -ne 0 ]; then
   printf '%s' 000
   exit "\$FAKE_CURL_EXIT"
@@ -137,6 +147,7 @@ run_resolver() {  # <case-dir> <args...>
     FAKE_KEYCHAIN_LOG="$dir/keychain-services" \
     FAKE_CURL_ARGV_LOG="$dir/curl-argv" \
     FAKE_CURL_STDIN_LOG="$dir/curl-stdin" \
+    FAKE_CURL_BODY_LOG="$dir/curl-body" \
     FAKE_CURL_STATUS="${FAKE_CURL_STATUS:-200}" \
     FAKE_CURL_EXIT="${FAKE_CURL_EXIT:-0}" \
     FM_FORGE_CREDENTIAL_TIMEOUT="${FM_FORGE_CREDENTIAL_TIMEOUT:-}" \
@@ -437,6 +448,7 @@ run_resolver_body() {  # <case-dir> <body> <args...>
     FAKE_KEYCHAIN_LOG="$dir/keychain-services" \
     FAKE_CURL_ARGV_LOG="$dir/curl-argv" \
     FAKE_CURL_STDIN_LOG="$dir/curl-stdin" \
+    FAKE_CURL_BODY_LOG="$dir/curl-body" \
     FAKE_CURL_STATUS="${FAKE_CURL_STATUS:-200}" \
     FAKE_CURL_EXIT="${FAKE_CURL_EXIT:-0}" \
     "$RESOLVER" "$@" 2>"$err")
@@ -545,6 +557,22 @@ test_pr_description_writes_through_the_secret_safe_path() {
   assert_no_credential_leak "$argv" "the description request argv"
   stdin=$(cat "$dir/curl-stdin" 2>/dev/null)
   assert_contains "$stdin" "AUTH_PRESENT" "the credential must reach curl through its config on stdin"
+
+  # The request body the forge would have received, parsed rather than grepped:
+  # a title field added to the encoder is a title this write could overwrite.
+  assert_present "$dir/curl-body" "the description request must carry a body"
+  python3 -c '
+import json
+import sys
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(payload, dict):
+    sys.exit("the body is not a JSON object")
+if sorted(payload) != ["description"]:
+    sys.exit("the body carries " + ", ".join(sorted(payload)))
+if payload["description"] != sys.argv[2]:
+    sys.exit("the description field is not the text supplied on stdin")
+' "$dir/curl-body" 'a short reviewer-facing description' \
+    || fail "the description PUT must carry a description field and nothing else"
 
   # A 403 classifies as a scope rejection, naming the write scope it needs.
   dir=$(new_case)

@@ -721,11 +721,15 @@ forge_post_comment() {  # <forge> <api-path> <body-file>
 # it repeats that request scaffolding rather than sharing it: the two resemble
 # each other, but a helper taking the method or the path as an argument would be
 # the general write channel this script exists not to have. What they do share
-# is forge_write_status, because what a status MEANS is one question. A
-# description-only body is deliberate and verified against the live forge:
-# Bitbucket records description-only updates on its own pull requests, so no
-# title need be echoed back and a mis-read title can never overwrite a real one
-# (docs/pr-description-reshape.md).
+# is forge_write_status, because what a status MEANS is one question.
+#
+# The body carries a description and nothing else, so this write cannot overwrite
+# a title: none is read, and none is sent. What is established about the forge is
+# that Bitbucket records a change to a description alone, as its own activity
+# entry with no other field named. What is NOT established is what Bitbucket does
+# with the fields this body omits: no request in this shape has been made against
+# a live pull request, so a caller wanting that answer has to obtain it rather
+# than read it here.
 forge_put_description() {  # <forge> <api-path> <body-file>
   local forge=$1 path=$2 bodyfile=$3 base body http curl_status status
   base=$(forge_api_base "$forge") || {
