@@ -232,23 +232,49 @@ fi
 # --- split the body ----------------------------------------------------------
 
 # Sections are routed by their exact heading, and everything unnamed is kept, so
-# a hand-added section survives. The attestation line is pulled aside wherever
-# it sits, which in practice is inside the Pipeline section being moved.
+# a hand-added section survives. A "## " line inside a fenced code block is
+# quoted markdown rather than a heading - a findings log is full of them - so
+# fence state is tracked and routing ignores what a fence encloses. Fence
+# characters themselves are passed through untouched.
+#
+# The attestation is recognised by its HTML-comment form, once, and only inside
+# the section being moved: a findings line that merely quotes the token is part
+# of the record and stays with it.
 awk -v keep="$WORK/keep.md" -v move="$WORK/move.md" \
     -v attest="$WORK/attest.txt" -v heads="$WORK/headings.txt" '
-BEGIN { mode = "keep" }
-/^## / {
-  h = $0
-  sub(/[ \t\r]+$/, "", h)
-  print h > heads
-  if (h == "## Testing" || h == "## Pipeline" || h == "## Intent") {
-    mode = "move"
-  } else {
-    mode = "keep"
-  }
+function run_len(s, c,   n) {
+  n = 0
+  while (substr(s, n + 1, 1) == c) { n++ }
+  return n
 }
+BEGIN { mode = "keep"; fence = ""; fence_len = 0; got_attest = 0 }
 {
-  if (index($0, "no-mistakes-pipeline-attestation") > 0) {
+  t = $0
+  sub(/\r$/, "", t)
+  sub(/^ ? ? ?/, "", t)
+  if (t ~ /^```/ || t ~ /^~~~/) {
+    c = substr(t, 1, 1)
+    n = run_len(t, c)
+    rest = substr(t, n + 1)
+    if (fence == "") {
+      if (c != "`" || index(rest, "`") == 0) { fence = c; fence_len = n }
+    } else if (c == fence && n >= fence_len && rest ~ /^[ \t]*$/) {
+      fence = ""; fence_len = 0
+    }
+  }
+  if (fence == "" && $0 ~ /^## /) {
+    h = $0
+    sub(/[ \t\r]+$/, "", h)
+    print h > heads
+    if (h == "## Testing" || h == "## Pipeline" || h == "## Intent") {
+      mode = "move"
+    } else {
+      mode = "keep"
+    }
+  }
+  if (mode == "move" && fence == "" && got_attest == 0 &&
+      $0 ~ /^[ \t]*<!--[ \t]*no-mistakes-pipeline-attestation/) {
+    got_attest = 1
     print > attest
     next
   }
@@ -420,7 +446,10 @@ if ! grep -qF "$FM_PR_RESHAPE_MARKER" "$WORK/body.md"; then
   printf 'reshape: the description was written but does not carry the reshape marker; treat it as unchanged\n'
   exit "$EX_UNVERIFIED"
 fi
-if grep -qxE '## (Testing|Pipeline)' "$WORK/body.md"; then
+# Trailing spaces, tabs and carriage returns are stripped first, the same way
+# the splitter normalises a heading before comparing it, so a CRLF body or a
+# heading written with a trailing space is still recognised here.
+if sed 's/[[:space:]]*$//' "$WORK/body.md" | grep -qxE '## (Testing|Pipeline)'; then
   printf 'reshape: the description still carries a moved section after the write; treat it as incomplete\n'
   exit "$EX_UNVERIFIED"
 fi

@@ -12,7 +12,7 @@ Nothing here restates them.
 `mattw_watson/sls-scheduling` pull request 114 carried a 39,393-character description.
 Its sections, measured by counting the bytes between one `## ` heading and the next:
 
-| section | characters | disposition |
+| section | bytes | disposition |
 |---|---:|---|
 | `## Intent` | 7,244 | moved; a short replacement is written in its place |
 | `## What Changed` | 1,994 | kept |

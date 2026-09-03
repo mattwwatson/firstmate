@@ -10,14 +10,18 @@
 # The properties pinned here are the ones the mechanism depends on:
 #   - Testing, Pipeline and the original Intent move; every other section stays,
 #     including one a human added by hand
-#   - the no-mistakes attestation comment stays in the description
+#   - the no-mistakes attestation comment stays in the description, while a
+#     findings line that merely quotes its token stays in the moved record
+#   - a "## " heading quoted inside a fenced code block does not reroute the
+#     section it sits in
 #   - the original description is saved privately before the first write
 #   - the detail comment is posted BEFORE the description is trimmed, so a
 #     failed post leaves the record intact in the description
 #   - it is idempotent: a second run changes nothing and posts nothing
 #   - a pipeline run that restores the long body can be reshaped again, without
 #     posting an identical detail comment twice
-#   - a write that does not survive read-back is reported, not called success
+#   - a write that does not survive read-back is reported, not called success,
+#     including when the forge serves the body back with CRLF line endings
 #   - GitLab, a missing opening, an absent Pipeline, and an oversized detail
 #     each classify distinctly and write nothing
 # Every case runs against fake forge tools, so the suite needs no credential.
@@ -114,6 +118,18 @@ case "$2" in
       if [ "$prev" = --body-file ] 2>/dev/null; then cp -- "$a" "$FAKE_FORGE_BODY"; fi
       prev=$a
     done
+    # A forge that keeps a moved section and serves the body back with CRLF
+    # line endings, which is how GitHub stores a body edited through the web UI.
+    if [ "${FAKE_FORGE_CRLF_LEFTOVER:-0}" = 1 ]; then
+      printf '## Pipeline \nRound one raised these and here is how each was answered.\n' \
+        >> "$FAKE_FORGE_BODY"
+      python3 -c '
+import sys
+p = sys.argv[1]
+data = open(p, "rb").read().replace(b"\n", b"\r\n")
+open(p, "wb").write(data)
+' "$FAKE_FORGE_BODY"
+    fi
     exit "${FAKE_GH_EXIT:-0}"
     ;;
   comment)
@@ -171,6 +187,7 @@ run_reshape() {  # <case-dir> <url> [extra args...]
     FAKE_GH_COMMENT_EXIT="${FAKE_GH_COMMENT_EXIT:-0}" \
     FAKE_FORGE_COMMENT_EXIT="${FAKE_FORGE_COMMENT_EXIT:-0}" \
     FAKE_FORGE_WRITE_EXIT="${FAKE_FORGE_WRITE_EXIT:-0}" \
+    FAKE_FORGE_CRLF_LEFTOVER="${FAKE_FORGE_CRLF_LEFTOVER:-0}" \
     "$RESHAPE" "$url" --opening-file "$dir/opening.md" "$@" 2>&1)
   status=$?
   printf '%s|%s' "$status" "$out"
@@ -322,6 +339,108 @@ test_a_write_that_does_not_survive_read_back_is_reported() {
   pass "fm-pr-reshape.sh: a silent no-op write is caught by reading the description back"
 }
 
+test_a_findings_line_quoting_the_attestation_stays_in_the_record() {
+  local dir body comment kept
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed.
+
+## Testing
+
+Ran the suites.
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[]} -->
+
+### Review - 1 issue
+
+Finding: docs/pr-description-reshape.md line 105 mentions no-mistakes-pipeline-attestation:v1 and should say why.
+MD
+  run_reshape "$dir" "$GH_URL" >/dev/null
+  body=$(cat "$dir/forge-body.md")
+  comment=$(cat "$dir/comment.md")
+  assert_not_contains "$body" 'Finding: docs/pr-description-reshape.md' \
+    "a findings line that quotes the attestation token must not be printed into the description"
+  assert_contains "$comment" 'Finding: docs/pr-description-reshape.md line 105' \
+    "a findings line that quotes the attestation token must stay in the moved record"
+  assert_contains "$body" 'abc123' "the real attestation must still be kept in the description"
+  kept=$(printf '%s\n' "$body" | grep -c 'no-mistakes-pipeline-attestation' || true)
+  expect_code 1 "$kept" "only the attestation itself may be lifted into the description"
+  pass "fm-pr-reshape.sh: a findings line quoting the attestation token stays with the record"
+}
+
+test_a_fenced_heading_inside_a_moved_section_does_not_reroute_it() {
+  local dir body comment fences
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed.
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+The reviewer quoted the description it was reading:
+
+```markdown
+## What Changed
+
+- a quoted line from the build history
+## Pipeline
+```
+
+Round two follows the quoted block.
+
+## Two pre-existing test failures were approved past at the test gate
+
+A human wrote this after the pull request was opened.
+MD
+  run_reshape "$dir" "$GH_URL" >/dev/null
+  body=$(cat "$dir/forge-body.md")
+  comment=$(cat "$dir/comment.md")
+  assert_not_contains "$body" 'a quoted line from the build history' \
+    "markdown quoted inside a fence must not be left behind in the description"
+  assert_not_contains "$body" 'Round two follows the quoted block' \
+    "a fenced heading must not reroute the remainder of the section it sits in"
+  assert_not_contains "$body" '```' "no fragment of a fenced block may be left in the description"
+  assert_contains "$comment" 'a quoted line from the build history' \
+    "the fenced quote must move with the section that contains it"
+  assert_contains "$comment" 'Round two follows the quoted block' \
+    "the text after the fenced quote must move with its section too"
+  fences=$(printf '%s\n' "$comment" | grep -c '^```' || true)
+  expect_code 2 "$fences" "the moved record must carry both fence lines, unchanged"
+  assert_contains "$body" 'A human wrote this after the pull request was opened' \
+    "a genuine hand-added section after the fenced block must still be kept"
+  pass "fm-pr-reshape.sh: a fenced '## ' inside a moved section does not reroute it"
+}
+
+test_a_moved_heading_surviving_with_crlf_is_caught() {
+  local dir record
+  dir=$(new_case)
+  record=$(FAKE_FORGE_CRLF_LEFTOVER=1 run_reshape "$dir" "$GH_URL")
+  expect_code 6 "$(field "$record" 1)" \
+    "a moved section surviving a CRLF write must classify as unverified"
+  assert_contains "$(field "$record" 2)" "still carries a moved section" \
+    "the read-back must say a moved section survived"
+  pass "fm-pr-reshape.sh: a moved heading surviving with CRLF is caught by the read-back"
+}
+
 test_nothing_to_move_is_reported_and_writes_nothing() {
   local dir record
   dir=$(new_case)
@@ -394,6 +513,9 @@ test_a_restored_long_body_reshapes_again_without_duplicating_the_detail
 test_a_failed_comment_leaves_the_description_alone
 test_bitbucket_routes_through_the_firstmate_credential
 test_a_write_that_does_not_survive_read_back_is_reported
+test_a_findings_line_quoting_the_attestation_stays_in_the_record
+test_a_fenced_heading_inside_a_moved_section_does_not_reroute_it
+test_a_moved_heading_surviving_with_crlf_is_caught
 test_nothing_to_move_is_reported_and_writes_nothing
 test_an_oversized_detail_refuses_rather_than_truncating
 test_a_dry_run_writes_nothing
