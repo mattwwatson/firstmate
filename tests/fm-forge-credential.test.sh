@@ -423,9 +423,9 @@ test_github_has_no_firstmate_credential() {
   pass "GitHub reports that gh owns its credential instead of inventing one"
 }
 
-# Run the resolver with the fake toolchain and a comment body on stdin. The
-# comment write is the second and only other write action; it must reach the
-# forge through the same secret-safe path as every read.
+# Run the resolver with the fake toolchain and a write body on stdin - the
+# comment POST and the description PUT both read their payload that way, and
+# both must reach the forge through the same secret-safe path as every read.
 run_resolver_body() {  # <case-dir> <body> <args...>
   local dir=$1 body=$2 out err status
   shift 2

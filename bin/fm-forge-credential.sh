@@ -8,7 +8,10 @@
 # three need the same pullrequest:write scope; none can be turned into a general
 # write channel, because each supports exactly one method, path shape, and body.
 # Each therefore names its own endpoint in its own request rather than sharing a
-# parameterised one; only what a response STATUS means is shared between them.
+# parameterised one. The comment POST and the description PUT do share what a
+# response STATUS means, because that is one question; the merge POST shares
+# nothing, since it classifies no status at all and its caller owns that
+# protocol.
 #
 # Usage: fm-forge-credential.sh check <forge> [<repository>]
 #        fm-forge-credential.sh api-get <forge> <api-path>

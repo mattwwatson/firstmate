@@ -23,7 +23,8 @@
 #   - it is idempotent: a second run changes nothing and posts nothing, while a
 #     body that merely quotes the marker token in prose is still reshaped
 #   - an opening that would make the written description unconfirmable is
-#     refused before the comment is posted, not after
+#     refused before the comment is posted, not after - including one whose own
+#     unterminated fence a kept code block would otherwise appear to close
 #   - a pipeline run that restores the long body can be reshaped again, without
 #     posting an identical detail comment twice
 #   - a write that does not survive read-back is reported, not called success,
@@ -608,6 +609,60 @@ MD
   pass "fm-pr-reshape.sh: an unusable opening is refused before anything is posted"
 }
 
+test_an_opening_fence_is_not_rebalanced_by_a_kept_code_block() {
+  local dir record before
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed:
+
+```diff
+-old
++new
+```
+
+- And the other thing:
+
+```diff
+-before
++after
+```
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+Round one raised these.
+MD
+  cat > "$dir/opening.md" <<'MD'
+Counts award depth per patrol.
+
+## Intent
+
+Four sentences, and the command that produced this, which the author never closed:
+
+```sh
+fm-pr-reshape.sh "$URL" --opening-file opening.md
+MD
+  before=$(cat "$dir/forge-body.md")
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 2 "$(field "$record" 1)" \
+    "an unterminated opening fence must be refused even when kept blocks rebalance the count"
+  assert_contains "$(field "$record" 2)" "$dir/opening.md" \
+    "the refusal must name the opening file the caller has to correct"
+  [ "$before" = "$(cat "$dir/forge-body.md")" ] || \
+    fail "an unterminated opening fence must leave the description exactly as it was"
+  assert_absent "$dir/comment.md" "an unterminated opening fence must post nothing"
+  pass "fm-pr-reshape.sh: an opening's own fence is not rebalanced by a kept code block"
+}
+
 test_nothing_to_move_is_reported_and_writes_nothing() {
   local dir record
   dir=$(new_case)
@@ -687,6 +742,7 @@ test_a_kept_fenced_quote_of_a_moved_heading_is_not_called_unverified
 test_an_unclosed_fence_refuses_rather_than_moving_a_hand_added_section
 test_a_findings_line_quoting_the_marker_is_still_reshaped
 test_an_unusable_opening_is_refused_before_anything_is_posted
+test_an_opening_fence_is_not_rebalanced_by_a_kept_code_block
 test_nothing_to_move_is_reported_and_writes_nothing
 test_an_oversized_detail_refuses_rather_than_truncating
 test_a_dry_run_writes_nothing

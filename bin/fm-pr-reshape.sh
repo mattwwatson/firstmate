@@ -340,11 +340,20 @@ fi
 MOVED_LIST=$(grep -xE '## (Intent|Testing|Pipeline)' "$WORK/headings.txt" \
   | sed 's/^## //' | awk '!seen[$0]++' | paste -sd, - | sed 's/,/, /g')
 
+# The reshaped description carries a new "## Intent" from the opening, directly
+# above the footer, so the footer has to say WHICH Intent went to the comment.
+FOOTER_LIST=$(printf '%s' "$MOVED_LIST" \
+  | sed -e 's/^Intent/the original Intent/' -e 's/, Intent/, the original Intent/')
+
 {
   printf '## Detail moved out of the description\n\n'
   printf 'The description of this pull request was reshaped so it answers what the change is.\n'
   printf 'These sections moved here unchanged, because they record how it was built: %s.\n' "$MOVED_LIST"
-  printf 'Nothing was removed - the sections below are the whole of what left the description.\n\n'
+  printf 'Nothing was removed - the sections below are the whole of what left the description.\n'
+  if [ -s "$WORK/attest.txt" ]; then
+    printf 'The one exception is the no-mistakes pipeline attestation line, which stays in the description because a later run reads and rewrites it there.\n'
+  fi
+  printf '\n'
   cat "$WORK/move.md"
 } > "$WORK/comment.md"
 
@@ -360,7 +369,7 @@ MOVED_LIST=$(grep -xE '## (Intent|Testing|Pipeline)' "$WORK/headings.txt" \
 { while (blank-- > 0) print ""; blank = 0; print }
 ' "$WORK/keep.md"
   printf '\n---\n\n'
-  printf '%s%s. ' "$RESHAPE_FOOTER_PREFIX" "$MOVED_LIST"
+  printf '%s%s. ' "$RESHAPE_FOOTER_PREFIX" "$FOOTER_LIST"
   printf 'Nothing was discarded. %s\n' "$RESHAPE_FOOTER_SUFFIX"
   if [ -s "$WORK/attest.txt" ]; then
     printf '\n'
@@ -368,16 +377,28 @@ MOVED_LIST=$(grep -xE '## (Intent|Testing|Pipeline)' "$WORK/headings.txt" \
   fi
 } > "$WORK/newbody.md"
 
-# The description about to be published, split by the same rules the body was
-# read with, before anything is posted. The opening is free text a caller wrote:
-# one that leaves a fence open, or carries a heading this reshape moves, would
-# make the read-back proof unpassable with both artifacts already public.
+# The opening is free text a caller wrote, and it is checked on its own terms
+# first: a fence it leaves open can be closed again by a fenced block in a kept
+# section further down, so the assembled description alone cannot answer whether
+# the opening is well formed.
+split_body "$OPENING_FILE" "$WORK/open-keep.md" "$WORK/open-move.md" \
+  "$WORK/open-attest.txt" "$WORK/open-headings.txt" "$WORK/open-fence.txt" \
+  "$WORK/open-marker.txt"
+if [ -s "$WORK/open-fence.txt" ]; then
+  printf 'reshape: the opening in %s leaves a code fence open, so the reshaped description could not be confirmed after writing; nothing changed\n' \
+    "$OPENING_FILE"
+  exit "$EX_USAGE"
+fi
+
+# And the description about to be published, split by the same rules the body
+# was read with, before anything is posted: one that leaves a fence open, or
+# carries a heading this reshape moves, would make the read-back proof
+# unpassable with both artifacts already public.
 split_body "$WORK/newbody.md" "$WORK/new-keep.md" "$WORK/new-move.md" \
   "$WORK/new-attest.txt" "$WORK/new-headings.txt" "$WORK/new-fence.txt" \
   "$WORK/new-marker.txt"
 if [ -s "$WORK/new-fence.txt" ]; then
-  printf 'reshape: the opening in %s leaves a code fence open, so the reshaped description could not be confirmed after writing; nothing changed\n' \
-    "$OPENING_FILE"
+  printf 'reshape: the description this would write leaves a code fence open, so it could not be confirmed after writing; nothing changed\n'
   exit "$EX_USAGE"
 fi
 if grep -qxE '## (Testing|Pipeline)' "$WORK/new-headings.txt"; then
