@@ -481,6 +481,52 @@ walkthrough' pr-comment bitbucket mattw_watson/hexbattle 9)
   pass "pr-comment posts through the secret-safe path and classifies failures"
 }
 
+# The comment POST and the description PUT are deliberately separate requests,
+# each naming its own method and endpoint, but a forge status has to mean the
+# same thing whichever of them asked. This pins both halves of that: the same
+# classification for every failure, and each still sending its own request.
+test_both_writes_classify_a_failure_the_same_way() {
+  local status dirc dird comment description argv
+  for status in 401 403 404 000; do
+    dirc=$(new_case)
+    dird=$(new_case)
+    comment=$(FAKE_CURL_STATUS=$status run_resolver_body "$dirc" 'body' \
+      pr-comment bitbucket mattw_watson/hexbattle 9)
+    description=$(FAKE_CURL_STATUS=$status run_resolver_body "$dird" 'body' \
+      pr-description bitbucket mattw_watson/hexbattle 9)
+    [ "$(field "$comment" 1)" != 0 ] || fail "HTTP $status must not classify as success"
+    [ -n "$(field "$comment" 3)" ] || fail "HTTP $status must report a reason"
+    [ "$(field "$comment" 1)" = "$(field "$description" 1)" ] || \
+      fail "HTTP $status must exit the same way for both writes (comment $(field "$comment" 1), description $(field "$description" 1))"
+    [ "$(field "$comment" 3)" = "$(field "$description" 3)" ] || \
+      fail "HTTP $status must give the same reason for both writes"
+  done
+
+  # A transport failure, where no status arrives at all.
+  dirc=$(new_case)
+  dird=$(new_case)
+  comment=$(FAKE_CURL_EXIT=7 run_resolver_body "$dirc" 'body' \
+    pr-comment bitbucket mattw_watson/hexbattle 9)
+  description=$(FAKE_CURL_EXIT=7 run_resolver_body "$dird" 'body' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 7 "$(field "$comment" 1)" "an unreachable forge is inconclusive, not a rejection"
+  [ "$(field "$comment" 1)" = "$(field "$description" 1)" ] || \
+    fail "a transport failure must exit the same way for both writes"
+  [ "$(field "$comment" 3)" = "$(field "$description" 3)" ] || \
+    fail "a transport failure must give the same reason for both writes"
+
+  # Sharing the classification must not have merged the requests themselves.
+  argv=$(cat "$dirc/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "POST" "the comment must still be a POST"
+  assert_contains "$argv" "/pullrequests/9/comments" \
+    "the comment must still name the comments endpoint"
+  argv=$(cat "$dird/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "PUT" "the description must still be a PUT"
+  assert_not_contains "$argv" "/comments" \
+    "the description must still name the pull request itself"
+  pass "both writes classify a forge failure the same way and keep their own request"
+}
+
 # The description write is the third and last write action. It must be a PUT of
 # the pull request itself, carry only a description field, and be refused for the
 # same reasons a comment is - so it cannot become a general write channel.
@@ -978,6 +1024,7 @@ test_forge_and_repository_identity
 test_github_has_no_firstmate_credential
 test_pr_comment_posts_through_the_secret_safe_path
 test_pr_description_writes_through_the_secret_safe_path
+test_both_writes_classify_a_failure_the_same_way
 test_no_credential_store_is_its_own_outcome
 test_a_stalling_store_times_out_instead_of_hanging
 test_a_zero_bound_falls_back_to_the_default

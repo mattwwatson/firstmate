@@ -48,8 +48,10 @@
 #     question to answer per pull request, not per forge.
 #
 # IDEMPOTENT: a reshaped description carries FM_PR_RESHAPE_MARKER as visible
-# text (bin/fm-pr-lib.sh owns that string). A second run on an already-reshaped
-# body changes nothing and says so. The detail comment is keyed by a hash of its
+# text (bin/fm-pr-lib.sh owns that string), in the whole footer line this script
+# writes it in. The footer line is what is matched, not the bare token, so a
+# findings log that quotes the token in prose is still an unreshaped body. A
+# second run on an already-reshaped body changes nothing and says so. The detail comment is keyed by a hash of its
 # own content, so re-running after a pipeline run has restored the long body
 # posts the detail only if it actually differs from what was posted before.
 #
@@ -60,7 +62,8 @@
 # Every outcome is one stdout line for the caller to relay; the exit code
 # classifies it:
 #   0  reshaped, or already reshaped and nothing to do
-#   2  usage / invalid request
+#   2  usage / invalid request, including an opening whose own headings or code
+#      fences would make the reshaped description unconfirmable
 #   3  nothing to move - the body has no Testing or Pipeline section, or its
 #      code fences are unbalanced and its headings cannot be told from the
 #      markdown a findings log quotes
@@ -224,13 +227,6 @@ if [ ! -s "$WORK/body.md" ]; then
   exit "$EX_NOTHING"
 fi
 
-# Already reshaped: decline rather than compounding. This is the check that
-# stops a second run re-trimming a trimmed body or posting the detail twice.
-if grep -qF "$FM_PR_RESHAPE_MARKER" "$WORK/body.md"; then
-  printf 'reshape: %s is already reshaped; nothing changed\n' "$URL"
-  exit 0
-fi
-
 # --- split the body ----------------------------------------------------------
 
 # Sections are routed by their exact heading, and everything unnamed is kept, so
@@ -252,10 +248,20 @@ fi
 # suppresses every heading after it, which would route a hand-added section into
 # the comment with no error, and keeping what it does not name is the property
 # the whole split is built on.
-split_body() {  # <body> <keep> <move> <attest> <headings> <unterminated-fence>
-  : > "$2"; : > "$3"; : > "$4"; : > "$5"; : > "$6"
+#
+# The reshape marker is recognised the same way the attestation is: by the SHAPE
+# this script writes it in - the footer line below, whole, outside a fence -
+# rather than by the bare token. The token is deliberately visible text, so a
+# findings log that discusses this mechanism quotes it in prose, and a body that
+# merely mentions it has not been reshaped.
+RESHAPE_FOOTER_PREFIX='_Moved to a comment on this pull request: '
+RESHAPE_FOOTER_SUFFIX="[$FM_PR_RESHAPE_MARKER]_"
+
+split_body() {  # <body> <keep> <move> <attest> <headings> <unterminated-fence> <marker>
+  : > "$2"; : > "$3"; : > "$4"; : > "$5"; : > "$6"; : > "$7"
   awk -v keep="$2" -v move="$3" \
-      -v attest="$4" -v heads="$5" -v openfence="$6" '
+      -v attest="$4" -v heads="$5" -v openfence="$6" -v markerfile="$7" \
+      -v prefix="$RESHAPE_FOOTER_PREFIX" -v suffix="$RESHAPE_FOOTER_SUFFIX" '
 function run_len(s, c,   n) {
   n = 0
   while (substr(s, n + 1, 1) == c) { n++ }
@@ -264,7 +270,7 @@ function run_len(s, c,   n) {
 BEGIN { mode = "keep"; fence = ""; fence_len = 0; got_attest = 0 }
 {
   t = $0
-  sub(/\r$/, "", t)
+  sub(/[ \t\r]+$/, "", t)
   sub(/^ ? ? ?/, "", t)
   if (t ~ /^```/ || t ~ /^~~~/) {
     c = substr(t, 1, 1)
@@ -275,6 +281,11 @@ BEGIN { mode = "keep"; fence = ""; fence_len = 0; got_attest = 0 }
     } else if (c == fence && n >= fence_len && rest ~ /^[ \t]*$/) {
       fence = ""; fence_len = 0
     }
+  }
+  if (fence == "" && length(t) >= length(prefix) + length(suffix) &&
+      substr(t, 1, length(prefix)) == prefix &&
+      substr(t, length(t) - length(suffix) + 1) == suffix) {
+    print "reshaped" > markerfile
   }
   if (fence == "" && $0 ~ /^## /) {
     h = $0
@@ -299,7 +310,14 @@ END { if (fence != "") { print "unterminated" > openfence } }
 }
 
 split_body "$WORK/body.md" "$WORK/keep.md" "$WORK/move.md" \
-  "$WORK/attest.txt" "$WORK/headings.txt" "$WORK/fence-open.txt"
+  "$WORK/attest.txt" "$WORK/headings.txt" "$WORK/fence-open.txt" "$WORK/marker.txt"
+
+# Already reshaped: decline rather than compounding. This is the check that
+# stops a second run re-trimming a trimmed body or posting the detail twice.
+if [ -s "$WORK/marker.txt" ]; then
+  printf 'reshape: %s is already reshaped; nothing changed\n' "$URL"
+  exit 0
+fi
 
 # Refusing costs a re-run; guessing costs a section. Nothing is written.
 if [ -s "$WORK/fence-open.txt" ]; then
@@ -342,13 +360,31 @@ MOVED_LIST=$(grep -xE '## (Intent|Testing|Pipeline)' "$WORK/headings.txt" \
 { while (blank-- > 0) print ""; blank = 0; print }
 ' "$WORK/keep.md"
   printf '\n---\n\n'
-  printf '_Moved to a comment on this pull request: %s. ' "$MOVED_LIST"
-  printf 'Nothing was discarded. [%s]_\n' "$FM_PR_RESHAPE_MARKER"
+  printf '%s%s. ' "$RESHAPE_FOOTER_PREFIX" "$MOVED_LIST"
+  printf 'Nothing was discarded. %s\n' "$RESHAPE_FOOTER_SUFFIX"
   if [ -s "$WORK/attest.txt" ]; then
     printf '\n'
     cat "$WORK/attest.txt"
   fi
 } > "$WORK/newbody.md"
+
+# The description about to be published, split by the same rules the body was
+# read with, before anything is posted. The opening is free text a caller wrote:
+# one that leaves a fence open, or carries a heading this reshape moves, would
+# make the read-back proof unpassable with both artifacts already public.
+split_body "$WORK/newbody.md" "$WORK/new-keep.md" "$WORK/new-move.md" \
+  "$WORK/new-attest.txt" "$WORK/new-headings.txt" "$WORK/new-fence.txt" \
+  "$WORK/new-marker.txt"
+if [ -s "$WORK/new-fence.txt" ]; then
+  printf 'reshape: the opening in %s leaves a code fence open, so the reshaped description could not be confirmed after writing; nothing changed\n' \
+    "$OPENING_FILE"
+  exit "$EX_USAGE"
+fi
+if grep -qxE '## (Testing|Pipeline)' "$WORK/new-headings.txt"; then
+  printf 'reshape: the opening in %s carries a heading this reshape moves out, so the reshaped description could not be confirmed after writing; nothing changed\n' \
+    "$OPENING_FILE"
+  exit "$EX_USAGE"
+fi
 
 COMMENT_BYTES=$(wc -c < "$WORK/comment.md" | tr -d ' ')
 if [ "$COMMENT_BYTES" -gt "$COMMENT_MAX" ]; then
@@ -465,17 +501,19 @@ if ! read_description 2>"$WORK/verifyfail"; then
     "$(head -n 1 "$WORK/verifyfail" 2>/dev/null || true)"
   exit "$EX_UNVERIFIED"
 fi
-if ! grep -qF "$FM_PR_RESHAPE_MARKER" "$WORK/body.md"; then
-  printf 'reshape: the description was written but does not carry the reshape marker; treat it as unchanged\n'
-  exit "$EX_UNVERIFIED"
-fi
-# The same split the body was read with, so "a moved section survived" means
-# exactly what it meant before the write: a heading, whitespace-normalised, that
-# is not markdown quoted inside a fence.
+# The same split the body was read with, so "the marker is there" and "a moved
+# section survived" both mean exactly what they meant before the write: the
+# footer line whole and a heading, whitespace-normalised, neither of them
+# markdown quoted inside a fence.
 split_body "$WORK/body.md" "$WORK/verify-keep.md" "$WORK/verify-move.md" \
-  "$WORK/verify-attest.txt" "$WORK/verify-headings.txt" "$WORK/verify-fence.txt"
+  "$WORK/verify-attest.txt" "$WORK/verify-headings.txt" "$WORK/verify-fence.txt" \
+  "$WORK/verify-marker.txt"
 if [ -s "$WORK/verify-fence.txt" ]; then
   printf 'reshape: the description read back has an unterminated code fence, so the write could not be confirmed; treat it as incomplete\n'
+  exit "$EX_UNVERIFIED"
+fi
+if [ ! -s "$WORK/verify-marker.txt" ]; then
+  printf 'reshape: the description was written but does not carry the reshape marker; treat it as unchanged\n'
   exit "$EX_UNVERIFIED"
 fi
 if grep -qxE '## (Testing|Pipeline)' "$WORK/verify-headings.txt"; then

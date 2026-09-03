@@ -7,6 +7,8 @@
 # the pull-request description PUT (driven only by bin/fm-pr-reshape.sh). All
 # three need the same pullrequest:write scope; none can be turned into a general
 # write channel, because each supports exactly one method, path shape, and body.
+# Each therefore names its own endpoint in its own request rather than sharing a
+# parameterised one; only what a response STATUS means is shared between them.
 #
 # Usage: fm-forge-credential.sh check <forge> [<repository>]
 #        fm-forge-credential.sh api-get <forge> <api-path>
@@ -628,6 +630,38 @@ forge_post_merge() {  # <forge> <api-path> <strategy>
   return "$EX_OK"
 }
 
+# What a write's HTTP status means, for every write below. A status has to mean
+# the same thing whichever write asked, and this is the one place it is decided.
+# The request functions themselves stay separate on purpose: each hardcodes its
+# own method, its own path shape and its own body field, which is what keeps any
+# one of them from being turned into a general write channel, and that is worth
+# more than the lines they resemble each other in.
+forge_write_status() {  # <forge> <api-base> <http-code>
+  local forge=$1 base=$2 http=$3
+  case "$http" in
+    401)
+      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
+      return "$EX_REJECTED"
+      ;;
+    403)
+      REASON="credential refused by $forge (HTTP 403): it lacks the required pullrequest:write scope"
+      return "$EX_REJECTED"
+      ;;
+    404)
+      REASON="$forge has no such pull request (HTTP 404)"
+      return "$EX_NOT_FOUND"
+      ;;
+    000|'')
+      REASON="no usable response from ${base#https://}"
+      return "$EX_INCONCLUSIVE"
+      ;;
+    *)
+      REASON="unexpected response from $forge (HTTP $http)"
+      return "$EX_UNEXPECTED"
+      ;;
+  esac
+}
+
 # The second write request: POST one pull-request comment whose already
 # JSON-encoded body lives in <body-file>. Same secret handling as forge_get -
 # credential through a curl config on stdin, every curl diagnostic discarded -
@@ -671,34 +705,20 @@ forge_post_comment() {  # <forge> <api-path> <body-file>
       rm -f -- "$body"
       return "$EX_OK"
       ;;
-    401)
-      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
-      status=$EX_REJECTED
-      ;;
-    403)
-      REASON="credential refused by $forge (HTTP 403): it lacks the required pullrequest:write scope"
-      status=$EX_REJECTED
-      ;;
-    404)
-      REASON="$forge has no such pull request (HTTP 404)"
-      status=$EX_NOT_FOUND
-      ;;
-    000|'')
-      REASON="no usable response from ${base#https://}"
-      status=$EX_INCONCLUSIVE
-      ;;
-    *)
-      REASON="unexpected response from $forge (HTTP $http)"
-      status=$EX_UNEXPECTED
-      ;;
   esac
   rm -f -- "$body"
+  status=0
+  forge_write_status "$forge" "$base" "$http" || status=$?
   return "$status"
 }
 
 # The third and last write: a single PUT of the pull-request description. Like
 # forge_post_comment it supports exactly one method, one path shape, and one
-# body field, so it cannot be turned into a general write channel. A
+# body field, so it cannot be turned into a general write channel. That is why
+# it repeats that request scaffolding rather than sharing it: the two resemble
+# each other, but a helper taking the method or the path as an argument would be
+# the general write channel this script exists not to have. What they do share
+# is forge_write_status, because what a status MEANS is one question. A
 # description-only body is deliberate and verified against the live forge:
 # Bitbucket records description-only updates on its own pull requests, so no
 # title need be echoed back and a mis-read title can never overwrite a real one
@@ -739,28 +759,10 @@ forge_put_description() {  # <forge> <api-path> <body-file>
       rm -f -- "$body"
       return "$EX_OK"
       ;;
-    401)
-      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
-      status=$EX_REJECTED
-      ;;
-    403)
-      REASON="credential refused by $forge (HTTP 403): it lacks the required pullrequest:write scope"
-      status=$EX_REJECTED
-      ;;
-    404)
-      REASON="$forge has no such pull request (HTTP 404)"
-      status=$EX_NOT_FOUND
-      ;;
-    000|'')
-      REASON="no usable response from ${base#https://}"
-      status=$EX_INCONCLUSIVE
-      ;;
-    *)
-      REASON="unexpected response from $forge (HTTP $http)"
-      status=$EX_UNEXPECTED
-      ;;
   esac
   rm -f -- "$body"
+  status=0
+  forge_write_status "$forge" "$base" "$http" || status=$?
   return "$status"
 }
 

@@ -20,7 +20,10 @@
 #   - the original description is saved privately before the first write
 #   - the detail comment is posted BEFORE the description is trimmed, so a
 #     failed post leaves the record intact in the description
-#   - it is idempotent: a second run changes nothing and posts nothing
+#   - it is idempotent: a second run changes nothing and posts nothing, while a
+#     body that merely quotes the marker token in prose is still reshaped
+#   - an opening that would make the written description unconfirmable is
+#     refused before the comment is posted, not after
 #   - a pipeline run that restores the long body can be reshaped again, without
 #     posting an identical detail comment twice
 #   - a write that does not survive read-back is reported, not called success,
@@ -524,6 +527,87 @@ MD
   pass "fm-pr-reshape.sh: an unclosed fence refuses rather than moving a hand-added section"
 }
 
+test_a_findings_line_quoting_the_marker_is_still_reshaped() {
+  local dir record body comment
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed.
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+Finding: the guard matches the bare token fm-pr-reshape:v1 rather than the footer it writes.
+MD
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 0 "$(field "$record" 1)" "a body that only quotes the marker must still reshape"
+  assert_contains "$(field "$record" 2)" "reshaped from" \
+    "a body that quotes the marker in prose must not be declared already reshaped"
+  body=$(cat "$dir/forge-body.md")
+  comment=$(cat "$dir/comment.md")
+  assert_not_contains "$body" 'Round one' "the pipeline log must leave the description"
+  assert_contains "$comment" 'Finding: the guard matches the bare token' \
+    "the findings line that quoted the marker must move with its section"
+  assert_contains "$body" 'Moved to a comment on this pull request' \
+    "the reshaped description must carry the footer the guard matches"
+  pass "fm-pr-reshape.sh: a findings line quoting the marker token is still reshaped"
+}
+
+test_an_unusable_opening_is_refused_before_anything_is_posted() {
+  local dir record before
+  dir=$(new_case)
+  before=$(cat "$dir/forge-body.md")
+  cat > "$dir/opening.md" <<'MD'
+Counts award depth per patrol.
+
+## Intent
+
+Four sentences, written when the work was finished.
+
+## Testing
+
+The author wrote a heading the reshape moves out.
+MD
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 2 "$(field "$record" 1)" \
+    "an opening carrying a moved heading must be refused as a usage error"
+  assert_contains "$(field "$record" 2)" "$dir/opening.md" \
+    "the refusal must name the opening file the caller has to correct"
+  [ "$before" = "$(cat "$dir/forge-body.md")" ] || \
+    fail "an unusable opening must leave the description exactly as it was"
+  assert_absent "$dir/comment.md" "an unusable opening must not post the detail comment first"
+
+  dir=$(new_case)
+  before=$(cat "$dir/forge-body.md")
+  cat > "$dir/opening.md" <<'MD'
+Counts award depth per patrol.
+
+## Intent
+
+Four sentences, and an example the author never closed:
+
+```sh
+fm-pr-reshape.sh "$URL" --opening-file opening.md
+MD
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 2 "$(field "$record" 1)" \
+    "an opening leaving a code fence open must be refused as a usage error"
+  assert_contains "$(field "$record" 2)" "code fence open" \
+    "the refusal must say what about the opening could not be used"
+  [ "$before" = "$(cat "$dir/forge-body.md")" ] || \
+    fail "an opening with an open fence must leave the description exactly as it was"
+  assert_absent "$dir/comment.md" "an opening with an open fence must post nothing"
+  pass "fm-pr-reshape.sh: an unusable opening is refused before anything is posted"
+}
+
 test_nothing_to_move_is_reported_and_writes_nothing() {
   local dir record
   dir=$(new_case)
@@ -601,6 +685,8 @@ test_a_fenced_heading_inside_a_moved_section_does_not_reroute_it
 test_a_moved_heading_surviving_with_crlf_is_caught
 test_a_kept_fenced_quote_of_a_moved_heading_is_not_called_unverified
 test_an_unclosed_fence_refuses_rather_than_moving_a_hand_added_section
+test_a_findings_line_quoting_the_marker_is_still_reshaped
+test_an_unusable_opening_is_refused_before_anything_is_posted
 test_nothing_to_move_is_reported_and_writes_nothing
 test_an_oversized_detail_refuses_rather_than_truncating
 test_a_dry_run_writes_nothing
