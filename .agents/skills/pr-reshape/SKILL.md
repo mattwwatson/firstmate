@@ -58,7 +58,13 @@ Write the opening to a file under the scratch area, never inline on a command li
 3. Get the opening: the crewmate's file if it exists, else derived as above.
 4. Run the script with `--dry-run --keep-dir <dir>` first and read the planned description and comment. This writes nothing, and it is the cheapest possible check that the opening reads well and the split landed where you expected.
 5. Run it for real. Relay the outcome.
-6. If the script reports anything other than success, report the concrete reason and stop. Every refusal it makes leaves the pull request unchanged, so a refusal is never something to work around by hand.
+6. If the script reports anything other than success, report the concrete reason and stop. Never work a refusal around by editing the pull request by hand.
+   Read the reason before saying what happened to the pull request, because a refusal does not always mean nothing was written.
+   The guarantee is ordering, not inaction: the description is never trimmed unless the detail comment was posted first, and the outcome line says which side of that it stopped on.
+   A refusal that names no forge write - an unsupported forge, a missing opening, nothing to move, an unbalanced fence, an oversized detail, a body that is already reshaped, or a failed comment post - left the pull request untouched.
+   A refusal saying "the detail comment is posted and the original is kept" means the comment is public and only the description write failed.
+   A refusal saying the write could not be confirmed means both the comment and a description write may already have landed, so read the pull request before reporting and before any retry, or the captain will be told nothing changed on a pull request that now carries a comment.
+   In either of those two cases say so in your report, and check for an existing detail comment before re-running rather than posting a second one.
 
 ## Reporting it to the captain
 

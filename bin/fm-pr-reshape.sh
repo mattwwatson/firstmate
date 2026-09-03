@@ -61,7 +61,9 @@
 # classifies it:
 #   0  reshaped, or already reshaped and nothing to do
 #   2  usage / invalid request
-#   3  nothing to move - the body has no Testing or Pipeline section
+#   3  nothing to move - the body has no Testing or Pipeline section, or its
+#      code fences are unbalanced and its headings cannot be told from the
+#      markdown a findings log quotes
 #   4  the forge is not supported here (GitLab)
 #   5  a forge read or write was attempted and failed
 #   6  the write reported success but reading the description back did not
@@ -240,8 +242,20 @@ fi
 # The attestation is recognised by its HTML-comment form, once, and only inside
 # the section being moved: a findings line that merely quotes the token is part
 # of the record and stays with it.
-awk -v keep="$WORK/keep.md" -v move="$WORK/move.md" \
-    -v attest="$WORK/attest.txt" -v heads="$WORK/headings.txt" '
+#
+# This function is the one definition of what counts as a heading in a
+# description. The read-back check below runs it again over the description the
+# forge serves after the write, so the split and the proof cannot disagree about
+# whether a moved section is present.
+#
+# A fence left open at the end of the body is reported rather than followed: it
+# suppresses every heading after it, which would route a hand-added section into
+# the comment with no error, and keeping what it does not name is the property
+# the whole split is built on.
+split_body() {  # <body> <keep> <move> <attest> <headings> <unterminated-fence>
+  : > "$2"; : > "$3"; : > "$4"; : > "$5"; : > "$6"
+  awk -v keep="$2" -v move="$3" \
+      -v attest="$4" -v heads="$5" -v openfence="$6" '
 function run_len(s, c,   n) {
   n = 0
   while (substr(s, n + 1, 1) == c) { n++ }
@@ -280,9 +294,18 @@ BEGIN { mode = "keep"; fence = ""; fence_len = 0; got_attest = 0 }
   }
   if (mode == "move") { print > move } else { print > keep }
 }
-' "$WORK/body.md"
+END { if (fence != "") { print "unterminated" > openfence } }
+' "$1"
+}
 
-touch "$WORK/keep.md" "$WORK/move.md" "$WORK/attest.txt" "$WORK/headings.txt"
+split_body "$WORK/body.md" "$WORK/keep.md" "$WORK/move.md" \
+  "$WORK/attest.txt" "$WORK/headings.txt" "$WORK/fence-open.txt"
+
+# Refusing costs a re-run; guessing costs a section. Nothing is written.
+if [ -s "$WORK/fence-open.txt" ]; then
+  printf 'reshape: %s has an unterminated code fence, so its headings cannot be told from quoted markdown; nothing changed\n' "$URL"
+  exit "$EX_NOTHING"
+fi
 
 # Only the two long build-history sections justify a reshape. An Intent alone is
 # short enough to leave alone, so its presence is not the trigger.
@@ -446,10 +469,16 @@ if ! grep -qF "$FM_PR_RESHAPE_MARKER" "$WORK/body.md"; then
   printf 'reshape: the description was written but does not carry the reshape marker; treat it as unchanged\n'
   exit "$EX_UNVERIFIED"
 fi
-# Trailing spaces, tabs and carriage returns are stripped first, the same way
-# the splitter normalises a heading before comparing it, so a CRLF body or a
-# heading written with a trailing space is still recognised here.
-if sed 's/[[:space:]]*$//' "$WORK/body.md" | grep -qxE '## (Testing|Pipeline)'; then
+# The same split the body was read with, so "a moved section survived" means
+# exactly what it meant before the write: a heading, whitespace-normalised, that
+# is not markdown quoted inside a fence.
+split_body "$WORK/body.md" "$WORK/verify-keep.md" "$WORK/verify-move.md" \
+  "$WORK/verify-attest.txt" "$WORK/verify-headings.txt" "$WORK/verify-fence.txt"
+if [ -s "$WORK/verify-fence.txt" ]; then
+  printf 'reshape: the description read back has an unterminated code fence, so the write could not be confirmed; treat it as incomplete\n'
+  exit "$EX_UNVERIFIED"
+fi
+if grep -qxE '## (Testing|Pipeline)' "$WORK/verify-headings.txt"; then
   printf 'reshape: the description still carries a moved section after the write; treat it as incomplete\n'
   exit "$EX_UNVERIFIED"
 fi

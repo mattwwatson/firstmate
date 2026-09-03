@@ -13,7 +13,10 @@
 #   - the no-mistakes attestation comment stays in the description, while a
 #     findings line that merely quotes its token stays in the moved record
 #   - a "## " heading quoted inside a fenced code block does not reroute the
-#     section it sits in
+#     section it sits in, and one kept in the new description does not make the
+#     read-back call a completed reshape unverified
+#   - a body whose fences are unbalanced refuses, because an unterminated fence
+#     hides every heading after it and would move a hand-added section silently
 #   - the original description is saved privately before the first write
 #   - the detail comment is posted BEFORE the description is trimmed, so a
 #     failed post leaves the record intact in the description
@@ -441,6 +444,86 @@ test_a_moved_heading_surviving_with_crlf_is_caught() {
   pass "fm-pr-reshape.sh: a moved heading surviving with CRLF is caught by the read-back"
 }
 
+test_a_kept_fenced_quote_of_a_moved_heading_is_not_called_unverified() {
+  local dir record body
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The reshape now quotes the headings it moves, so this description shows one:
+
+```markdown
+## Pipeline
+```
+
+## Testing
+
+Ran the suites.
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+Round one raised these.
+MD
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 0 "$(field "$record" 1)" \
+    "a fenced quote of a moved heading in a kept section must not fail the read-back"
+  assert_contains "$(field "$record" 2)" "reshaped from" "the reshape must report itself complete"
+  body=$(cat "$dir/forge-body.md")
+  assert_contains "$body" 'so this description shows one' \
+    "the kept section carrying the fenced quote must survive"
+  assert_not_contains "$body" 'Round one raised these' \
+    "the real pipeline log must still leave the description"
+  pass "fm-pr-reshape.sh: a kept fenced quote of a moved heading is not called unverified"
+}
+
+test_an_unclosed_fence_refuses_rather_than_moving_a_hand_added_section() {
+  local dir record before
+  dir=$(new_case)
+  cat > "$dir/forge-body.md" <<'MD'
+## Intent
+
+A long intent.
+
+## What Changed
+
+- The thing that changed.
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+### Review - 1 issue
+
+The reviewer pasted a fence it never closed:
+
+```markdown
+## Some heading it quoted
+
+## Reviewer notes added by hand
+
+A human wrote this after the pull request was opened, and a reviewer needs it.
+MD
+  before=$(cat "$dir/forge-body.md")
+  record=$(run_reshape "$dir" "$GH_URL")
+  expect_code 3 "$(field "$record" 1)" \
+    "a body whose fences are unbalanced must refuse rather than guess at its headings"
+  assert_contains "$(field "$record" 2)" "unterminated code fence" \
+    "the refusal must name the reason the split could not be trusted"
+  [ "$before" = "$(cat "$dir/forge-body.md")" ] || \
+    fail "an unterminated fence must leave the description exactly as it was"
+  assert_absent "$dir/comment.md" \
+    "a hand-added section must not be posted into a comment on an unreadable split"
+  pass "fm-pr-reshape.sh: an unclosed fence refuses rather than moving a hand-added section"
+}
+
 test_nothing_to_move_is_reported_and_writes_nothing() {
   local dir record
   dir=$(new_case)
@@ -516,6 +599,8 @@ test_a_write_that_does_not_survive_read_back_is_reported
 test_a_findings_line_quoting_the_attestation_stays_in_the_record
 test_a_fenced_heading_inside_a_moved_section_does_not_reroute_it
 test_a_moved_heading_surviving_with_crlf_is_caught
+test_a_kept_fenced_quote_of_a_moved_heading_is_not_called_unverified
+test_an_unclosed_fence_refuses_rather_than_moving_a_hand_added_section
 test_nothing_to_move_is_reported_and_writes_nothing
 test_an_oversized_detail_refuses_rather_than_truncating
 test_a_dry_run_writes_nothing

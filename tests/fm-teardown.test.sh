@@ -68,6 +68,12 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
+# The per-task PR-ready paths are derived through the same helpers fm-teardown.sh
+# calls, so a change to the convention moves both together and cannot leave
+# teardown deleting a name nothing writes any more.
+# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
+
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
@@ -831,16 +837,19 @@ test_no_mistakes_origin_remote_allows() {
 # The reshape's saved originals are deliberately NOT covered here: they are
 # keyed by pull request rather than task and are the copy that survives.
 test_teardown_clears_the_pr_ready_per_task_files() {
-  local case_dir rc
+  local case_dir rc section posted opening
   case_dir=$(make_case nm-per-task-files)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  printf '## Manual testing\nwalkthrough\n' > "$case_dir/state/task-x1-manual-testing-section.md"
-  : > "$case_dir/state/task-x1.manual-testing-posted"
-  printf 'One line.\n\n## Intent\n\nFour sentences.\n' > "$case_dir/state/task-x1-pr-opening.md"
+  section=$(fm_manual_testing_section_path "$case_dir/state" task-x1)
+  posted=$(fm_manual_testing_posted_path "$case_dir/state" task-x1)
+  opening=$(fm_pr_opening_path "$case_dir/state" task-x1)
+  printf '## Manual testing\nwalkthrough\n' > "$section"
+  : > "$posted"
+  printf 'One line.\n\n## Intent\n\nFour sentences.\n' > "$opening"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -848,12 +857,9 @@ test_teardown_clears_the_pr_ready_per_task_files() {
   set -e
 
   expect_code 0 "$rc" "per-task files: teardown should succeed when HEAD is on origin"
-  assert_absent "$case_dir/state/task-x1-manual-testing-section.md" \
-    "teardown must remove the Manual-testing section file"
-  assert_absent "$case_dir/state/task-x1.manual-testing-posted" \
-    "teardown must remove the Manual-testing posted marker"
-  assert_absent "$case_dir/state/task-x1-pr-opening.md" \
-    "teardown must remove the reviewer-opening file"
+  assert_absent "$section" "teardown must remove the Manual-testing section file"
+  assert_absent "$posted" "teardown must remove the Manual-testing posted marker"
+  assert_absent "$opening" "teardown must remove the reviewer-opening file"
   pass "teardown clears the per-task files a PR-based ship writes at PR-ready"
 }
 
