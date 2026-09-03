@@ -67,7 +67,7 @@ Give the pull request's full `https://...` URL, what the description now says, a
 Say whether the summary is the author's own or your derived best attempt - that distinction is the captain's to know, not an internal detail.
 Do not mention the private saved copy, the marker, exit codes, or the read-back check unless something failed and the captain needs the reason to act.
 
-A reshape changes an outward-facing surface that other people read, so it is a captain-authorised action every time.
+A reshape rewrites a published pull request that other people read, so it is a captain-authorised action every time.
 Standing autonomy grants for merges and review findings do not cover it, and neither does having reshaped a different pull request earlier.
 
 ## What is never at risk
