@@ -481,6 +481,53 @@ walkthrough' pr-comment bitbucket mattw_watson/hexbattle 9)
   pass "pr-comment posts through the secret-safe path and classifies failures"
 }
 
+# The description write is the third and last write action. It must be a PUT of
+# the pull request itself, carry only a description field, and be refused for the
+# same reasons a comment is - so it cannot become a general write channel.
+test_pr_description_writes_through_the_secret_safe_path() {
+  local dir record argv stdin
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'a short reviewer-facing description' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 0 "$(field "$record" 1)" "a 200 description PUT must succeed"
+  argv=$(cat "$dir/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "PUT" "the description write must be a PUT"
+  assert_contains "$argv" "/2.0/repositories/mattw_watson/hexbattle/pullrequests/9" \
+    "the description write must target the pull request itself"
+  assert_not_contains "$argv" "/comments" \
+    "the description write must not target the comments endpoint"
+  assert_no_credential_leak "$argv" "the description request argv"
+  stdin=$(cat "$dir/curl-stdin" 2>/dev/null)
+  assert_contains "$stdin" "AUTH_PRESENT" "the credential must reach curl through its config on stdin"
+
+  # A 403 classifies as a scope rejection, naming the write scope it needs.
+  dir=$(new_case)
+  record=$(FAKE_CURL_STATUS=403 run_resolver_body "$dir" 'body' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 5 "$(field "$record" 1)" "a 403 description PUT is a credential rejection"
+  assert_contains "$(field "$record" 3)" "pullrequest:write" \
+    "a rejected description write must name the write scope it lacked"
+
+  # GitHub is refused before any keychain read: gh owns that credential.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'body' pr-description github owner/repo 9)
+  expect_code 2 "$(field "$record" 1)" "GitHub descriptions do not go through this script"
+  assert_absent "$dir/keychain-services" "a refused forge must not read the keychain"
+
+  # An empty description would ERASE the field rather than shorten it.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" '' pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 2 "$(field "$record" 1)" "an empty description must be refused"
+  assert_absent "$dir/curl-argv" "a refused empty description must never reach a request"
+
+  # A bad number is refused by the same closed grammar the other writes use.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'body' pr-description bitbucket mattw_watson/hexbattle 9x)
+  expect_code 2 "$(field "$record" 1)" "a malformed pull-request number must be refused"
+  assert_absent "$dir/curl-argv" "a refused identifier must never reach a request"
+  pass "pr-description writes through the secret-safe path and classifies failures"
+}
+
 test_no_credential_store_is_its_own_outcome() {
   local dir record
   dir=$(new_case)
@@ -930,6 +977,7 @@ test_no_mistakes_credential_is_out_of_reach
 test_forge_and_repository_identity
 test_github_has_no_firstmate_credential
 test_pr_comment_posts_through_the_secret_safe_path
+test_pr_description_writes_through_the_secret_safe_path
 test_no_credential_store_is_its_own_outcome
 test_a_stalling_store_times_out_instead_of_hanging
 test_a_zero_bound_falls_back_to_the_default

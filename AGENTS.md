@@ -98,6 +98,8 @@ state/               volatile runtime signals; gitignored
   <id>.bb-poll-warned.*  watcher one-shot markers so a Bitbucket poll's terminal verdict (declined, superseded) or credential/visibility warning wakes firstmate once, not every cycle; removed at retirement, at arm time, and by teardown
   <id>-manual-testing-section.md  the ship crewmate's Manual-testing section, written at PR-ready off its single observability judgement; fm-pr-comment.sh posts it to the PR as a comment; removed by teardown
   <id>.manual-testing-posted  fm-pr-comment.sh idempotency marker so a re-armed pr-check never double-posts the section; removed by teardown
+  <id>-pr-opening.md  the ship crewmate's optional short reviewer opening, written at PR-ready; the pr-reshape skill prefers it over deriving one, and nothing posts it automatically; removed by teardown
+  pr-reshape/<provider>__<repo>__<number>/  fm-pr-reshape.sh's private per-pull-request record: timestamped pre-reshape descriptions that are never overwritten, plus its posted-detail markers; keyed by pull request rather than task, so teardown leaves it
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
@@ -498,6 +500,7 @@ Load these only at their precise triggers; unless an entry says otherwise, they 
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
+- `pr-reshape` - load before reshaping a pull request's description for reviewers, and whenever the captain asks for one shortened or invokes `/pr-reshape`; also captain-invocable.
 - `project-management` - load before adding, creating, removing, or initializing a project.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.

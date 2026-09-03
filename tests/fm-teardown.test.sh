@@ -824,6 +824,39 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+# Teardown must clear the per-task files a PR-based ship writes at PR-ready, or
+# they accumulate in state/ for every finished task. Named files are removed
+# rather than a glob, so each one has to be listed - which is exactly why this
+# is pinned: adding a new per-task file and forgetting the removal is silent.
+# The reshape's saved originals are deliberately NOT covered here: they are
+# keyed by pull request rather than task and are the copy that survives.
+test_teardown_clears_the_pr_ready_per_task_files() {
+  local case_dir rc
+  case_dir=$(make_case nm-per-task-files)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  printf '## Manual testing\nwalkthrough\n' > "$case_dir/state/task-x1-manual-testing-section.md"
+  : > "$case_dir/state/task-x1.manual-testing-posted"
+  printf 'One line.\n\n## Intent\n\nFour sentences.\n' > "$case_dir/state/task-x1-pr-opening.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "per-task files: teardown should succeed when HEAD is on origin"
+  assert_absent "$case_dir/state/task-x1-manual-testing-section.md" \
+    "teardown must remove the Manual-testing section file"
+  assert_absent "$case_dir/state/task-x1.manual-testing-posted" \
+    "teardown must remove the Manual-testing posted marker"
+  assert_absent "$case_dir/state/task-x1-pr-opening.md" \
+    "teardown must remove the reviewer-opening file"
+  pass "teardown clears the per-task files a PR-based ship writes at PR-ready"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -1883,6 +1916,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_clears_the_pr_ready_per_task_files
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker

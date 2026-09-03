@@ -257,6 +257,48 @@ EOF
   pass "fm-brief.sh: every PR-based ship brief carries the Manual-testing section, both branches spelled out"
 }
 
+# The reviewer opening reaches exactly the two PR-producing modes, for the same
+# reason the Manual-testing section does: it describes a pull request, and
+# local-only and scout briefs produce none. Unlike that section it is optional,
+# and the brief must say so, because nothing posts it and no gate fails without
+# it - it is read only if the description is later reshaped.
+test_reviewer_opening_section_in_pr_producing_modes_only() {
+  local home id brief
+  home="$TMP_ROOT/reviewer-opening-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- nm-open [no-mistakes] - PR-producing, gets the opening (added 2026-09-03)
+- dp-open [direct-PR] - PR-producing, gets the opening (added 2026-09-03)
+- lo-open [local-only] - no PR, no opening (added 2026-09-03)
+EOF
+
+  for id_proj in "brief-ro-nm:nm-open" "brief-ro-dp:dp-open"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "## Reviewer opening" "$brief" \
+      "$id: a PR-based ship brief must ask for the reviewer opening"
+    assert_grep "$id-pr-opening.md" "$brief" \
+      "$id: the brief must name the exact opening file the worker writes"
+    assert_grep "nothing fails if you skip it" "$brief" \
+      "$id: the brief must say the opening is optional, since no gate enforces it"
+    assert_grep "No round history, no findings, no CI narrative" "$brief" \
+      "$id: the brief must rule out the diary content the opening exists to replace"
+    assert_no_grep "EOF" "$brief" "$id: the section leaked a heredoc EOF marker"
+  done
+
+  id="brief-ro-lo"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" lo-open >/dev/null 2>&1
+  assert_no_grep "## Reviewer opening" "$home/data/$id/brief.md" \
+    "a local-only brief has no PR, so it must not ask for a reviewer opening"
+
+  id="brief-ro-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" nm-open --scout >/dev/null 2>&1
+  assert_no_grep "## Reviewer opening" "$home/data/$id/brief.md" \
+    "a scout produces no PR, so it must not ask for a reviewer opening"
+  pass "fm-brief.sh: the reviewer opening reaches the two PR-producing modes only"
+}
+
 # The merge-unobservable grant additionally records the SAME judgement as an
 # [observable=yes|no] token on the PR-ready line, which bin/fm-merge-decision.sh
 # reads. Every other grant leaves the token out; local-only and scout have no PR.
@@ -721,6 +763,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_manual_testing_section_universal
+test_reviewer_opening_section_in_pr_producing_modes_only
 test_observability_token_follows_the_grant
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

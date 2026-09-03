@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Resolve firstmate's own forge credential and make forge API calls with it:
-# read-only calls everywhere, plus exactly two write actions, each a single
-# closed-form POST - the pull-request merge POST (driven only by
-# bin/fm-bb-pr-merge.sh) and the pull-request comment POST (driven only by
-# bin/fm-pr-comment.sh, which posts a ship task's Manual-testing section). Both
-# writes need the same pullrequest:write scope; neither can be turned into a
-# general write channel, because each supports exactly one method, path shape,
-# and body.
+# read-only calls everywhere, plus exactly three write actions, each a single
+# closed-form request - the pull-request merge POST (driven only by
+# bin/fm-bb-pr-merge.sh), the pull-request comment POST (driven only by
+# bin/fm-pr-comment.sh and bin/fm-pr-reshape.sh through fm_pr_post_comment), and
+# the pull-request description PUT (driven only by bin/fm-pr-reshape.sh). All
+# three need the same pullrequest:write scope; none can be turned into a general
+# write channel, because each supports exactly one method, path shape, and body.
 #
 # Usage: fm-forge-credential.sh check <forge> [<repository>]
 #        fm-forge-credential.sh api-get <forge> <api-path>
 #        fm-forge-credential.sh merge-capable <forge>
 #        fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
 #        fm-forge-credential.sh pr-comment <forge> <repository> <number>
+#        fm-forge-credential.sh pr-description <forge> <repository> <number>
 #        fm-forge-credential.sh forge-of <url>
 #        fm-forge-credential.sh repo-of <url>
 #
@@ -54,7 +55,7 @@
 #          owns only credential resolution and the request. Whether the merge
 #          actually happened is never inferred here.
 # pr-comment
-#          The other write action: a single POST of the pull-request comment
+#          The second write action: a single POST of the pull-request comment
 #          endpoint for <repository> and <number>. The comment body is read
 #          whole from stdin - never from argv, so an arbitrary markdown section
 #          cannot leak onto the command line - and is JSON-encoded before the
@@ -62,8 +63,20 @@
 #          read, it prints the response body on a 2xx and returns a classifying
 #          exit code otherwise; unlike pr-merge there is no multi-status
 #          protocol, because a comment neither redirects nor rate-negotiates.
-#          Only bin/fm-pr-comment.sh drives it, to post a ship task's
-#          Manual-testing section once its PR exists.
+#          Driven only through fm_pr_post_comment in bin/fm-pr-lib.sh, which is
+#          the single owner of per-forge comment routing: bin/fm-pr-comment.sh
+#          posts a ship task's Manual-testing section, and bin/fm-pr-reshape.sh
+#          posts the detail a reshaped description moves out.
+# pr-description
+#          The third write action: a single PUT of the pull request itself for
+#          <repository> and <number>, sending only a description field. The new
+#          description is read whole from stdin, for the same reason the comment
+#          body is, and JSON-encoded the same way. An empty stdin is refused,
+#          because an empty description erases the field rather than shortening
+#          it and no caller here wants that. Only bin/fm-pr-reshape.sh drives it,
+#          and that caller reads the description back afterwards rather than
+#          trusting this exit code, because a body write can report success
+#          without changing anything.
 # forge-of Print the forge name for a git remote or PR URL (single owner of
 #          that mapping), or exit 1 when the host belongs to no known forge.
 # repo-of  Print the repository identifier that same URL names, in the forge's
@@ -195,6 +208,7 @@ usage: fm-forge-credential.sh check <forge> [<repository>]
        fm-forge-credential.sh merge-capable <forge>
        fm-forge-credential.sh pr-merge <forge> <repository> <number> <strategy>
        fm-forge-credential.sh pr-comment <forge> <repository> <number>
+       fm-forge-credential.sh pr-description <forge> <repository> <number>
        fm-forge-credential.sh forge-of <url>
        fm-forge-credential.sh repo-of <url>
 
@@ -279,6 +293,23 @@ forge_pr_comment_path() {  # <forge> <repository> <number>
   esac
   case "$1" in
     bitbucket) printf '%s' "/2.0/repositories/$2/pullrequests/$3/comments" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The pull-request itself, for the description update, validated with the same
+# closed repository and number grammar as the two paths above. This is the
+# resource a PUT mutates, so it carries no trailing segment.
+forge_pr_path() {  # <forge> <repository> <number>
+  forge_repo_valid "$1" "$2" || return 1
+  case "$3" in
+    [1-9]) ;;
+    [1-9]*[!0-9]*) return 1 ;;
+    [1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    bitbucket) printf '%s' "/2.0/repositories/$2/pullrequests/$3" ;;
     *) return 1 ;;
   esac
 }
@@ -665,6 +696,74 @@ forge_post_comment() {  # <forge> <api-path> <body-file>
   return "$status"
 }
 
+# The third and last write: a single PUT of the pull-request description. Like
+# forge_post_comment it supports exactly one method, one path shape, and one
+# body field, so it cannot be turned into a general write channel. A
+# description-only body is deliberate and verified against the live forge:
+# Bitbucket records description-only updates on its own pull requests, so no
+# title need be echoed back and a mis-read title can never overwrite a real one
+# (docs/pr-description-reshape.md).
+forge_put_description() {  # <forge> <api-path> <body-file>
+  local forge=$1 path=$2 bodyfile=$3 base body http curl_status status
+  base=$(forge_api_base "$forge") || {
+    REASON="unknown forge"
+    return "$EX_USAGE"
+  }
+  if ! command -v curl >/dev/null 2>&1; then
+    REASON="curl is not installed, so the description request could not be made"
+    return "$EX_INCONCLUSIVE"
+  fi
+  body=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-body.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the response"
+    return "$EX_INCONCLUSIVE"
+  }
+  http=$(printf 'user = "%s"\n' "$(escape_curl_config "$CRED_USER:$CRED_SECRET")" \
+    | curl --silent --globoff --config - \
+        --request PUT \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data "@$bodyfile" \
+        --max-time "$REQUEST_TIMEOUT" \
+        --output "$body" \
+        --write-out '%{http_code}' \
+        "$base$path" 2>/dev/null)
+  curl_status=$?
+  if [ "$curl_status" -ne 0 ]; then
+    rm -f -- "$body"
+    REASON="no usable response from ${base#https://} (curl exit $curl_status)"
+    return "$EX_INCONCLUSIVE"
+  fi
+  case "$http" in
+    2??)
+      cat -- "$body"
+      rm -f -- "$body"
+      return "$EX_OK"
+      ;;
+    401)
+      REASON="credential rejected by $forge (HTTP 401): the token is invalid, revoked, or expired"
+      status=$EX_REJECTED
+      ;;
+    403)
+      REASON="credential refused by $forge (HTTP 403): it lacks the required pullrequest:write scope"
+      status=$EX_REJECTED
+      ;;
+    404)
+      REASON="$forge has no such pull request (HTTP 404)"
+      status=$EX_NOT_FOUND
+      ;;
+    000|'')
+      REASON="no usable response from ${base#https://}"
+      status=$EX_INCONCLUSIVE
+      ;;
+    *)
+      REASON="unexpected response from $forge (HTTP $http)"
+      status=$EX_UNEXPECTED
+      ;;
+  esac
+  rm -f -- "$body"
+  return "$status"
+}
+
 # --- subcommands -------------------------------------------------------------
 
 cmd_check() {  # <forge> [<repository>]
@@ -835,6 +934,51 @@ json.dump({"content": {"raw": raw}}, open(sys.argv[2], "w", encoding="utf-8"))
   return "$EX_OK"
 }
 
+cmd_pr_description() {  # <forge> <repository> <number>   (description on stdin)
+  local forge=$1 repo=$2 number=$3 path status raw json
+  forge_supported "$forge" || return "$EX_USAGE"
+  if ! path=$(forge_pr_path "$forge" "$repo" "$number"); then
+    REASON="'$repo' number '$number' is not a valid $forge pull request identifier"
+    return "$EX_USAGE"
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    REASON="python3 is not installed, so the description could not be encoded"
+    return "$EX_INCONCLUSIVE"
+  fi
+  raw=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-dbody.XXXXXX" 2>/dev/null) || {
+    REASON="could not create a temporary file for the description"
+    return "$EX_INCONCLUSIVE"
+  }
+  json=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-forge-djson.XXXXXX" 2>/dev/null) || {
+    rm -f -- "$raw"
+    REASON="could not create a temporary file for the description request"
+    return "$EX_INCONCLUSIVE"
+  }
+  cat > "$raw"
+  # An empty description would erase the field rather than shorten it, and no
+  # caller here has a reason to do that, so it is refused like an empty comment.
+  if [ ! -s "$raw" ]; then
+    rm -f -- "$raw" "$json"
+    REASON="refusing to write an empty pull-request description"
+    return "$EX_USAGE"
+  fi
+  if ! python3 -c '
+import json
+import sys
+raw = open(sys.argv[1], "r", encoding="utf-8", errors="strict").read()
+json.dump({"description": raw}, open(sys.argv[2], "w", encoding="utf-8"))
+' "$raw" "$json" 2>/dev/null; then
+    rm -f -- "$raw" "$json"
+    REASON="the description is not valid UTF-8, so it could not be encoded"
+    return "$EX_USAGE"
+  fi
+  rm -f -- "$raw"
+  resolve_credential "$forge" || { status=$?; rm -f -- "$json"; return "$status"; }
+  forge_put_description "$forge" "$path" "$json" || { status=$?; rm -f -- "$json"; return "$status"; }
+  rm -f -- "$json"
+  return "$EX_OK"
+}
+
 # Single owner of the url-to-forge mapping. The host is matched exactly, so a
 # URL that merely mentions a forge host inside its path is never mistaken for
 # one.
@@ -944,6 +1088,15 @@ case "$COMMAND" in
       exit "$EX_USAGE"
     fi
     cmd_pr_comment "$1" "$2" "$3"
+    STATUS=$?
+    ;;
+  pr-description)
+    shift
+    if [ "$#" -ne 3 ]; then
+      echo "usage: fm-forge-credential.sh pr-description <forge> <repository> <number>" >&2
+      exit "$EX_USAGE"
+    fi
+    cmd_pr_description "$1" "$2" "$3"
     STATUS=$?
     ;;
   forge-of)
