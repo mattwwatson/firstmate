@@ -9,7 +9,8 @@
 #
 # Usage: fm-pr-comment.sh <task-id> <pr-url>
 #
-# The forge decides the credential path: GitHub goes through the gh CLI (which
+# The forge decides the credential path, and fm_pr_post_comment in
+# bin/fm-pr-lib.sh owns that routing for every caller: GitHub goes through gh (which
 # owns firstmate's GitHub credential), Bitbucket through bin/fm-forge-credential.sh
 # pr-comment (firstmate's keychain credential, pullrequest:write). GitLab is not
 # yet wired and reports that plainly rather than failing silently.
@@ -76,43 +77,20 @@ if [ ! -f "$SECTION" ] || [ ! -s "$SECTION" ]; then
   exit "$EX_NO_SECTION"
 fi
 
-post_github() {
-  if ! command -v "$GH_BIN" >/dev/null 2>&1; then
-    REASON="gh is not on PATH"
-    return 1
-  fi
-  "$GH_BIN" pr comment "$URL" --body-file "$SECTION" >/dev/null 2>&1 || {
-    REASON="gh pr comment failed"
-    return 1
-  }
-}
-
-post_bitbucket() {
-  local err reason
-  err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-comment-err.XXXXXX") || { REASON="could not create a temporary file"; return 1; }
-  if "$FORGE_CREDENTIAL_BIN" pr-comment bitbucket "$PROJECT_PATH" "$NUMBER" >/dev/null 2>"$err" < "$SECTION"; then
-    rm -f -- "$err"
-    return 0
-  fi
-  reason=$(head -n 1 "$err" 2>/dev/null || true)
-  rm -f -- "$err"
-  REASON="${reason#error: }"
-  [ -n "$REASON" ] || REASON="the comment request failed"
-  return 1
-}
-
-REASON=
-case "$PROVIDER" in
-  github) post_github ;;
-  bitbucket) post_bitbucket ;;
-  *)
-    printf 'manual-testing: posting to %s is not supported; nothing posted\n' "$PROVIDER"
-    exit "$EX_UNSUPPORTED"
-    ;;
-esac || {
-  printf 'manual-testing: post failed: %s\n' "$REASON"
+# The per-forge routing itself lives in fm_pr_post_comment (bin/fm-pr-lib.sh),
+# so this script and bin/fm-pr-reshape.sh post through one implementation. Its
+# return of 2 is the unsupported forge, which stays a distinct outcome here.
+POST_STATUS=0
+fm_pr_post_comment "$PROVIDER" "$URL" "$PROJECT_PATH" "$NUMBER" "$SECTION" \
+  "$GH_BIN" "$FORGE_CREDENTIAL_BIN" || POST_STATUS=$?
+if [ "$POST_STATUS" -eq 2 ]; then
+  printf 'manual-testing: posting to %s is not supported; nothing posted\n' "$PROVIDER"
+  exit "$EX_UNSUPPORTED"
+fi
+if [ "$POST_STATUS" -ne 0 ]; then
+  printf 'manual-testing: post failed: %s\n' "$FM_PR_POST_REASON"
   exit "$EX_POST_FAILED"
-}
+fi
 
 # Record success only after the post is confirmed, so a failed attempt leaves no
 # marker and firstmate can retry by re-arming.

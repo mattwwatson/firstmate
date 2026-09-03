@@ -132,6 +132,85 @@ fm_manual_testing_posted_path() {  # <state-dir> <id>
   printf '%s/%s.manual-testing-posted' "$1" "$2"
 }
 
+# The per-task file into which a ship crewmate writes the reviewer-facing opening
+# for its own pull request at PR-ready: a one-line summary and a short Intent,
+# written off knowledge it has because the work is finished. This function is the
+# ONE owner of that path convention: bin/fm-brief.sh names it in the generated
+# brief and the pr-reshape skill prefers it over deriving an opening from the
+# published body. Volatile per-task state, removed by bin/fm-teardown.sh.
+# Nothing posts it automatically - a reshape is always an explicit action - so an
+# absent file is an ordinary case rather than a gap.
+fm_pr_opening_path() {  # <state-dir> <id>
+  printf '%s/%s-pr-opening.md' "$1" "$2"
+}
+
+# The visible sentinel a reshaped description carries, and the single owner of
+# that string. It is deliberately visible text rather than an HTML comment,
+# because Bitbucket escapes HTML in a pull-request description and would print a
+# comment marker as literal characters to every reviewer
+# (docs/pr-description-reshape.md records that measurement).
+# Consumed by bin/fm-pr-reshape.sh, which writes it into the footer line of a
+# reshaped description and matches that whole line - not the bare token - to
+# decide a body is already reshaped and decline a second run. Because the token
+# is visible text, a findings log discussing this mechanism can quote it in
+# prose, and such a body has not been reshaped.
+# shellcheck disable=SC2034
+FM_PR_RESHAPE_MARKER='fm-pr-reshape:v1'
+
+# The private per-pull-request directory holding a reshape's saved original
+# descriptions and its posted-detail markers. Keyed by the forge identity rather
+# than a task id, because a reshape is driven by a pull-request URL and may run
+# against a pull request this home has no task for.
+fm_pr_reshape_dir() {  # <state-dir> <provider> <project-path> <number>
+  local slug=${3//\//__}
+  printf '%s/pr-reshape/%s__%s__%s' "$1" "$2" "$slug" "$4"
+}
+
+# Post <file> as a pull-request comment on <provider>, and the ONE owner of that
+# per-forge routing: GitHub through the gh CLI, which owns firstmate's GitHub
+# credential, and Bitbucket through bin/fm-forge-credential.sh pr-comment, which
+# owns the keychain credential and its single closed-form comment POST. Both
+# bin/fm-pr-comment.sh and bin/fm-pr-reshape.sh call this rather than each
+# spelling the routing out, so a forge change lands in one place.
+# On failure it sets FM_PR_POST_REASON to one line and returns 1; GitLab is not
+# wired and returns 2 so a caller can report it as unsupported rather than failed.
+# Callers supply GH_BIN and FORGE_CREDENTIAL_BIN so tests can stub both.
+FM_PR_POST_REASON=
+fm_pr_post_comment() {  # <provider> <url> <project-path> <number> <file> <gh-bin> <forge-bin>
+  local provider=$1 url=$2 path=$3 number=$4 file=$5 gh_bin=$6 forge_bin=$7
+  local err reason
+  FM_PR_POST_REASON=
+  case "$provider" in
+    github)
+      if ! command -v "$gh_bin" >/dev/null 2>&1; then
+        FM_PR_POST_REASON="gh is not on PATH"
+        return 1
+      fi
+      "$gh_bin" pr comment "$url" --body-file "$file" >/dev/null 2>&1 || {
+        FM_PR_POST_REASON="gh pr comment failed"
+        return 1
+      }
+      return 0
+      ;;
+    bitbucket)
+      err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-post-err.XXXXXX") || {
+        FM_PR_POST_REASON="could not create a temporary file"
+        return 1
+      }
+      if "$forge_bin" pr-comment bitbucket "$path" "$number" >/dev/null 2>"$err" < "$file"; then
+        rm -f -- "$err"
+        return 0
+      fi
+      reason=$(head -n 1 "$err" 2>/dev/null || true)
+      rm -f -- "$err"
+      FM_PR_POST_REASON="${reason#error: }"
+      [ -n "$FM_PR_POST_REASON" ] || FM_PR_POST_REASON="the comment request failed"
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.

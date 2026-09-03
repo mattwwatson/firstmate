@@ -41,6 +41,12 @@
 # the merge-unobservable grant additionally requires the SAME judgement as an
 # [observable=yes|no] token on the PR-ready line (bin/fm-classify-lib.sh owns the
 # grammar, bin/fm-merge-decision.sh reads it back) - one judgement, two records.
+# Every PR-based ship brief also asks the worker to write a short reviewer
+# opening - one summary line and about four sentences of intent - into the
+# per-task file fm_pr_opening_path names. Nothing posts it: the pr-reshape skill
+# reads it if the description is later reshaped, so an unused file costs nothing
+# and a missing one is an ordinary case. It exists because the worker is the only
+# party that knows first-hand what it built, and knows it only once it is done.
 # local-only skips both: it has no PR to comment on or auto-merge.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
@@ -139,6 +145,7 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 SECTION_FILE=$(shell_quote "$(fm_manual_testing_section_path "$STATE" "$ID")")
+OPENING_FILE=$(shell_quote "$(fm_pr_opening_path "$STATE" "$ID")")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -339,6 +346,29 @@ fi
 # carries merge-unobservable, the [observable=yes|no] token (bin/fm-merge-decision.sh
 # reads it). One judgement, two records; the file is what firstmate posts to the
 # PR as a comment (bin/fm-pr-comment.sh), so the worker never edits the PR itself.
+# reviewer_opening_section -> the one addition that lets a later reshape use the
+# AUTHOR's summary instead of one derived from the published body. The worker is
+# the only party that ever knows what it built first-hand, and it knows it only
+# once the work is done, so PR-ready is the one moment this can be written. It
+# is deliberately NOT posted anywhere automatically: the pr-reshape skill reads
+# the file when a reshape is asked for, so an unused file costs nothing and a
+# missing one is an ordinary case rather than a gap.
+reviewer_opening_section() {
+  cat <<EOF
+
+## Reviewer opening (write this at the same time as the Manual-testing section)
+Your PR description is generated, and its Intent grows across rounds until it reads as a diary rather than a summary. So write the short version yourself, now that the work is finished and you are the only one who knows what it did.
+Write it into this exact file (create it, overwriting any earlier draft):
+  $OPENING_FILE
+Shape it exactly like this and nothing more:
+- ONE line, first, saying what the change does for whoever benefits - no heading above it.
+- A blank line, then a \`## Intent\` heading.
+- About FOUR sentences under that heading: what the change is for, what it does, and any limit a reviewer should know. Aim for about 400 characters.
+Write about the finished behaviour, not the sequence of attempts. No round history, no findings, no CI narrative - those already exist elsewhere and are exactly what this replaces.
+Nothing posts this file for you and nothing fails if you skip it; it is read only if the description is later reshaped for reviewers.
+EOF
+}
+
 manual_testing_section() {  # <example-ready-line>
   cat <<EOF
 
@@ -377,6 +407,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 $(manual_testing_section 'done: PR {url}')
+$(reviewer_opening_section)
 EOF
     ;;
   local-only)
@@ -413,6 +444,7 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 $(manual_testing_section 'done: PR {url} checks green')
+$(reviewer_opening_section)
 EOF
     ;;
 esac

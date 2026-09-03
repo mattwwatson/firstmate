@@ -169,6 +169,7 @@ family_for_basename() {
       ;;
     fm-merge-decision.test.sh|\
     fm-pr-check-security.test.sh|fm-pr-comment.test.sh|fm-pr-merge.test.sh|\
+    fm-pr-reshape.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;

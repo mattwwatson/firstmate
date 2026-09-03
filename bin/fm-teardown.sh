@@ -308,7 +308,9 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.check-trust" \
     "$state_dir/$id.bb-poll-warned.auth" "$state_dir/$id.bb-poll-warned.gone" \
     "$state_dir/$id.bb-poll-warned.declined" "$state_dir/$id.bb-poll-warned.superseded" \
-    "$state_dir/$id-manual-testing-section.md" "$state_dir/$id.manual-testing-posted" || return 1
+    "$(fm_manual_testing_section_path "$state_dir" "$id")" \
+    "$(fm_manual_testing_posted_path "$state_dir" "$id")" \
+    "$(fm_pr_opening_path "$state_dir" "$id")" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then

@@ -69,8 +69,11 @@ SH
 }
 
 # A fake curl that records HOW it was called without ever recording the
-# credential: it writes the literal argv it received (asserted credential-free)
-# and a boolean for whether the expected Basic-auth config arrived on stdin.
+# credential: it writes the literal argv it received (asserted credential-free),
+# a boolean for whether the expected Basic-auth config arrived on stdin, and,
+# when FAKE_CURL_BODY_LOG is set, a copy of the request body the caller named
+# with --data @<file>. The body has to be copied during the call, because the
+# script deletes that temporary file as soon as curl returns.
 # FAKE_CURL_STATUS sets the HTTP status it reports; FAKE_CURL_EXIT makes it fail
 # like a transport error; FAKE_CURL_404_MATCH answers 404 for just the requests
 # whose argv contains that substring, so one run can hold a repository the
@@ -91,13 +94,20 @@ else
   printf '%s\n' AUTH_ABSENT >> "\$stdin_log"
 fi
 out=
+data=
 while [ "\$#" -gt 0 ]; do
   case "\$1" in
     --output) out=\$2; shift 2 ;;
+    --data) data=\$2; shift 2 ;;
     *) shift ;;
   esac
 done
 [ -z "\$out" ] || printf '%s\n' '{"fake":"body"}' > "\$out"
+if [ -n "\${FAKE_CURL_BODY_LOG:-}" ]; then
+  case "\$data" in
+    @*) cp -- "\${data#@}" "\$FAKE_CURL_BODY_LOG" ;;
+  esac
+fi
 if [ -n "\${FAKE_CURL_EXIT:-}" ] && [ "\${FAKE_CURL_EXIT}" -ne 0 ]; then
   printf '%s' 000
   exit "\$FAKE_CURL_EXIT"
@@ -137,6 +147,7 @@ run_resolver() {  # <case-dir> <args...>
     FAKE_KEYCHAIN_LOG="$dir/keychain-services" \
     FAKE_CURL_ARGV_LOG="$dir/curl-argv" \
     FAKE_CURL_STDIN_LOG="$dir/curl-stdin" \
+    FAKE_CURL_BODY_LOG="$dir/curl-body" \
     FAKE_CURL_STATUS="${FAKE_CURL_STATUS:-200}" \
     FAKE_CURL_EXIT="${FAKE_CURL_EXIT:-0}" \
     FM_FORGE_CREDENTIAL_TIMEOUT="${FM_FORGE_CREDENTIAL_TIMEOUT:-}" \
@@ -423,9 +434,9 @@ test_github_has_no_firstmate_credential() {
   pass "GitHub reports that gh owns its credential instead of inventing one"
 }
 
-# Run the resolver with the fake toolchain and a comment body on stdin. The
-# comment write is the second and only other write action; it must reach the
-# forge through the same secret-safe path as every read.
+# Run the resolver with the fake toolchain and a write body on stdin - the
+# comment POST and the description PUT both read their payload that way, and
+# both must reach the forge through the same secret-safe path as every read.
 run_resolver_body() {  # <case-dir> <body> <args...>
   local dir=$1 body=$2 out err status
   shift 2
@@ -437,6 +448,7 @@ run_resolver_body() {  # <case-dir> <body> <args...>
     FAKE_KEYCHAIN_LOG="$dir/keychain-services" \
     FAKE_CURL_ARGV_LOG="$dir/curl-argv" \
     FAKE_CURL_STDIN_LOG="$dir/curl-stdin" \
+    FAKE_CURL_BODY_LOG="$dir/curl-body" \
     FAKE_CURL_STATUS="${FAKE_CURL_STATUS:-200}" \
     FAKE_CURL_EXIT="${FAKE_CURL_EXIT:-0}" \
     "$RESOLVER" "$@" 2>"$err")
@@ -479,6 +491,115 @@ walkthrough' pr-comment bitbucket mattw_watson/hexbattle 9)
   expect_code 2 "$(field "$record" 1)" "an empty comment body must be refused"
   assert_absent "$dir/curl-argv" "a refused empty body must never reach a request"
   pass "pr-comment posts through the secret-safe path and classifies failures"
+}
+
+# The comment POST and the description PUT are deliberately separate requests,
+# each naming its own method and endpoint, but a forge status has to mean the
+# same thing whichever of them asked. This pins both halves of that: the same
+# classification for every failure, and each still sending its own request.
+test_both_writes_classify_a_failure_the_same_way() {
+  local status dirc dird comment description argv
+  for status in 401 403 404 000; do
+    dirc=$(new_case)
+    dird=$(new_case)
+    comment=$(FAKE_CURL_STATUS=$status run_resolver_body "$dirc" 'body' \
+      pr-comment bitbucket mattw_watson/hexbattle 9)
+    description=$(FAKE_CURL_STATUS=$status run_resolver_body "$dird" 'body' \
+      pr-description bitbucket mattw_watson/hexbattle 9)
+    [ "$(field "$comment" 1)" != 0 ] || fail "HTTP $status must not classify as success"
+    [ -n "$(field "$comment" 3)" ] || fail "HTTP $status must report a reason"
+    [ "$(field "$comment" 1)" = "$(field "$description" 1)" ] || \
+      fail "HTTP $status must exit the same way for both writes (comment $(field "$comment" 1), description $(field "$description" 1))"
+    [ "$(field "$comment" 3)" = "$(field "$description" 3)" ] || \
+      fail "HTTP $status must give the same reason for both writes"
+  done
+
+  # A transport failure, where no status arrives at all.
+  dirc=$(new_case)
+  dird=$(new_case)
+  comment=$(FAKE_CURL_EXIT=7 run_resolver_body "$dirc" 'body' \
+    pr-comment bitbucket mattw_watson/hexbattle 9)
+  description=$(FAKE_CURL_EXIT=7 run_resolver_body "$dird" 'body' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 7 "$(field "$comment" 1)" "an unreachable forge is inconclusive, not a rejection"
+  [ "$(field "$comment" 1)" = "$(field "$description" 1)" ] || \
+    fail "a transport failure must exit the same way for both writes"
+  [ "$(field "$comment" 3)" = "$(field "$description" 3)" ] || \
+    fail "a transport failure must give the same reason for both writes"
+
+  # Sharing the classification must not have merged the requests themselves.
+  argv=$(cat "$dirc/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "POST" "the comment must still be a POST"
+  assert_contains "$argv" "/pullrequests/9/comments" \
+    "the comment must still name the comments endpoint"
+  argv=$(cat "$dird/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "PUT" "the description must still be a PUT"
+  assert_not_contains "$argv" "/comments" \
+    "the description must still name the pull request itself"
+  pass "both writes classify a forge failure the same way and keep their own request"
+}
+
+# The description write is the third and last write action. It must be a PUT of
+# the pull request itself, carry only a description field, and be refused for the
+# same reasons a comment is - so it cannot become a general write channel.
+test_pr_description_writes_through_the_secret_safe_path() {
+  local dir record argv stdin
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'a short reviewer-facing description' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 0 "$(field "$record" 1)" "a 200 description PUT must succeed"
+  argv=$(cat "$dir/curl-argv" 2>/dev/null)
+  assert_contains "$argv" "PUT" "the description write must be a PUT"
+  assert_contains "$argv" "/2.0/repositories/mattw_watson/hexbattle/pullrequests/9" \
+    "the description write must target the pull request itself"
+  assert_not_contains "$argv" "/comments" \
+    "the description write must not target the comments endpoint"
+  assert_no_credential_leak "$argv" "the description request argv"
+  stdin=$(cat "$dir/curl-stdin" 2>/dev/null)
+  assert_contains "$stdin" "AUTH_PRESENT" "the credential must reach curl through its config on stdin"
+
+  # The request body the forge would have received, parsed rather than grepped:
+  # a title field added to the encoder is a title this write could overwrite.
+  assert_present "$dir/curl-body" "the description request must carry a body"
+  python3 -c '
+import json
+import sys
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(payload, dict):
+    sys.exit("the body is not a JSON object")
+if sorted(payload) != ["description"]:
+    sys.exit("the body carries " + ", ".join(sorted(payload)))
+if payload["description"] != sys.argv[2]:
+    sys.exit("the description field is not the text supplied on stdin")
+' "$dir/curl-body" 'a short reviewer-facing description' \
+    || fail "the description PUT must carry a description field and nothing else"
+
+  # A 403 classifies as a scope rejection, naming the write scope it needs.
+  dir=$(new_case)
+  record=$(FAKE_CURL_STATUS=403 run_resolver_body "$dir" 'body' \
+    pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 5 "$(field "$record" 1)" "a 403 description PUT is a credential rejection"
+  assert_contains "$(field "$record" 3)" "pullrequest:write" \
+    "a rejected description write must name the write scope it lacked"
+
+  # GitHub is refused before any keychain read: gh owns that credential.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'body' pr-description github owner/repo 9)
+  expect_code 2 "$(field "$record" 1)" "GitHub descriptions do not go through this script"
+  assert_absent "$dir/keychain-services" "a refused forge must not read the keychain"
+
+  # An empty description would ERASE the field rather than shorten it.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" '' pr-description bitbucket mattw_watson/hexbattle 9)
+  expect_code 2 "$(field "$record" 1)" "an empty description must be refused"
+  assert_absent "$dir/curl-argv" "a refused empty description must never reach a request"
+
+  # A bad number is refused by the same closed grammar the other writes use.
+  dir=$(new_case)
+  record=$(run_resolver_body "$dir" 'body' pr-description bitbucket mattw_watson/hexbattle 9x)
+  expect_code 2 "$(field "$record" 1)" "a malformed pull-request number must be refused"
+  assert_absent "$dir/curl-argv" "a refused identifier must never reach a request"
+  pass "pr-description writes through the secret-safe path and classifies failures"
 }
 
 test_no_credential_store_is_its_own_outcome() {
@@ -930,6 +1051,8 @@ test_no_mistakes_credential_is_out_of_reach
 test_forge_and_repository_identity
 test_github_has_no_firstmate_credential
 test_pr_comment_posts_through_the_secret_safe_path
+test_pr_description_writes_through_the_secret_safe_path
+test_both_writes_classify_a_failure_the_same_way
 test_no_credential_store_is_its_own_outcome
 test_a_stalling_store_times_out_instead_of_hanging
 test_a_zero_bound_falls_back_to_the_default

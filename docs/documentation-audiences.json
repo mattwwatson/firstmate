@@ -160,6 +160,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pr-reshape/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -286,6 +290,10 @@
     {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/pr-description-reshape.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/scripts.md",
