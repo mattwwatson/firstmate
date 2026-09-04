@@ -28,7 +28,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-SUMMARISER="$FM_ROOT/skills/no-mistakes-pr-summariser/bin/pr-summarise.sh"
+# Resolved with `cd -P`, against this file's PHYSICAL location, for the same
+# reason bin/fm-pr-lib.sh resolves the same sibling that way: a synthetic root
+# that symlinks the real bin/ into it would otherwise look for skills/ beside
+# the synthetic root rather than beside the real one. FM_ROOT stays logical,
+# as it is in every other bin/ script, because the state paths below use it.
+SUMMARISER="$(cd -P "$SCRIPT_DIR/.." && pwd)/skills/no-mistakes-pr-summariser/bin/pr-summarise.sh"
 if [ ! -x "$SUMMARISER" ]; then
   echo "error: the reshape implementation is missing at $SUMMARISER" >&2
   exit 2

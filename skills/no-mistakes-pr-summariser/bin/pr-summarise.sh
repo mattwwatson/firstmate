@@ -71,13 +71,16 @@
 # under $XDG_STATE_HOME/no-mistakes-pr-summariser (which is
 # ~/.local/state/no-mistakes-pr-summariser unless XDG_STATE_HOME says otherwise),
 # in a per-pull-request directory, mode 0700, under a timestamped file that is
-# never overwritten. It is deliberately a path a person can list and read.
+# never overwritten. It is deliberately a path a person can list and read. With
+# none of those three set a real run refuses, naming all three, before anything
+# is written; a request that never saves an original does not need any of them.
 #
 # Every outcome is one stdout line for the caller to relay; the exit code
 # classifies it:
 #   0  reshaped, or already reshaped and nothing to do
 #   2  usage / invalid request, including an opening whose own headings or code
-#      fences would make the reshaped description unconfirmable
+#      fences would make the reshaped description unconfirmable, and a real run
+#      with no state directory resolvable from the three names above
 #   3  nothing to move - the body has no Testing or Pipeline section, or its
 #      code fences are unbalanced and its headings cannot be told from the
 #      markdown a findings log quotes
@@ -90,12 +93,6 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Where the pre-reshape original is saved. XDG_STATE_HOME is the conventional
-# home for state someone may want back later, and a named directory under it is
-# easier to find again than a hidden cache. PR_SUMMARISER_STATE_DIR overrides
-# it, which is how firstmate points this at its own state directory.
-STATE="${PR_SUMMARISER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/no-mistakes-pr-summariser}"
 
 # The forge helpers. Left alone, Bitbucket goes through the sibling that reads
 # its credential from the environment and gh comes from PATH; firstmate points
@@ -449,6 +446,24 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # --- save the original privately, before any write ---------------------------
+
+# Resolved here rather than at the top, because everything above this line - the
+# help, the argument checks, the forge read, the split, the dry run and the
+# keep-dir copies - completes without a state directory, and only a real run
+# needs one. XDG_STATE_HOME is the conventional home for state someone may want
+# back later, and a named directory under it is easier to find again than a
+# hidden cache. PR_SUMMARISER_STATE_DIR overrides it, which is how firstmate
+# points this at its own state directory.
+if [ -n "${PR_SUMMARISER_STATE_DIR:-}" ]; then
+  STATE="$PR_SUMMARISER_STATE_DIR"
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+  STATE="$XDG_STATE_HOME/no-mistakes-pr-summariser"
+elif [ -n "${HOME:-}" ]; then
+  STATE="$HOME/.local/state/no-mistakes-pr-summariser"
+else
+  printf 'reshape: nowhere to save the original privately; set PR_SUMMARISER_STATE_DIR, XDG_STATE_HOME or HOME; nothing changed\n'
+  exit "$EX_USAGE"
+fi
 
 RESHAPE_DIR=$(fm_pr_reshape_dir "$STATE" "$PROVIDER" "$PROJECT_PATH" "$NUMBER")
 if ! mkdir -p "$RESHAPE_DIR" 2>/dev/null; then

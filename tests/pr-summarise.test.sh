@@ -183,6 +183,30 @@ test_firstmate_runs_this_exact_implementation() {
   pass "pr-summarise.sh: one implementation, and firstmate runs that one"
 }
 
+test_the_wrapper_finds_the_implementation_through_a_symlinked_bin() {
+  # A synthetic root that symlinks the real bin/ into it is a supported layout -
+  # tests/fm-session-start.test.sh builds exactly this, and an operator gets it
+  # from a symlinked bin directory. bin/fm-pr-lib.sh resolves its skill sibling
+  # physically so it works there; the wrapper performs the SAME lookup and must
+  # agree, or the two disagree about where the one implementation lives.
+  local root out marker
+  mkdir -p "$TMP_ROOT"
+  root=$(mktemp -d "$TMP_ROOT/synthetic.XXXXXX")
+  ln -s "$ROOT/bin" "$root/bin"
+
+  out=$("$root/bin/fm-pr-reshape.sh" --help 2>&1) \
+    || fail "the wrapper must find the implementation through a symlinked bin/"
+  assert_contains "$out" 'Usage: pr-summarise.sh <pr-url> --opening-file <path>' \
+    "the wrapper must reach the implementation from a synthetic root, not just from the real one"
+
+  # The sibling that already resolved this correctly, in the same layout: both
+  # halves of the lookup have to answer the same way.
+  marker=$(bash -c 'set -eu; . "$1"; printf "%s" "$FM_PR_RESHAPE_MARKER"' _ "$root/bin/fm-pr-lib.sh" 2>&1) \
+    || fail "the shared library must also source its skill sibling through a symlinked bin/"
+  [ -n "$marker" ] || fail "the shared library resolved no reshape marker through a symlinked bin/"
+  pass "pr-summarise.sh: the wrapper and the shared library agree through a symlinked bin/"
+}
+
 test_the_skill_directory_is_self_contained() {
   # An installed skill is copied whole and can reach nothing outside itself, so
   # every path the summariser sources or execs must resolve inside this
@@ -345,6 +369,11 @@ test_an_empty_write_is_refused() {
 # request actually looks like: that the credential arrives on curl's stdin and
 # NOT in its argument list, which is the property that keeps a token out of ps,
 # shell history, and an agent's transcript.
+#
+# The fake APPENDS to each record rather than truncating it, so every invocation
+# leaves a trace. That is what makes the count observable: a preflight request, a
+# retry, or any other second authenticated call adds a line instead of hiding
+# behind the last writer.
 FAKE_EMAIL='someone@example.com'
 FAKE_TOKEN='tok-abc-123'
 
@@ -355,8 +384,8 @@ new_curl_case() {
   mkdir -p "$dir/bin"
   cat > "$dir/bin/curl" <<'SH'
 #!/usr/bin/env bash
-cat > "$FAKE_CURL_STDIN"
-printf '%s\n' "$*" > "$FAKE_CURL_ARGV"
+cat >> "$FAKE_CURL_STDIN"
+printf '%s\n' "$*" >> "$FAKE_CURL_ARGV"
 out=; url=; method=GET; data=
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -367,9 +396,9 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-printf '%s %s\n' "$method" "$url" > "$FAKE_CURL_REQ"
+printf '%s %s\n' "$method" "$url" >> "$FAKE_CURL_REQ"
 case "$data" in
-  @*) cp -- "${data#@}" "$FAKE_CURL_BODY" ;;
+  @*) cat -- "${data#@}" >> "$FAKE_CURL_BODY" ;;
 esac
 [ -z "$out" ] || printf '%s' "${FAKE_CURL_RESPONSE:-{\}}" > "$out"
 printf '%s' "${FAKE_CURL_STATUS:-200}"
@@ -396,6 +425,8 @@ test_the_token_reaches_stdin_and_never_argv() {
   dir=$(new_curl_case)
   status=$(run_forge "$dir" api-get bitbucket /2.0/repositories/ws/repo/pullrequests/9)
   expect_code 0 "$status" "a 200 read must succeed"
+  expect_code 1 "$(wc -l < "$dir/req" | tr -d ' ')" \
+    "a read must send exactly one request"
   assert_contains "$(cat "$dir/stdin")" "user = \"$FAKE_EMAIL:$FAKE_TOKEN\"" \
     "the credential must arrive on curl's standard input"
   assert_not_contains "$(cat "$dir/argv")" "$FAKE_TOKEN" \
@@ -413,6 +444,8 @@ test_each_action_sends_its_one_request() {
   dir=$(new_curl_case)
   status=$(printf 'the detail\n' | run_forge "$dir" pr-comment bitbucket ws/repo 9)
   expect_code 0 "$status" "a 200 comment post must succeed"
+  expect_code 1 "$(wc -l < "$dir/req" | tr -d ' ')" \
+    "a comment post must send exactly one request, not a preflight or a retry as well"
   assert_contains "$(cat "$dir/req")" \
     'POST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/9/comments' \
     "a comment must POST the comments endpoint"
@@ -430,6 +463,8 @@ test_each_action_sends_its_one_request() {
   dir=$(new_curl_case)
   status=$(printf 'the new description\n' | run_forge "$dir" pr-description bitbucket ws/repo 9)
   expect_code 0 "$status" "a 200 description write must succeed"
+  expect_code 1 "$(wc -l < "$dir/req" | tr -d ' ')" \
+    "a description write must send exactly one request, not a preflight or a retry as well"
   assert_contains "$(cat "$dir/req")" \
     'PUT https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/9' \
     "a description must PUT the pull request itself"
@@ -464,6 +499,7 @@ test_forge_statuses_classify_distinctly() {
 }
 
 test_firstmate_runs_this_exact_implementation
+test_the_wrapper_finds_the_implementation_through_a_symlinked_bin
 test_the_skill_directory_is_self_contained
 test_the_original_is_saved_privately_before_the_write
 test_a_failed_comment_leaves_the_description_alone
