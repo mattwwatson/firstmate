@@ -680,6 +680,13 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
+    skills/no-mistakes-pr-summariser/*)
+      # The reshape implementation firstmate's own bin/fm-pr-reshape.sh runs.
+      # pr-forge holds both reshape suites; the reference sweep is unioned on
+      # top so a file a test names by path keeps its other families too.
+      printf '%s\n' pr-forge
+      families_for_test_reference "$path" || true
+      ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch

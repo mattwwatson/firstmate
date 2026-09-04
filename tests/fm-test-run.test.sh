@@ -124,6 +124,9 @@ init_changed_fixture_repo() {
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/skills/no-mistakes-pr-summariser/bin"
+  : >"$repo/skills/no-mistakes-pr-summariser/SKILL.md"
+  : >"$repo/skills/no-mistakes-pr-summariser/bin/pr-summarise.sh"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -166,11 +169,14 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/.claude/settings.json"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  printf '\n' >>"$repo/skills/no-mistakes-pr-summariser/SKILL.md"
+  printf '\n' >>"$repo/skills/no-mistakes-pr-summariser/bin/pr-summarise.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-captain-translation-contract.test.sh" "skill source selects pure contract coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
-  git -C "$repo" add .agents .claude .pi
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "installable summariser source selects pr-forge coverage"
+  git -C "$repo" add .agents .claude .pi skills
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
