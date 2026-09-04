@@ -21,8 +21,10 @@ LINT="$ROOT/bin/fm-lint.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
-# The authoritative file set the one owner must run.
-CANON='ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)'
+# The authoritative file set the one owner must run. skills/*/bin/*.sh is in it
+# because a public skill can ship a script that other people install and run, so
+# it is held to the same rule as bin/ rather than going unchecked.
+CANON='ROOTS=(bin/*.sh bin/backends/*.sh skills/*/bin/*.sh tests/*.sh)'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -61,7 +63,7 @@ test_ci_invokes_the_owner() {
 test_stock_bash_parse_uses_owner_inventory() {
   local listed expected
   listed=$("$LINT" --list-files)
-  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  expected=$(find bin bin/backends skills/*/bin tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete canonical shell inventory"
   # shellcheck disable=SC2016 # Literal assertion must remain unexpanded.

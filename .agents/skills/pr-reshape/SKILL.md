@@ -12,7 +12,8 @@ metadata:
 # Reshaping a pull request description
 
 This skill is the single owner of the judgement in a reshape: which pull request, and what the replacement opening says.
-`bin/fm-pr-reshape.sh` owns every mechanic - the split, the two writes, the private copy, the idempotency, the read-back check - and its `--help` is authoritative for commands, flags, and exit codes.
+`bin/fm-pr-reshape.sh` is the command to run, and every mechanic - the split, the two writes, the private copy, the idempotency, the read-back check - belongs to the implementation it wraps, `skills/no-mistakes-pr-summariser/bin/pr-summarise.sh`.
+Its `--help`, which `bin/fm-pr-reshape.sh --help` prints, is authoritative for commands, flags, and exit codes.
 Nothing here restates those mechanics, and nothing there decides what the opening says.
 
 ## Why this exists, in one measurement
@@ -87,6 +88,6 @@ The script guarantees these, and they are the reason a reshape is safe to run on
 the complete original description is saved privately before the first write, every time;
 the moved sections are posted as a comment before the description is trimmed, so a failed post leaves the description whole;
 and a second run declines instead of compounding.
-`tests/fm-pr-reshape.test.sh` pins each of them.
+`tests/fm-pr-reshape.test.sh` pins each of them on this path, and `tests/pr-summarise.test.sh` pins the same three on the standalone one.
 
 If the captain asks for the pre-reshape description back, it is in the private per-pull-request directory `fm_pr_reshape_dir` names, under a timestamped file that is never overwritten.

@@ -197,9 +197,17 @@ Firstmate's skills live in two separate places with different audiences:
 
 - `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
 - `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
-  Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
-  Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback in the current directory, and closes with a resume pointer for the next session.
+  Each one is self-contained: an installer copies the skill directory whole, so nothing inside it may reach out to firstmate's paths, tools, or vocabulary.
+  There are two.
+
+  `skills/stow` is a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback in the current directory, and closes with a resume pointer for the next session.
   It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
+
+  `skills/no-mistakes-pr-summariser` moves a pull request's build-history detail out of its description and into a comment on the same pull request, leaving a short reviewer-facing body.
+  Install it with `npx skills add https://github.com/kunchenguid/firstmate --skill no-mistakes-pr-summariser --global --agent '*'`.
+  GitHub needs only an authenticated `gh`; Bitbucket Cloud needs `BITBUCKET_EMAIL` and `BITBUCKET_API_TOKEN`, and refuses by name rather than proceeding half-authenticated when either is absent.
+  Unlike the stow pair it shares its code deliberately: `skills/no-mistakes-pr-summariser/bin/pr-summarise.sh` is the only copy of the reshape logic in this repository, and firstmate's own `bin/fm-pr-reshape.sh` is a thin wrapper that runs it.
+  That is why the implementation lives under `skills/` rather than under `bin/` - an installed skill can reach nothing outside its own directory, so the shared code has to sit inside the directory that gets installed.
 
 ## Documentation
 
@@ -219,6 +227,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/bitbucket-merge-watch.md](docs/bitbucket-merge-watch.md) - how the merge watch follows a Bitbucket Cloud pull request, reads its build verdict, and performs the guarded merge action, and the evidence behind it.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's current "no turn ends blind" backstop, scope, loop safety, and compatibility limits.
 - [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
+- [docs/verification/skill-install.md](docs/verification/skill-install.md) - active maintainer verification that a script shipped in a public skill is executable once installed.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.

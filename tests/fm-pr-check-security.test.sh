@@ -2903,6 +2903,10 @@ EOF
   # The instance is data, never a constant, so self-hosted instances work.
   ! grep -qF gitlab.com "$ROOT/bin/fm-pr-lib.sh" \
     || fail "the shared PR library hardcodes a GitLab host"
+  # The URL parser and its host validator live with the portable summariser, so
+  # the same check has to follow them there or it passes without proving anything.
+  ! grep -qF gitlab.com "$ROOT/skills/no-mistakes-pr-summariser/bin/pr-identity.sh" \
+    || fail "the shared identity library hardcodes a GitLab host"
   ! grep -qF gitlab.com "$ROOT/bin/fm-pr-poll.sh" \
     || fail "the static poll hardcodes a GitLab host"
   pass "GitLab merge requests are followed on any instance and never wake falsely"

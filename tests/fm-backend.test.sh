@@ -157,6 +157,12 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
     cp "$ROOT/bin/$f" "$bin/$f"
   done
+  # fm-pr-lib.sh sources the portable summariser library for the identity
+  # helpers, by a path relative to its own directory, so the synthetic root needs
+  # it as well or that source aborts under set -eu.
+  mkdir -p "$root/skills/no-mistakes-pr-summariser/bin"
+  cp "$ROOT/skills/no-mistakes-pr-summariser/bin/pr-identity.sh" \
+    "$root/skills/no-mistakes-pr-summariser/bin/"
   for f in $OLD_BIN_OPTIONAL_SIBLINGS; do
     [ -f "$ROOT/bin/$f" ] || continue
     cp "$ROOT/bin/$f" "$bin/$f"

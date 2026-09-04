@@ -68,10 +68,11 @@
 #          read, it prints the response body on a 2xx and returns a classifying
 #          exit code otherwise; unlike pr-merge there is no multi-status
 #          protocol, because a comment neither redirects nor rate-negotiates.
-#          Driven only through fm_pr_post_comment in bin/fm-pr-lib.sh, which is
-#          the single owner of per-forge comment routing: bin/fm-pr-comment.sh
-#          posts a ship task's Manual-testing section, and bin/fm-pr-reshape.sh
-#          posts the detail a reshaped description moves out.
+#          Driven only through fm_pr_post_comment, the single owner of per-forge
+#          comment routing (defined in
+#          skills/no-mistakes-pr-summariser/bin/pr-identity.sh):
+#          bin/fm-pr-comment.sh posts a ship task's Manual-testing section, and
+#          bin/fm-pr-reshape.sh posts the detail a reshaped description moves out.
 # pr-description
 #          The third write action: a single PUT of the pull request itself for
 #          <repository> and <number>, sending only a description field. The new
@@ -139,8 +140,8 @@
 # deliberately out of reach - this script must never read it - because the two
 # credentials serve different systems and must rotate independently. For
 # GitHub, firstmate holds no credential at all; the gh CLI owns it, so the
-# GitHub comment path runs through fm_pr_post_comment in bin/fm-pr-lib.sh and
-# never reaches this script.
+# GitHub comment path runs through fm_pr_post_comment and never reaches this
+# script.
 #
 # SECRET HANDLING. The resolved pair never reaches stdout, stderr, a log, argv,
 # or a file. It leaves the store through a private FIFO, which carries it in

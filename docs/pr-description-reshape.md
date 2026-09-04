@@ -4,7 +4,8 @@ Empirical record behind `bin/fm-pr-reshape.sh` and the `pr-reshape` skill, which
 Every measurement below was taken on 03/09/2026 against live GitHub and Bitbucket Cloud APIs, and no command used to establish any of it changed anything on either forge.
 The stubbed no-network coverage for the resulting behaviour lives in `tests/fm-pr-reshape.test.sh`.
 
-`bin/fm-pr-reshape.sh`'s own header and `--help` own the mechanics: the split, the exit codes, and the flags.
+`bin/fm-pr-reshape.sh` is firstmate's command for it, and a thin wrapper: the implementation is `skills/no-mistakes-pr-summariser/bin/pr-summarise.sh`, which is also what the installable summariser skill runs on a machine with no firstmate.
+That script's own header, reachable as `bin/fm-pr-reshape.sh --help`, owns the mechanics: the split, the exit codes, and the flags.
 Nothing here restates them.
 
 ## The measurement that justifies the work

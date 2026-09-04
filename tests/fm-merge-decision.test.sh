@@ -213,6 +213,11 @@ test_bitbucket_build_verdicts_translate() {
   cp "$ROOT"/bin/fm-merge-decision.sh "$ROOT"/bin/fm-pr-lib.sh \
     "$ROOT"/bin/fm-classify-lib.sh "$ROOT"/bin/fm-project-mode.sh \
     "$ROOT"/bin/fm-crew-state.sh "$home/bin/"
+  # fm-pr-lib.sh sources the portable summariser library for the identity
+  # helpers, by a path relative to its own directory, so the copy needs it too.
+  mkdir -p "$home/skills/no-mistakes-pr-summariser/bin"
+  cp "$ROOT"/skills/no-mistakes-pr-summariser/bin/pr-identity.sh \
+    "$home/skills/no-mistakes-pr-summariser/bin/"
   stub="$home/bin/fm-bb-build-status.sh"
 
   for pair in "green:0" "red:1" "pending:1" "none:1" "garbage:1"; do

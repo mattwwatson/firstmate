@@ -9,8 +9,9 @@
 #
 # Usage: fm-pr-comment.sh <task-id> <pr-url>
 #
-# The forge decides the credential path, and fm_pr_post_comment in
-# bin/fm-pr-lib.sh owns that routing for every caller: GitHub goes through gh (which
+# The forge decides the credential path, and fm_pr_post_comment - defined in
+# skills/no-mistakes-pr-summariser/bin/pr-identity.sh, which bin/fm-pr-lib.sh
+# sources - owns that routing for every caller: GitHub goes through gh (which
 # owns firstmate's GitHub credential), Bitbucket through bin/fm-forge-credential.sh
 # pr-comment (firstmate's keychain credential, pullrequest:write). GitLab is not
 # yet wired and reports that plainly rather than failing silently.
@@ -77,8 +78,8 @@ if [ ! -f "$SECTION" ] || [ ! -s "$SECTION" ]; then
   exit "$EX_NO_SECTION"
 fi
 
-# The per-forge routing itself lives in fm_pr_post_comment (bin/fm-pr-lib.sh),
-# so this script and bin/fm-pr-reshape.sh post through one implementation. Its
+# The per-forge routing itself lives in fm_pr_post_comment, so this script and
+# the pull-request summariser post through one implementation. Its
 # return of 2 is the unsupported forge, which stays a distinct outcome here.
 POST_STATUS=0
 fm_pr_post_comment "$PROVIDER" "$URL" "$PROJECT_PATH" "$NUMBER" "$SECTION" \

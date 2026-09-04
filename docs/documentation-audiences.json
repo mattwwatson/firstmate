@@ -340,6 +340,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/skill-install.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
@@ -358,6 +362,10 @@
     {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "skills/no-mistakes-pr-summariser/SKILL.md",
+      "audience": "public-product"
     },
     {
       "path": "skills/stow/SKILL.md",
