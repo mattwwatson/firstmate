@@ -140,6 +140,7 @@ In the last two cases, say so in your report, and check for an existing detail c
 
 Under `$XDG_STATE_HOME/no-mistakes-pr-summariser`, which is `~/.local/state/no-mistakes-pr-summariser` unless `XDG_STATE_HOME` says otherwise.
 Set `PR_SUMMARISER_STATE_DIR` to put it somewhere else.
+With none of `PR_SUMMARISER_STATE_DIR`, `XDG_STATE_HOME` or `HOME` set, a real run refuses and names all three before writing anything, rather than reshaping a pull request with nowhere to keep the original.
 
 Inside it, `pr-reshape/` holds one directory per pull request, named `<provider>__<workspace>__<repo>__<number>`, holding every pre-reshape description of that pull request under a timestamped filename.
 The directory is mode 0700 and the files 0600, because a description can quote private code.
