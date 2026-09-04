@@ -30,10 +30,15 @@
 # read, one comment POST, one description PUT. The description PUT sends a
 # description and nothing else, so it cannot overwrite a title.
 #
-# Redirects are never followed, so no response can forward the credential to
-# another host. Every request is bounded by PR_SUMMARISER_TIMEOUT seconds
+# This script passes no redirect-following flag, so curl's own default of not
+# following one applies. That is not absolute: curl also reads the invoking
+# user's configuration file, because this script does not pass the disable
+# flag, so a local `location` setting turns redirect following on and
+# `location-trusted` would resend the HTTP Basic credential to the redirect
+# target. Each request asks for a bound of PR_SUMMARISER_TIMEOUT seconds
 # (default 30; a blank, non-numeric, or zero value falls back to the default,
-# because curl reads zero as no limit at all rather than as no wait).
+# because curl reads zero as no limit at all rather than as no wait). That one
+# holds more firmly, because the explicit flag overrides a value in that file.
 #
 # On success the response body reaches stdout. On failure one "error: <reason>"
 # line reaches stderr and the exit code classifies it:
@@ -54,7 +59,7 @@ EX_UNEXPECTED=9
 API_BASE='https://api.bitbucket.org'
 
 # Zero is refused alongside blank and non-numeric: curl reads --max-time 0 as no
-# limit, which would silently remove the bound this header promises.
+# limit, which would silently remove the bound this script asks for.
 positive_seconds() {  # <value> <default>
   case "$1" in
     ''|*[!0-9]*) printf '%s' "$2"; return 0 ;;

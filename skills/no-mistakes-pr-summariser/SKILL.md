@@ -50,7 +50,7 @@ Done that way the history file holds the command text and the token appears in i
 ```sh
 BITBUCKET_EMAIL='you@example.com' \
 BITBUCKET_API_TOKEN="$(cat ~/.config/bitbucket-api-token)" \
-  bin/pr-summarise.sh <pr-url> --opening-file <opening.md>
+  <this skill's directory>/bin/pr-summarise.sh <pr-url> --opening-file <opening.md>
 ```
 
 Give that file mode 0600.

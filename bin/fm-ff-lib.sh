@@ -210,11 +210,13 @@ fetch_once() {
 # Which watched instruction paths changed between HEAD and BASE (comma list).
 # These are the files a running agent actually reads or runs: its instructions
 # (AGENTS.md, which CLAUDE.md symlinks), its agent-loaded skills
-# (.agents/skills/), and its tooling (bin/). Public skills/ is installer-facing
-# and intentionally not part of this watched instruction surface.
+# (.agents/skills/), its tooling (bin/), and the one public skill directory that
+# bin/ sources and execs - bin/fm-pr-lib.sh sources pr-identity.sh from it and
+# bin/fm-pr-reshape.sh execs pr-summarise.sh from it. The rest of the public
+# skills/ tree is installer-facing and stays outside this list.
 changed_instr() {
   local dir=$1 base=$2 p out=""
-  for p in AGENTS.md bin .agents/skills; do
+  for p in AGENTS.md bin .agents/skills skills/no-mistakes-pr-summariser/bin; do
     if ! git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
       out="$out${out:+, }$p"
     fi

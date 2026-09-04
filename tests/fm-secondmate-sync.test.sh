@@ -151,6 +151,49 @@ test_ff_updated() {
   pass "T1 updated: a behind home fast-forwards to the primary's local HEAD"
 }
 
+# --- T1b: the public skill directory bin/ runs is part of the watched surface -
+# bin/fm-pr-lib.sh sources pr-identity.sh out of
+# skills/no-mistakes-pr-summariser/bin and bin/fm-pr-reshape.sh execs
+# pr-summarise.sh from it, so a commit touching only that directory changes what
+# a running agent runs and has to reach the home as an instruction change. The
+# rest of that tree is installer-facing prose firstmate never loads, and must
+# not nudge.
+test_ff_watches_the_skill_tooling_bin() {
+  local w skill c1 base
+  w=$(new_world ff-skill-bin)
+  skill="$w/main/skills/no-mistakes-pr-summariser"
+  mkdir -p "$skill/bin"
+  printf 'echo summarise\n' > "$skill/bin/pr-summarise.sh"
+  printf 'prose\n' > "$skill/SKILL.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "seed the installable skill"
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+
+  printf 'echo summarise v2\n' > "$skill/bin/pr-summarise.sh"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "change only the tooling bin/ runs"
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS'"
+  assert_contains "$FF_INSTR" "skills/no-mistakes-pr-summariser/bin" \
+    "a change to the skill tooling bin/ sources and execs must report an instruction change"
+
+  printf 'prose v2\n' > "$skill/SKILL.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "change only the installer-facing prose"
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS'"
+  [ -z "$FF_INSTR" ] \
+    || fail "installer-facing skill prose must not report an instruction change, got '$FF_INSTR'"
+  pass "T1b the skill directory bin/ sources and execs is watched; its prose is not"
+}
+
 # --- T2: current - already on the primary's HEAD is a no-op (no nudge) -------
 test_ff_current() {
   local w base
@@ -847,6 +890,7 @@ test_repo_gitignores_seed_marker() {
 }
 
 test_ff_updated
+test_ff_watches_the_skill_tooling_bin
 test_ff_current
 test_ff_dirty
 test_ff_diverged

@@ -132,11 +132,15 @@ SH
 
 # Run the summariser the way an installed skill runs it: its own environment
 # names only, and HOME pointed at the case so an unset state directory lands
-# somewhere this test can read. Echoes "<exit>|<stdout+stderr>".
+# somewhere this test can read. XDG_STATE_HOME is cleared rather than pointed
+# anywhere, because the default resolution under HOME is the thing these cases
+# exercise; a case that means to redirect the state directory exports
+# PR_SUMMARISER_STATE_DIR, which survives this. Echoes "<exit>|<stdout+stderr>".
 run_summarise() {  # <case-dir> <url> [extra args...]
   local dir=$1 url=$2 out status
   shift 2
-  out=$(HOME="$dir/home" \
+  out=$(env -u XDG_STATE_HOME \
+    HOME="$dir/home" \
     PR_SUMMARISER_GH_BIN="$dir/bin/gh" \
     PR_SUMMARISER_FORGE_BIN="$dir/bin/forge" \
     FAKE_FORGE_BODY="$dir/forge-body.md" \
@@ -188,7 +192,8 @@ test_the_skill_directory_is_self_contained() {
   local dir record
   dir=$(new_case)
   cp -R "$SKILL_DIR" "$dir/installed"
-  record=$(HOME="$dir/home" \
+  record=$(env -u XDG_STATE_HOME \
+    HOME="$dir/home" \
     PR_SUMMARISER_GH_BIN="$dir/bin/gh" \
     PR_SUMMARISER_FORGE_BIN="$dir/bin/forge" \
     FAKE_FORGE_BODY="$dir/forge-body.md" \

@@ -53,7 +53,7 @@ Counting tags in the returned `rendered.description.html`:
 
 Bitbucket escapes both tags, so a reviewer opening that pull request reads the characters `<details>` and `<summary>Evidence: ...</summary>` as visible text.
 A collapsible section is therefore not a simpler alternative to a second artifact on Bitbucket; it is not available at all.
-This is also why `FM_PR_RESHAPE_MARKER` in `bin/fm-pr-lib.sh` is visible text rather than an HTML comment: an invisible marker on GitHub would be a visible one on Bitbucket.
+This is also why `FM_PR_RESHAPE_MARKER` in `skills/no-mistakes-pr-summariser/bin/pr-identity.sh` is visible text rather than an HTML comment: an invisible marker on GitHub would be a visible one on Bitbucket.
 
 `?fields=rendered.description` is the reproducible check for any future question about how Bitbucket renders a description.
 
