@@ -39,8 +39,23 @@ The scope has to include write, because two of the three requests write: the det
 
 If either value is missing the run refuses and names the one that is absent.
 It never proceeds half-authenticated and never quietly falls back to an unauthenticated request, which a public repository would answer and a private one would not.
-Set them for the command rather than exporting them - `BITBUCKET_EMAIL=... BITBUCKET_API_TOKEN=... bin/pr-summarise.sh ...` - so the value never reaches shell history.
-The token is passed to `curl` through a config on standard input, so it never appears in the process list either.
+
+**Never type the token literally on a command line.**
+Both bash and zsh record the command line in the history file verbatim, and a `VAR=value` command prefix is part of the command line, so a literal token written there is stored in plaintext.
+A leading space does not save you either: recording it is the default in both shells, and suppressing it has to have been turned on beforehand - `HISTCONTROL` set to `ignorespace` or `ignoreboth` in bash, the `HIST_IGNORE_SPACE` option in zsh.
+
+Obtain the value without putting it on the command line at all: by command substitution from a file only you can read, from a secret manager, or by reading it into the environment at a prompt.
+Done that way the history file holds the command text and the token appears in it zero times.
+
+```sh
+BITBUCKET_EMAIL='you@example.com' \
+BITBUCKET_API_TOKEN="$(cat ~/.config/bitbucket-api-token)" \
+  bin/pr-summarise.sh <pr-url> --opening-file <opening.md>
+```
+
+Give that file mode 0600.
+Writing the two values as a command prefix rather than exporting them is still worth doing, because it scopes them to this one process instead of leaving them in the shell environment for everything else that shell runs - but prefixing is not what keeps the token out of history, and on its own it would not.
+The token is passed to `curl` through a config on standard input, so it never appears in the process list.
 
 `python3` is needed for the Bitbucket path only, to read and encode JSON.
 
@@ -97,7 +112,9 @@ Never pass it inline on a command line: backticks in it would be executed by the
    ```
 
 5. Run it for real: the same command without `--dry-run` and `--keep-dir`.
-   On Bitbucket, prefix it with the two credential values rather than exporting them.
+   On Bitbucket both this run and the dry run above need the credential.
+   Supply it as a command prefix whose token comes from a command substitution or a secret manager, exactly as [What it needs](#what-it-needs) shows.
+   Never write the token's own characters into a command: the command you run is recorded in your transcript, which is one of the places this credential must not end up.
 6. If it reports anything other than success, report the concrete reason and stop.
    Never work a refusal around by editing the pull request by hand.
    Read the reason before saying what happened, because a refusal does not always mean nothing was written - see below.

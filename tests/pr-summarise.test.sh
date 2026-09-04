@@ -22,10 +22,12 @@
 #
 # The credential cases run in two layers. The refusal cases never reach curl, so
 # they prove the diagnostics alone. The cases below them run against a fake curl
-# and prove the request itself - above all that the credential arrives on curl's
-# standard input and never in its argument list, because a token in argv reaches
-# ps, shell history, and an agent's transcript. Moving it to --user turns that
-# case red; it is a pinned property, not a reading of the source.
+# that records its own argument list and its own standard input, and every
+# request this skill makes - the read, the comment post, and the description
+# write - is checked there: the credential must arrive on standard input, and
+# neither the token nor the account may appear in argv, because a token in argv
+# reaches ps, shell history, and an agent's transcript. Moving the credential to
+# --user turns all three of those cases red.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -158,34 +160,33 @@ field() {
 # --- the property the whole arrangement exists for ---------------------------
 
 test_firstmate_runs_this_exact_implementation() {
-  local wrapper="$ROOT/bin/fm-pr-reshape.sh"
-  assert_contains "$(cat "$wrapper")" 'skills/no-mistakes-pr-summariser/bin/pr-summarise.sh' \
-    "firstmate's entry point must run the summariser rather than hold its own copy"
-  # A second copy is what this design exists to prevent, so look for one: the
-  # split is the reshape's most distinctive line, and it must appear once in the
-  # repository's shell sources.
-  local copies
-  copies=$(grep -rl 'RESHAPE_FOOTER_PREFIX' "$ROOT/bin" "$ROOT/skills" 2>/dev/null | wc -l | tr -d ' ')
-  expect_code 1 "$copies" "the reshape implementation must exist exactly once"
+  local through_wrapper direct
+  # The implementation prints its help by reading its OWN file at run time, so
+  # what comes back through firstmate's entry point is evidence of which file
+  # that entry point actually reached - which reading either script's text is
+  # not.
+  through_wrapper=$("$ROOT/bin/fm-pr-reshape.sh" --help 2>&1)
+  direct=$("$SUMMARISE" --help 2>&1)
+  assert_contains "$through_wrapper" \
+    'Usage: pr-summarise.sh <pr-url> --opening-file <path>' \
+    "firstmate's entry point must reach the summariser rather than hold its own copy"
+  # Its own one line of context first, then the implementation's help verbatim:
+  # a second copy answering instead would differ somewhere in those 60 lines.
+  [ "${through_wrapper#*"$direct"}" != "$through_wrapper" ] || \
+    fail "firstmate's entry point must relay the summariser's own help unchanged"
+  assert_contains "$through_wrapper" "firstmate's entry point" \
+    "the entry point must say which command was run before the implementation's usage"
   pass "pr-summarise.sh: one implementation, and firstmate runs that one"
 }
 
 test_the_skill_directory_is_self_contained() {
   # An installed skill is copied whole and can reach nothing outside itself, so
   # every path the summariser sources or execs must resolve inside this
-  # directory. SCRIPT_DIR siblings are the only form allowed.
-  # Single-quoted on purpose: these are the literal source text being searched
-  # for, not expressions to expand.
-  # shellcheck disable=SC2016
-  assert_no_grep '$SCRIPT_DIR/..' "$SUMMARISE" \
-    "the summariser must not reach outside its own directory"
-  # shellcheck disable=SC2016
-  assert_grep '. "$SCRIPT_DIR/pr-identity.sh"' "$SUMMARISE" \
-    "the summariser must source its identity helpers as a sibling"
+  # directory. Run from a COPY of just the skill directory, with nothing else of
+  # the repository present: any escape from it fails here, in whatever form it
+  # is spelled.
   local dir record
   dir=$(new_case)
-  # Prove it rather than only reading it: run from a COPY of just the skill
-  # directory, with nothing else of the repository present.
   cp -R "$SKILL_DIR" "$dir/installed"
   record=$(HOME="$dir/home" \
     PR_SUMMARISER_GH_BIN="$dir/bin/gh" \
@@ -310,28 +311,6 @@ test_a_missing_credential_refuses_by_name() {
   pass "pr-forge-env.sh: an absent credential refuses and names the missing value"
 }
 
-test_the_credential_never_reaches_a_command_line() {
-  local refs config_refs
-  # A token in argv reaches ps, shell history, and an agent's transcript, so the
-  # only path to curl must be a config on stdin.
-  assert_no_grep '--user' "$FORGE_ENV" \
-    "the credential must never be passed to curl as an argument"
-  assert_grep 'curl --silent --globoff --config -' "$FORGE_ENV" \
-    "the credential must reach curl through a config on stdin"
-  # Every dereference of the secret must be inside the curl-config expression,
-  # and there must be exactly one per request: the read, the comment, and the
-  # description. A new use anywhere else fails this rather than passing quietly.
-  # Single-quoted on purpose: the literal text being searched for.
-  # shellcheck disable=SC2016
-  refs=$(grep -cF '$CRED_SECRET' "$FORGE_ENV" | tr -d ' ')
-  # shellcheck disable=SC2016
-  config_refs=$(grep -cF 'escape_curl_config "$CRED_USER:$CRED_SECRET"' "$FORGE_ENV" | tr -d ' ')
-  expect_code 3 "$refs" "the secret must be read exactly once per request"
-  expect_code "$refs" "$config_refs" \
-    "every use of the secret must be inside the curl config written to stdin"
-  pass "pr-forge-env.sh: the credential reaches curl only through a config on stdin"
-}
-
 test_a_malformed_request_never_reaches_the_credential() {
   local out status
   out=$(BITBUCKET_EMAIL=a@b.c BITBUCKET_API_TOKEN=tok \
@@ -436,6 +415,12 @@ test_each_action_sends_its_one_request() {
   assert_contains "$body" '"raw": "the detail' "the comment body must be JSON-encoded from stdin"
   assert_not_contains "$(cat "$dir/argv")" 'the detail' \
     "the comment body must reach curl as a file, never on the command line"
+  assert_contains "$(cat "$dir/stdin")" "user = \"$FAKE_EMAIL:$FAKE_TOKEN\"" \
+    "the comment post's credential must arrive on curl's standard input"
+  assert_not_contains "$(cat "$dir/argv")" "$FAKE_TOKEN" \
+    "the token must never appear in the comment post's argument list"
+  assert_not_contains "$(cat "$dir/argv")" "$FAKE_EMAIL" \
+    "the account must never appear in the comment post's argument list"
 
   dir=$(new_curl_case)
   status=$(printf 'the new description\n' | run_forge "$dir" pr-description bitbucket ws/repo 9)
@@ -447,6 +432,14 @@ test_each_action_sends_its_one_request() {
   assert_contains "$body" '"description": "the new description' \
     "the description must be JSON-encoded from stdin"
   assert_not_contains "$body" 'title' "the write must send a description and no other field"
+  assert_not_contains "$(cat "$dir/argv")" 'the new description' \
+    "the description body must reach curl as a file, never on the command line"
+  assert_contains "$(cat "$dir/stdin")" "user = \"$FAKE_EMAIL:$FAKE_TOKEN\"" \
+    "the description write's credential must arrive on curl's standard input"
+  assert_not_contains "$(cat "$dir/argv")" "$FAKE_TOKEN" \
+    "the token must never appear in the description write's argument list"
+  assert_not_contains "$(cat "$dir/argv")" "$FAKE_EMAIL" \
+    "the account must never appear in the description write's argument list"
   pass "pr-forge-env.sh: each action sends exactly its own single request"
 }
 
@@ -474,7 +467,6 @@ test_the_private_record_lands_somewhere_findable
 test_an_explicit_state_directory_is_honoured
 test_bitbucket_routes_through_the_environment_credential
 test_a_missing_credential_refuses_by_name
-test_the_credential_never_reaches_a_command_line
 test_a_malformed_request_never_reaches_the_credential
 test_an_empty_write_is_refused
 test_the_token_reaches_stdin_and_never_argv
