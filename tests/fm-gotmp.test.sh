@@ -64,7 +64,12 @@ make_fake_root() {
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
+  # It in turn sources the portable summariser library for the identity helpers,
+  # by a path relative to its own directory, so that has to exist here too.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  mkdir -p "$fake/skills/no-mistakes-pr-summariser/bin"
+  ln -s "$ROOT/skills/no-mistakes-pr-summariser/bin/pr-identity.sh" \
+    "$fake/skills/no-mistakes-pr-summariser/bin/pr-identity.sh"
   # fm-quiesce-lib.sh: teardown sources it for the quiesce probe-file path it
   # clears alongside the rest of a task's volatile state. It in turn sources
   # fm-classify-lib.sh from its own directory, so both must be siblings here.
@@ -169,7 +174,12 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
+  # It in turn sources the portable summariser library for the identity helpers,
+  # by a path relative to its own directory, so that has to exist here too.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  mkdir -p "$fake/skills/no-mistakes-pr-summariser/bin"
+  ln -s "$ROOT/skills/no-mistakes-pr-summariser/bin/pr-identity.sh" \
+    "$fake/skills/no-mistakes-pr-summariser/bin/pr-identity.sh"
   # fm-quiesce-lib.sh (+ the fm-classify-lib.sh it sources): teardown sources it
   # for the quiesce probe-file path.
   ln -s "$ROOT/bin/fm-quiesce-lib.sh" "$fake/bin/fm-quiesce-lib.sh"

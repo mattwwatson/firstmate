@@ -170,7 +170,8 @@ family_for_basename() {
     fm-merge-decision.test.sh|\
     fm-pr-check-security.test.sh|fm-pr-comment.test.sh|fm-pr-merge.test.sh|\
     fm-pr-reshape.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|\
+    pr-summarise.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -678,6 +679,13 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    skills/no-mistakes-pr-summariser/*)
+      # The reshape implementation firstmate's own bin/fm-pr-reshape.sh runs.
+      # pr-forge holds both reshape suites; the reference sweep is unioned on
+      # top so a file a test names by path keeps its other families too.
+      printf '%s\n' pr-forge
+      families_for_test_reference "$path" || true
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)

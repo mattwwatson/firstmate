@@ -21,7 +21,8 @@
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
-#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#          .agents/skills/, or skills/no-mistakes-pr-summariser/bin/, the list
+#          changed_instr owns) actually changed, bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
 #          current backend target and the standard from-firstmate marker is
 #          applied. A successful send prints one BOOTSTRAP_INFO line with the
@@ -239,8 +240,8 @@ secondmate_sync() {
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
-  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
-  # .agents/skills/) actually changed, so a secondmate already on the primary's
+  # for RUNNING secondmates whose instruction surface (the list changed_instr
+  # owns in fm-ff-lib.sh) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
   # /updatefirstmate, startup owns the live-convergence send itself because it is
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while

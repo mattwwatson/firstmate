@@ -4,7 +4,8 @@ Empirical record behind `bin/fm-pr-reshape.sh` and the `pr-reshape` skill, which
 Every measurement below was taken on 03/09/2026 against live GitHub and Bitbucket Cloud APIs, and no command used to establish any of it changed anything on either forge.
 The stubbed no-network coverage for the resulting behaviour lives in `tests/fm-pr-reshape.test.sh`.
 
-`bin/fm-pr-reshape.sh`'s own header and `--help` own the mechanics: the split, the exit codes, and the flags.
+`bin/fm-pr-reshape.sh` is firstmate's command for it, and a thin wrapper: the implementation is `skills/no-mistakes-pr-summariser/bin/pr-summarise.sh`, which is also what the installable summariser skill runs on a machine with no firstmate.
+That script's own header, reachable as `bin/fm-pr-reshape.sh --help`, owns the mechanics: the split, the exit codes, and the flags.
 Nothing here restates them.
 
 ## The measurement that justifies the work
@@ -52,7 +53,7 @@ Counting tags in the returned `rendered.description.html`:
 
 Bitbucket escapes both tags, so a reviewer opening that pull request reads the characters `<details>` and `<summary>Evidence: ...</summary>` as visible text.
 A collapsible section is therefore not a simpler alternative to a second artifact on Bitbucket; it is not available at all.
-This is also why `FM_PR_RESHAPE_MARKER` in `bin/fm-pr-lib.sh` is visible text rather than an HTML comment: an invisible marker on GitHub would be a visible one on Bitbucket.
+This is also why `FM_PR_RESHAPE_MARKER` in `skills/no-mistakes-pr-summariser/bin/pr-identity.sh` is visible text rather than an HTML comment: an invisible marker on GitHub would be a visible one on Bitbucket.
 
 `?fields=rendered.description` is the reproducible check for any future question about how Bitbucket renders a description.
 
