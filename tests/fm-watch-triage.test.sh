@@ -1012,7 +1012,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # not handed something that reads as a stopped or wedged crew; surfacing it as a
 # bare stale is what fm-watch-false-wedge.test.sh's symptom-A cover forbids.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare labeled
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"

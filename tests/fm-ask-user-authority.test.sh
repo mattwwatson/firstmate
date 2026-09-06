@@ -16,6 +16,7 @@ approval_contract() {
   ' "$AGENTS"
 }
 
+# shellcheck disable=SC2016 # The single quotes are literal: these are needle strings matched against generated files, not expressions.
 test_owner_and_always_loaded_boundary() {
   local contract trigger_count
   contract=$(approval_contract)
@@ -49,6 +50,7 @@ test_owner_and_always_loaded_boundary() {
   pass "ask-user authority has one conditional owner and a concise always-loaded boundary"
 }
 
+# shellcheck disable=SC2016 # The single quotes are literal: these are needle strings matched against generated files, not expressions.
 test_concrete_required_defect_stays_autonomous() {
   assert_grep 'genuinely necessary to satisfy the accepted contract' "$OWNER" \
     "required concrete corrections no longer stay within standing authority"
