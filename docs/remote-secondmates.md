@@ -146,11 +146,20 @@ Use `bin/fm-home-seed.sh validate` to validate either form.
 
 ## Normal operation
 
-Launch or recover the remote second mate with the same command used for a local route:
+Launching a remote second mate is not reachable from the primary in this tree, and it is the only part of the route that is not.
+`bin/fm-spawn.sh` contains no remote handling at all, so `bin/fm-spawn.sh <id> --secondmate` for a route registered with a `host:` builds an ordinary LOCAL secondmate home on this machine and reports that as a successful launch.
+Do not run it for a remote route; there is no supported primary-side way to launch or relaunch one until that gap closes.
+The host side is complete: [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) implements `launch` exactly as it implements the other verbs.
+What is absent is the primary-side dispatch that would send `launch` over `bin/fm-on.sh` instead of spawning locally, and it arrives with the change that replaces this spawn.
+Every other verb of that script already has a primary-side caller, which is why provisioning, routed sends, remote reads, retirement, and the update and sync sweeps all reach the configured host as documented on this page.
 
-```sh
-bin/fm-spawn.sh <id> --secondmate
-```
+Startup liveness recovery calls that same local spawn, so it cannot relaunch a dead or missing remote second mate either.
+It reads the remote endpoint correctly and then builds a local home in response.
+That relaunch is reported as a fact rather than a diagnostic, and when it is reported it names the configured host, so neither the sweep's silence nor its success line tells you the remote endpoint was recovered.
+Check a remote endpoint you suspect is dead on its own host, and do not rely on the session-start sweep to recover it.
+
+The contract below is the one the host already enforces and the one the primary-side dispatch will satisfy when it lands.
+It is recorded here because those refusals are real today, not because `bin/fm-spawn.sh <id> --secondmate` reaches them.
 
 The primary resolves the verified secondmate harness and optional model and effort, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
@@ -159,8 +168,6 @@ An existing remote endpoint recorded in another Herdr session, including `defaul
 A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
-
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
 A persistent remote route's parent metadata intentionally has no local spawn-generation marker and identifies the route by its recorded host instead.
 The Bearings inventory-reconcile hook therefore accepts these markerless routes, revalidates the sampled host at delivery, and refuses a route that changed hosts; [`fm-secondmate-reconcile.sh`](../bin/fm-secondmate-reconcile.sh) owns the exact cooldown, identity, and reporting contract.

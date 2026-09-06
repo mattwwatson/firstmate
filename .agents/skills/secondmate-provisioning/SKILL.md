@@ -215,7 +215,8 @@ bin/fm-spawn.sh <id> --secondmate
 
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
-For a remote route, the same command probes and relaunches only on the configured host.
+Do not run that command for a remote route: `bin/fm-spawn.sh` has no remote handling in this tree, so it builds a LOCAL secondmate home for the id and reports that as a successful launch.
+Remote relaunch belongs to an operator on the configured host until the primary-side dispatch lands; [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns that limit and what a remote route can still do.
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
