@@ -1587,11 +1587,6 @@ signal_crew_provably_working() {  # <file> ...
   return 0
 }
 
-# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
-# working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
-# same space-separated file list as signal_reason_is_actionable. A no-verb wake with
-# nothing provably working must surface, so an empty/unresolvable list returns 1.
-
 # 0 (terminal/actionable) if a stale window's last status line is
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
