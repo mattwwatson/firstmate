@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--grants <list|none>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> [--grants <list|none>] [--yolo <on|off>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
-#   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
-#   spawn and refused on --scout and --secondmate spawns. This fork additionally
-#   accepts an optional --grants <list|none> (bin/fm-project-mode.sh owns the
-#   grammar) and records it beside yolo, so both fields survive in metadata.
-#   Grants are what decide authority in this fork; the captain's rule that
-#   yolo=true means every grant is deliberately NOT implemented in this file and
-#   is filed as its own change, so nothing reads yolo= for authority today. An
-#   omitted --grants records none, erring toward too little authority. Firstmate resolves both
+#   --mode is this task's delivery mode, REQUIRED for every ship spawn and
+#   refused on --scout and --secondmate spawns. The authority half of the contract
+#   is this fork's --grants <list|none> (bin/fm-project-mode.sh owns the grammar),
+#   which AGENTS.md section 7 is what firstmate passes. --grants is OPTIONAL: an
+#   omitted list records none, erring toward too little authority rather than too
+#   much. Upstream's --yolo <on|off> is still ACCEPTED and still recorded in
+#   metadata beside grants, so both fields survive, but it is no longer required
+#   and nothing reads yolo= for authority; the captain's rule that yolo=true means
+#   every grant is deliberately NOT implemented in this file and is filed as its
+#   own change. Firstmate resolves the mode and the grants
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
@@ -195,9 +197,9 @@
 # the same install also arms the crew kill-guard (bin/fm-kill-pretool-check.sh,
 # docs/kill-guard.md) so a broad name-pattern process kill from inside the task
 # worktree is denied before it can reach processes outside the worktree.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off> grants=<list|none>] window=<backend-target> worktree=<path>
-# A ship task records the explicit mode/yolo it was passed plus any grants given
-# (default none); a secondmate spawn records mode=secondmate, yolo=off, grants=none,
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> [yolo=<on|off>] grants=<list|none>] window=<backend-target> worktree=<path>
+# A ship task records the explicit mode it was passed, the grants given (default
+# none), and yolo only when --yolo was passed at all; a secondmate spawn records mode=secondmate, yolo=off, grants=none,
 # home=, and projects=; a scout records none of them, and both the
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
@@ -396,10 +398,6 @@ else
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
-    [ "$YOLO_SET" -eq 1 ] || {
-      echo "error: ship spawns require --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
-      exit 1
-    }
     case "$MODE" in
       no-mistakes|direct-PR|local-only) ;;
       no-mistakes-prod-only)
@@ -407,14 +405,21 @@ else
         exit 1 ;;
       *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
     esac
-    case "$YOLO" in
-      on|off) ;;
-      *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
-    esac
-    # This fork also records the autonomy grants that actually decide authority
-    # here (bin/fm-project-mode.sh owns the grammar). Optional so upstream's
-    # spawn contract is unchanged; an omitted list records none, which errs
-    # toward too little authority rather than too much.
+    # Compatibility answer for an existing caller that still passes --yolo: it is
+    # ACCEPTED, closed-set validated, and recorded in metadata as yolo=, but it is
+    # neither required nor read for authority. Authority comes from --grants, which
+    # is what AGENTS.md section 7 tells firstmate to pass. An omitted --yolo simply
+    # records no yolo= line.
+    if [ "$YOLO_SET" -eq 1 ]; then
+      case "$YOLO" in
+        on|off) ;;
+        *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
+      esac
+    fi
+    # The autonomy grants that actually decide authority in this fork
+    # (bin/fm-project-mode.sh owns the grammar). Optional by deliberate decision:
+    # an omitted list records none, which errs toward too little authority rather
+    # than too much.
     [ "$GRANTS_SET" -eq 1 ] || GRANTS=none
   else
     [ "$MODE_SET" -eq 0 ] || {
@@ -1711,6 +1716,14 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
+#
+# KNOWN INERT IN THIS TREE, deliberately left as is: this fork's bin/fm-brief.sh
+# never emits that line, so BRIEF_MODE is always empty, the mismatch refusal can
+# never fire, and every ship spawn takes the warning leg below even though its
+# brief is not legacy. That is a consequence of the staged upstream merge holding
+# fm-brief.sh at the fork version, not a defect in the merge. What makes the check
+# live again is bringing fm-brief.sh to a version that writes the line; doing so is
+# deliberately out of this stage's scope.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
@@ -3028,5 +3041,9 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
 fi
 
 SPAWN_DELIVERY=
-[ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO grants=$GRANTS"
+if [ -n "$MODE" ]; then
+  SPAWN_DELIVERY=" mode=$MODE"
+  [ -z "$YOLO" ] || SPAWN_DELIVERY="$SPAWN_DELIVERY yolo=$YOLO"
+  SPAWN_DELIVERY="$SPAWN_DELIVERY grants=$GRANTS"
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

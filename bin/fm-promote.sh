@@ -7,12 +7,17 @@
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to this task's delivery mode).
 # A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode and --yolo are REQUIRED and written into the meta
-# alongside the kind= flip. Firstmate resolves both at promotion time, having just
-# read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks it up.
+# contract is decided: --mode is REQUIRED and written into the meta alongside the
+# kind= flip, and this fork's --grants <list|none> (bin/fm-project-mode.sh owns the
+# grammar) carries the authority half. Firstmate resolves both at promotion time,
+# having just read the scout's report (AGENTS.md section 7); data/projects.md holds
+# the captain's standing posture as context, and this script never looks it up.
+# --grants is OPTIONAL: an omitted list records none, erring toward too little
+# authority rather than too much. Upstream's --yolo <on|off> is still ACCEPTED and
+# still written into the meta beside grants, but it is no longer required and
+# nothing reads yolo= for authority.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> [--grants <list|none>] [--yolo <on|off>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,8 +38,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 MODE=
 YOLO=
+GRANTS=
 MODE_SET=0
 YOLO_SET=0
+GRANTS_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -45,6 +52,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      grants) GRANTS=$a; GRANTS_SET=1 ;;
     esac
     want_value=
     continue
@@ -54,17 +62,17 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --grants) want_value=grants ;;
+    --grants=*) GRANTS=${a#--grants=}; GRANTS_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> [--grants <list|none>] [--yolo <on|off>]" >&2; exit 1; }
+[ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
+[ "$GRANTS_SET" -eq 0 ] || [ -n "$GRANTS" ] || { echo "error: --grants requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
-  exit 1
-}
-[ "$YOLO_SET" -eq 1 ] || {
-  echo "error: promotion requires --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
   exit 1
 }
 case "$MODE" in
@@ -74,10 +82,19 @@ case "$MODE" in
     exit 1 ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
-case "$YOLO" in
-  on|off) ;;
-  *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
-esac
+# Compatibility answer for an existing caller that still passes --yolo: it is
+# ACCEPTED, closed-set validated, and written into the meta as yolo=, but it is
+# neither required nor read for authority. Authority comes from --grants, which is
+# what AGENTS.md section 7 tells firstmate to pass. An omitted --yolo writes no
+# yolo= line at all.
+if [ "$YOLO_SET" -eq 1 ]; then
+  case "$YOLO" in
+    on|off) ;;
+    *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
+  esac
+fi
+# Optional by deliberate decision; an omitted list records none.
+[ "$GRANTS_SET" -eq 1 ] || GRANTS=none
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -115,11 +132,12 @@ META_LOCK_HELD=1
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^grants=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
-  echo "yolo=$YOLO"
+  [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  echo "grants=$GRANTS"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
@@ -127,7 +145,10 @@ fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+PROMOTE_DELIVERY="mode=$MODE"
+[ -z "$YOLO" ] || PROMOTE_DELIVERY="$PROMOTE_DELIVERY yolo=$YOLO"
+PROMOTE_DELIVERY="$PROMOTE_DELIVERY grants=$GRANTS"
+echo "promoted $ID to ship $PROMOTE_DELIVERY (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
 
 promote_print_rechain_hint() {

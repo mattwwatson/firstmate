@@ -269,6 +269,60 @@ test_pause_absorb_releases_when_the_crew_resumes() {
   pass "an authoritative active run still releases a declared pause back to wedge tracking"
 }
 
+# The precedence half of symptom A, on the state the production path actually
+# leaves behind. AGENTS.md's sparse status-reporting contract lets a crew resume
+# real work WITHOUT appending a new status line, so the pause declaration stays
+# last on the log and only the authoritative reader knows the run is live again.
+# If the already-surfaced anchor is consulted before that read, the pane is held
+# on the hour-long pause cadence for as long as the declaration stays last - and
+# a run that then wedges never escalates, because handle_paused_stale clears the
+# wedge ladder on every poll. The anchor's suppression must stay bounded by the
+# .paused-rechecked-<key> window, so an expired window re-reads crew state and
+# `working` wins.
+test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status() {
+  local dir state fakebin out capture window key pid line h
+  dir=$(make_case paused-surfaced-resume); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-surfaced-resume"
+  line='paused: awaiting the upstream release'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/surfaced-resume.meta"
+  declare_pause "$state" surfaced-resume "$line"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle grok prompt\n' > "$capture"
+  h=$(hash_text "$(cat "$capture")")
+
+  # Exactly what surface_nonterminal_stale leaves behind after this pause has had
+  # its one sighting: the stale suppressor at this hash, the pause flag, the
+  # instance anchor holding the surfaced line, a fresh re-surface throttle - and a
+  # recheck stamp that has since aged out of its STALE_ESCALATE_SECS window.
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '%s' "$h" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  printf '%s' "$line" > "$state/.paused-resurfaced-$key"
+  date +%s > "$state/.paused-throttle-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  backdate "$state/.paused-rechecked-$key" 600
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  settle_round "$state" "$window" "$pid" 0 "already-surfaced pause with a resumed crew"
+  [ ! -s "$out" ] \
+    || fail "the resumed run woke firstmate instead of returning to wedge tracking: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "an already-surfaced declared pause outranked a working crew-state read and kept the pause cadence: $(state_dump "$state" "$window")"
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || fail "the pause instance anchor survived the release, so the next poll would absorb again: $(state_dump "$state" "$window")"
+  [ -s "$state/.stale-since-$key" ] \
+    || fail "the released pane did not resume wedge tracking, so a wedge from here would never escalate: $(state_dump "$state" "$window")"
+  pass "an already-surfaced pause still releases on a working read when the crew appended no new status"
+}
+
 # --- symptom B --------------------------------------------------------------
 #
 # The wedge ladder is driven from the idle clock (.stale-since-<key>) and the
@@ -545,6 +599,7 @@ test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
 test_declared_pause_with_live_agent_surfaces_once_across_repaints
 test_a_different_declared_pause_gets_its_own_sighting
 test_pause_absorb_releases_when_the_crew_resumes
+test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
 test_unreadable_state_read_is_not_a_lost_work_signal

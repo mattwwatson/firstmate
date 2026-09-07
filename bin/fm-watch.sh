@@ -195,6 +195,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 WEDGE_ESCALATE_MAX_SECS=${FM_WEDGE_ESCALATE_MAX_SECS:-900}
 # Consecutive unreadable crew-state reads before the window surfaces on its own terms.
 WEDGE_UNREADABLE_SURFACE_COUNT=${FM_WEDGE_UNREADABLE_SURFACE_COUNT:-3}
+# A zero or non-numeric threshold inverts the guard - the FIRST failed read would
+# surface as a three-strike reader alarm - so an unusable value falls back to the
+# default instead of being honored.
+case "$WEDGE_UNREADABLE_SURFACE_COUNT" in ''|*[!0-9]*|0) WEDGE_UNREADABLE_SURFACE_COUNT=3 ;; esac
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -484,8 +488,8 @@ EOF
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
 # (not just repetition the supervisor has to notice on its own) forces a closer
 # look instead of another routine supervision resume. Reset wherever a window's
-# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
-# below).
+# pane/hash state resets to genuinely active (see the two clear_wedge_tracking
+# call sites below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
@@ -608,6 +612,17 @@ pause_instance() {  # <task>
   return 0
 }
 
+# 0 iff this window's pause tracking is live AND its instance anchor holds the
+# very pause the crew is declaring now, i.e. firstmate has already been shown
+# THIS pause. The anchor records WHICH pause was surfaced, not when, so a
+# genuinely different declared pause is new information and does not inherit the
+# previous one's suppression.
+pause_instance_already_surfaced() {  # <window-key> <task>
+  local key=$1 task=$2
+  [ -e "$STATE/.paused-$key" ] || return 1
+  [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$(pause_instance "$task")" ]
+}
+
 # Drop every artifact of an in-flight wedge timer: the idle clock, the escalation
 # ladder, the evidence probe pacing repeat escalations, and the consecutive-unreadable
 # counts. Call wherever a pane resets to genuinely active, so no half-cleared ladder
@@ -726,7 +741,8 @@ busy_turn_over_age() {  # <task>
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. The bounded re-surface itself is the shared resurface_absorbed
-# above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
+# above, throttled by this window's own .paused-throttle-<key> marker, while
+# .paused-resurfaced-<key> holds the pause INSTANCE that was surfaced. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
 # The recheck names WHICH human the declared wait is on, because that is the whole
@@ -829,6 +845,12 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
+# An active run always outranks the declared pause: the authoritative read runs
+# before the already-surfaced anchor can absorb the pane, so a crew that resumed
+# real work without appending a new status line is released back to wedge tracking
+# instead of being held on the hour-long pause cadence. That read is skipped only
+# while a fresh .paused-rechecked-<key> says it ran within the last
+# STALE_ESCALATE_SECS, which is what bounds the anchor's suppression.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
@@ -846,16 +868,14 @@ pause_state_class() {  # <window> <task>
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
-  # THIS pause has already had its one live-agent sighting, so it belongs to the
-  # bounded cadence from here on. The anchor records WHICH pause was surfaced, not
-  # when, because a genuinely different declared pause is new information and must
-  # not inherit the previous one's suppression.
-  if [ -e "$STATE/.paused-$key" ] \
-    && [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$(pause_instance "$task")" ]; then
-    printf 'paused'
-    return
-  fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    # Inside the recheck window the authoritative read is deliberately skipped, so
+    # a pause already surfaced once belongs to the bounded cadence with no further
+    # reads; the window itself is what bounds that suppression.
+    if pause_instance_already_surfaced "$key" "$task"; then
+      printf 'paused'
+      return
+    fi
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -871,6 +891,14 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  # The recheck window has expired and the crew is not working, so THIS pause -
+  # already shown once - takes the bounded cadence again without spending another
+  # live-agent read, and stamps a fresh recheck window.
+  if pause_instance_already_surfaced "$key" "$task"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$kind" != secondmate ]; then
@@ -1668,7 +1696,7 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
         else
-          rm -f "$ssf" "$ewf"
+          clear_wedge_tracking "$key"
           clear_write_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
@@ -1686,7 +1714,7 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
       else
-        rm -f "$ssf" "$ewf"
+        clear_wedge_tracking "$key"
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
