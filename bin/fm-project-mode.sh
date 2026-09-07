@@ -5,6 +5,14 @@
 # no-mistakes|direct-PR|local-only and grants is a canonically ordered comma list
 # of the granted names, or "none".
 #
+# MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
+# for this project", never "how does this task ship". A task's delivery mode and
+# yolo are resolved by firstmate at intake and passed explicitly to
+# bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
+# The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
+# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
+# bin/fm-spawn.sh's advisory registry-deviation notice.
+#
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                    -> no-mistakes none  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)            -> <mode> none
@@ -100,6 +108,7 @@ usage_exit() {
 }
 
 NAME=
+RAW=0
 QUERY=
 # Whether --grant was supplied at all, tracked apart from its value: an empty
 # grant name is a caller mistake and must be refused, not read as "no query".
@@ -109,6 +118,10 @@ PATH_QUERY=0
 LIST_PATHS=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --raw)
+      RAW=1
+      shift
+      ;;
     --grant)
       [ $# -ge 2 ] || usage_exit
       QUERY=$2
@@ -246,6 +259,14 @@ emit() {
     echo "$PERSONA"
     exit 0
   fi
+  # no-mistakes-prod-only is a registry policy, not a task mode. A mechanical
+  # caller asking "what does this project ship as" gets its most rigorous leg;
+  # --raw callers get the annotation itself, which is what lets a spawn compare a
+  # task's chosen mode against the standing posture without mistaking the policy
+  # for a mode.
+  if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
+    mode=no-mistakes
+  fi
   echo "$mode $grants"
   exit 0
 }
@@ -289,7 +310,7 @@ resolve_name() {
   mode=${parsed%%	*}
   toks=${parsed#*	}
   case "$mode" in
-    no-mistakes|direct-PR|local-only) MODE=$mode ;;
+    no-mistakes|direct-PR|local-only|no-mistakes-prod-only) MODE=$mode ;;
     *)
       # Least permission on an unknown mode, exactly as before the path token
       # existed: every flag on the line is dropped with it, including +path and
