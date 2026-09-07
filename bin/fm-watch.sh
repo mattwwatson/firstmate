@@ -190,6 +190,11 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Repeat escalations of UNCHANGED evidence double from STALE_ESCALATE_SECS up to this
+# cap, so a healthy long-running step is not re-reported on a fixed cadence.
+WEDGE_ESCALATE_MAX_SECS=${FM_WEDGE_ESCALATE_MAX_SECS:-900}
+# Consecutive unreadable crew-state reads before the window surfaces on its own terms.
+WEDGE_UNREADABLE_SURFACE_COUNT=${FM_WEDGE_UNREADABLE_SURFACE_COUNT:-3}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -491,12 +496,16 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # two cadences cannot drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
-  local win=$1 throttle=$2 age=$3 reason=$4
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [<anchor-file> <anchor-value>]
+  local win=$1 throttle=$2 age=$3 reason=$4 anchor_file=${5:-} anchor_value=${6:-}
   [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
   [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fm_wake_append stale "$win" "$reason" || exit 1
   date +%s > "$throttle"
+  # The throttle marker carries WHEN this window last re-surfaced. A caller that
+  # also needs to record WHICH instance was surfaced passes its own anchor file,
+  # because one file cannot hold both meanings without one of them being wrong.
+  [ -z "$anchor_file" ] || printf '%s' "$anchor_value" > "$anchor_file"
   wake "$reason"
 }
 
@@ -545,37 +554,155 @@ clear_write_tracking() {  # <window-key>
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+# Widening window between repeat escalations that carry the SAME evidence:
+# STALE_ESCALATE_SECS doubled per escalation already made, capped by
+# WEDGE_ESCALATE_MAX_SECS. The first escalation is unaffected, so a real wedge is
+# still caught at the original threshold.
+wedge_escalate_interval() {  # <escalations-so-far>
+  local n=$1 secs
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  [ "$n" -gt 12 ] && n=12
+  secs=$(( STALE_ESCALATE_SECS * (1 << n) ))
+  [ "$secs" -gt "$WEDGE_ESCALATE_MAX_SECS" ] && secs=$WEDGE_ESCALATE_MAX_SECS
+  printf '%s' "$secs"
+}
+
+# A crew-state read that FAILED says nothing about the crew, so it must not
+# advance the wedge ladder nor be reported as a stopped worker. But "no evidence"
+# must not become "no alarm, ever": a permanently broken reader would otherwise
+# blind this window forever, trading a false alarm for a missed real one. So
+# consecutive unreadable reads are counted, and once WEDGE_UNREADABLE_SURFACE_COUNT
+# pile up the window surfaces on its OWN terms - naming the reader, asserting
+# neither a wedge nor a stop - with repeats spaced by the same widening window.
+wedge_unreadable_probe() {  # <window> <window-key> <triage-label> <quiet-secs>
+  local win=$1 key=$2 label=$3 age=$4 unreadable_file surfaced_file u s interval reason
+  unreadable_file="$STATE/.wedge-unreadable-$key"
+  surfaced_file="$STATE/.wedge-unreadable-surfaced-$key"
+  u=$(cat "$unreadable_file" 2>/dev/null || echo 0)
+  case "$u" in ''|*[!0-9]*) u=0 ;; esac
+  u=$((u + 1))
+  echo "$u" > "$unreadable_file"
+  if [ "$u" -lt "$WEDGE_UNREADABLE_SURFACE_COUNT" ]; then
+    triage_log "absorbed $label (crew state unreadable $u time(s) in a row - no new evidence, quiet ${age}s): $win"
+    return 0
+  fi
+  s=$(cat "$surfaced_file" 2>/dev/null || echo 0)
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  interval=$(wedge_escalate_interval "$s")
+  if [ "$(age_of "$surfaced_file")" -lt "$interval" ]; then
+    triage_log "absorbed $label (crew state unreadable $u time(s) in a row, already surfaced $s time(s), next window ${interval}s): $win"
+    return 0
+  fi
+  echo "$((s + 1))" > "$surfaced_file"
+  reason="stale: $win (quiet ${age}s, crew state UNREADABLE on $u consecutive reads - $FM_CREW_STATE_BIN returned no verdict, so this is neither a confirmed wedge nor a confirmed stop; check the crew-state reader, then the crew)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  wake "$reason"
+}
+
+# The declared pause a window was last SURFACED for, used as the anchor that
+# distinguishes another sighting of the same pause from a genuinely new one.
+pause_instance() {  # <task>
+  local task=$1 last
+  last=$(last_status_line "$STATE/$task.status")
+  status_is_paused_or_captain_held "$last" && printf '%s' "$last"
+  return 0
+}
+
+# Drop every artifact of an in-flight wedge timer: the idle clock, the escalation
+# ladder, the evidence probe pacing repeat escalations, and the consecutive-unreadable
+# counts. Call wherever a pane resets to genuinely active, so no half-cleared ladder
+# outlives the pane it described.
+clear_wedge_tracking() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-probe-$key" \
+    "$STATE/.wedge-unreadable-$key" "$STATE/.wedge-unreadable-surfaced-$key"
+}
+
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [<evidence-gate>]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 gate=${6:-on} \
+    key since age n interval reason prev_class class probe_file
+  key=$(window_key "$win")
+  probe_file="$STATE/.wedge-probe-$key"
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
       # Publish the repaired timer only after its old write-deferral chain is
       # gone, so observers cannot mistake a new idle window for the old chain.
-      clear_write_tracking "$(window_key "$win")"
+      clear_write_tracking "$key"
       date +%s > "$since_file"
       triage_log "absorbed $label timer reset: $win"
-      ;;
-    *)
-      age=$(( $(date +%s) - since ))
-      if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
-          return 0
-        fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
-        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
-        fi
-        fm_wake_append stale "$win" "$reason" || exit 1
-        rm -f "$since_file"
-        clear_write_tracking "$(window_key "$win")"
-        wake "$reason"
-      fi
+      return 0
       ;;
   esac
+  age=$(( $(date +%s) - since ))
+  [ "$age" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
+    wedge_defer_writing "$win" "$since_file" "$label" "$age"
+    return 0
+  fi
+  # Evidence gate. Escalating on elapsed time alone re-reports evidence the
+  # supervisor already has, which is how a healthy long-running step reached
+  # demand-deep-inspection while it was fine every time. So once per
+  # STALE_ESCALATE_SECS re-read the ONE authoritative verdict and record it in
+  # .wedge-probe-<key>, whose mtime doubles as the probe schedule: a CHANGED
+  # verdict (including the first probe of a stale hash, which keeps the first
+  # escalation landing at exactly the threshold) escalates now; an UNCHANGED one
+  # waits out the widening window.
+  if [ "$gate" != on ]; then
+    # The busy-pane completed-turn bound is its OWN evidence: the pane is busy and
+    # no turn has completed inside BUSY_TURN_MAX_SECS. Re-gating that on a
+    # crew-state verdict change would absorb it, so that caller escalates directly.
+    class=working
+  else
+    [ "$(age_of "$probe_file")" -ge "$STALE_ESCALATE_SECS" ] || return 0
+    prev_class=$(cat "$probe_file" 2>/dev/null || true)
+    class=$(crew_absorb_class "$task")
+    if [ "$class" = unreadable ]; then
+      # Re-arm the schedule without touching the recorded verdict: a failed read is
+      # not evidence, so the next successful probe still compares against the last
+      # verdict actually observed.
+      if [ -e "$probe_file" ]; then touch "$probe_file"; else : > "$probe_file"; fi
+      wedge_unreadable_probe "$win" "$key" "$label" "$age"
+      return 0
+    fi
+    rm -f "$STATE/.wedge-unreadable-$key" "$STATE/.wedge-unreadable-surfaced-$key"
+    printf '%s' "$class" > "$probe_file"
+    if [ "$class" = paused ]; then
+      # A declared external wait is not a wedge; hand it to the bounded pause cadence.
+      handle_paused_stale "$win" "$task" "$(cat "$STATE/.stale-$key" 2>/dev/null || true)"
+      return 0
+  fi
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  interval=$(wedge_escalate_interval "$n")
+  if [ "$class" = "$prev_class" ] && [ "$age" -lt "$interval" ]; then
+    triage_log "absorbed $label (unchanged $class verdict, quiet ${age}s, next escalation window ${interval}s): $win"
+    return 0
+  fi
+  fi
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n + 1))
+  echo "$n" > "$escalation_file"
+  if [ "$class" = working ]; then
+    reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+  else
+    # Both sides of the merge assert on this line and both are right: it IS a
+    # possible wedge (upstream's general classification) and the reason it fired
+    # is that the work signal is gone (this fork's specific evidence). Carrying
+    # both keeps each cover honest and tells the supervisor strictly more.
+    reason="stale: $win (idle ${age}s, possible wedge - the crew stopped looking active, its work signal is gone with no status update, escalation $n)"
+  fi
+  if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+    reason="$reason (demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
+  # The idle clock restarts, but the probe file stays: its content is the evidence
+  # this escalation reported, and the next probe compares against it to tell a
+  # changed verdict from another repeat of the same one.
+  rm -f "$since_file"
+  clear_write_tracking "$key"
+  wake "$reason"
 }
 
 # busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
@@ -612,7 +739,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_wedge_tracking "$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -625,7 +752,8 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
+  resurface_absorbed "$win" "$STATE/.paused-throttle-$key" "$age" "stale: $win ($reason)" \
+    "$STATE/.paused-resurfaced-$key" "$(pause_instance "$task")"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -682,20 +810,22 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" off
   return 1
 }
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key" "$STATE/.paused-throttle-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_wedge_tracking "$key"
+  rm -f "$STATE/.stale-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -716,6 +846,15 @@ pause_state_class() {  # <window> <task>
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
+  # THIS pause has already had its one live-agent sighting, so it belongs to the
+  # bounded cadence from here on. The anchor records WHICH pause was surfaced, not
+  # when, because a genuinely different declared pause is new information and must
+  # not inherit the previous one's suppression.
+  if [ -e "$STATE/.paused-$key" ] \
+    && [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$(pause_instance "$task")" ]; then
+    printf 'paused'
+    return
+  fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
@@ -780,9 +919,10 @@ surface_nonterminal_stale() {  # <window> <hash>
   if [ "$declared" = 1 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
+    date +%s > "$STATE/.paused-throttle-$key"
+    printf '%s' "$last" > "$STATE/.paused-resurfaced-$key"
   else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+    clear_pause_state "$key"
   fi
   wake "$reason"
 }
