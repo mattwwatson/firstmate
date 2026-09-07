@@ -839,6 +839,21 @@ clear_pause_state() {  # <window-key>
     "$STATE/.paused-resurfaced-$key" "$STATE/.paused-throttle-$key"
 }
 
+# 0 iff this window still carries ANY pause bookkeeping. The four pause markers
+# have two lifetimes: .paused-<key> and .paused-rechecked-<key> are TRANSIENT and
+# are dropped by release_pause_classification even while the declaration stands,
+# while .paused-resurfaced-<key> and .paused-throttle-<key> are DURABLE and
+# outlive a release on purpose. A gate that decides the fate of the DURABLE pair
+# must therefore ask THIS rather than test the transient flag: testing the flag
+# reads "no pause bookkeeping here" for a window that was merely released, so the
+# durable pair is orphaned and goes on suppressing a later, identical
+# declaration. docs/watcher-continuity.md owns the rule.
+pause_bookkeeping_present() {  # <window-key>
+  local key=$1
+  [ -e "$STATE/.paused-$key" ] || [ -e "$STATE/.paused-rechecked-$key" ] \
+    || [ -e "$STATE/.paused-resurfaced-$key" ] || [ -e "$STATE/.paused-throttle-$key" ]
+}
+
 # Release a pane from the declared-pause cadence back to wedge tracking, for the
 # one case where the declaration is STILL the crew's last word but authoritative
 # crew state outranks it. Only the two CLASSIFICATION markers go: the
@@ -1579,7 +1594,7 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    if ! status_is_paused_or_captain_held "$last" && pause_bookkeeping_present "$key"; then
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
@@ -1729,7 +1744,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && pause_bookkeeping_present "$key" && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1749,7 +1764,7 @@ EOF
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$key" ;;
         esac
-      elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
+      elif [ "$paused_bound" -ne 0 ] && pause_bookkeeping_present "$key"; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
         # declared-pause cadence recorded on this very poll.
         clear_pause_tracking "$key"

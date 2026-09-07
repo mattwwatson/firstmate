@@ -116,6 +116,35 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
+## Declared-pause marker lifetimes
+
+A window whose crew declared a wait (`paused:` or a verified captain hold) carries four markers under `state/`, keyed by the window key.
+They do not all live for the same length of time, and every defect this area has produced came from treating them as if they did.
+
+| Marker | Meaning | Lifetime |
+| --- | --- | --- |
+| `.paused-<key>` | This window's stale is currently being absorbed on the bounded pause cadence. | TRANSIENT |
+| `.paused-rechecked-<key>` | When the authoritative crew-state read that admitted the pause last ran; bounds how long the anchor may suppress without re-reading. | TRANSIENT |
+| `.paused-resurfaced-<key>` | The pause INSTANCE firstmate was last woken for, held as the declaration's exact text. | DURABLE |
+| `.paused-throttle-<key>` | When this window last re-surfaced; the only bound on `resurface_absorbed`. | DURABLE |
+
+The two lifetimes are deliberately decoupled.
+`release_pause_classification` hands a pane back to wedge tracking when authoritative crew state outranks a declaration that still stands, and it drops only the transient pair: the crew resumed, so no absorb is in flight, but firstmate was still shown that pause and the window still owes its re-surface cadence.
+`clear_pause_state` drops all four and belongs only where the declaration itself is gone.
+
+**A gate that decides the fate of durable state must not test a transient flag.**
+`.paused-<key>` answers "is an absorb in flight", not "does this window have pause bookkeeping", and after a release the honest answer to the second question is still yes.
+A cleanup gated on the flag therefore skips a window that was merely released, orphaning the anchor: the next declaration of the same text is compared against it, matches, and is absorbed as already-shown, so a genuinely new decision gate can stay invisible for a full `PAUSE_RESURFACE_SECS`.
+Ask `pause_bookkeeping_present` instead, which reads all four.
+
+Two consequences worth stating, because each has been got wrong once:
+
+- Clearing the anchor on a release re-wakes firstmate for a pause it was already shown.
+- Clearing the throttle on a release removes the only bound on re-surfacing, so the same unchanged pause wakes firstmate again as soon as crew state falls back to the log.
+
+`pause_instance_already_surfaced` compares the anchor by CONTENT, so a later declaration whose wording differs surfaces correctly whatever the marker state is.
+Only a character-identical redeclaration exercises the orphaned-anchor path, which is why coverage for it must redeclare the same text rather than a similar one.
+
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.

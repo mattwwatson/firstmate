@@ -420,6 +420,250 @@ SH
   pass "a released pause that has not changed stays on the long cadence instead of re-surfacing"
 }
 
+# --- symptom A, the orphaned anchor ------------------------------------------
+#
+# The pause markers have two lifetimes (docs/watcher-continuity.md): the
+# .paused-<key> flag and .paused-rechecked-<key> are TRANSIENT and a release
+# drops them while the declaration still stands, whereas .paused-resurfaced-<key>
+# (which pause was already shown) and .paused-throttle-<key> (the only bound on
+# re-surfacing) are DURABLE and survive it. Three cleanup gates decide the fate of
+# the DURABLE pair, and each used to test the TRANSIENT flag as its proxy for
+# "this window has pause bookkeeping". After a release that proxy answers no, the
+# durable pair is orphaned, and the anchor goes on matching a later declaration.
+#
+# EVERY case below declares THE SAME pause text twice, and that is the point, not
+# an accident to tidy away: pause_instance_already_surfaced compares the anchor by
+# CONTENT, so a redeclaration whose wording differs surfaces correctly whatever
+# the marker state is. Only a character-identical redeclaration reaches the
+# orphaned-anchor path, which is exactly why nothing caught this. Each case uses
+# one PAUSE_LINE variable for both declarations so the two can never drift apart.
+
+PAUSE_LINE='paused: awaiting review'
+
+# Firstmate drains and acknowledges a wake episode before it re-arms the watcher.
+# An unacknowledged episode makes the NEXT watcher spend its whole cycle
+# announcing `check: rearm-resurface` instead of triaging, so a case that needs
+# more than one watcher lifetime has to do between rounds what firstmate does.
+ack_watcher_episode() {  # <state>
+  local state=$1 gen
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 || true
+  gen=$(recovery_marker_generation "$state/.watcher-down" 2>/dev/null || true)
+  [ -n "$gen" ] || return 0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_ack "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$gen" >/dev/null 2>&1 || true
+}
+
+# Seed the state a window is in after its declared pause was surfaced once and the
+# crew then resumed: the DURABLE pair still records what firstmate was shown and
+# when, and release_pause_classification has already dropped the transient pair.
+seed_released_pause() {  # <state> <window-key>
+  local state=$1 key=$2
+  printf '%s' "$PAUSE_LINE" > "$state/.paused-resurfaced-$key"
+  date +%s > "$state/.paused-throttle-$key"
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key"
+}
+
+# Write <task>'s status WITHOUT backdating it and hide it from the per-poll signal
+# scan. A redeclaration is fresh by definition, and its freshness is load-bearing:
+# resurface_absorbed refuses to wake inside PAUSE_RESURFACE_SECS of the status
+# mtime, so a backdated redeclaration would wake for that reason instead of
+# proving the anchor was cleaned up.
+redeclare_pause_now() {  # <state> <task>
+  local state=$1 task=$2 statusf="$1/$2.status"
+  printf '%s\n' "$PAUSE_LINE" > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${task}_status"
+}
+
+# A fake tmux whose busy pane renders a new frame on every capture while
+# $FM_FAKE_REPAINT_COUNTER exists, and otherwise behaves exactly like the shared
+# one. A pane that repaints every poll never lets the hash settle, which is what
+# keeps a case on the hash-changed side of the branch for its whole round.
+install_repainting_busy_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "list-windows" ]; then
+  [ -z "${FM_FAKE_TMUX_WINDOW:-}" ] || printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+  exit 0
+fi
+if [ "${1:-}" = "capture-pane" ]; then
+  if [ -n "${FM_FAKE_REPAINT_COUNTER:-}" ] && [ -e "$FM_FAKE_REPAINT_COUNTER" ]; then
+    frame=$(cat "$FM_FAKE_REPAINT_COUNTER" 2>/dev/null || echo 0)
+    case "$frame" in ''|*[!0-9]*) frame=0 ;; esac
+    echo $((frame + 1)) > "$FM_FAKE_REPAINT_COUNTER"
+    printf 'working on it (frame %s)\nCtrl+c:cancel\n' "$frame"
+  elif [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+    cat "$FM_FAKE_TMUX_CAPTURE"
+  fi
+  exit 0
+fi
+if [ "${1:-}" = "display-message" ]; then
+  case "$*" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+  esac
+fi
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# One watcher round that is expected to CLEAN UP rather than decide anything.
+# Cleanup writes no triage line, so this cannot wait on the triage log the way an
+# absorb can; it stops as soon as the durable anchor is gone, and gives up after a
+# bounded wait so a gate that never fires fails its assertion instead of hanging.
+run_cleanup_round() {  # <dir> <window> <pane-text> <crew-state>
+  local dir=$1 window=$2 text=$3 crew_state=$4 state="$1/state" key pid i=0
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s\n' "$text" > "$dir/pane.txt"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$dir/watch.out" 2>&1 &
+  pid=$!
+  while [ "$i" -lt 150 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+    [ -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
+# One watcher round that is expected to SURFACE the redeclared pause. The watcher
+# exits on a wake, so the round ends on that exit; a round that never wakes gives
+# up after a bounded wait and leaves the wake count for the caller to assert on.
+run_surface_round() {  # <dir> <window> <pane-text> <crew-state>
+  local dir=$1 window=$2 text=$3 crew_state=$4 pid i=0
+  printf '%s\n' "$text" > "$dir/pane.txt"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$dir/watch.out" 2>&1 &
+  pid=$!
+  while [ "$i" -lt 200 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
+# Shared assertion: the cleanup gate under test dropped the durable pair, and the
+# identical redeclaration that follows is therefore surfaced as the new decision
+# gate it is, rather than absorbed as one firstmate was already shown.
+assert_orphan_cleared_and_redeclaration_surfaces() {  # <dir> <window> <task> <key> <gate>
+  local dir=$1 window=$2 task=$3 key=$4 gate=$5 state="$1/state"
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || fail "$gate: the pause instance anchor outlived the declaration it describes: $(state_dump "$state" "$window")"
+  [ ! -e "$state/.paused-throttle-$key" ] \
+    || fail "$gate: the re-surface throttle outlived the declaration it describes: $(state_dump "$state" "$window")"
+  ack_watcher_episode "$state"
+  redeclare_pause_now "$state" "$task"
+  run_surface_round "$dir" "$window" 'idle grok prompt, waiting (context left: 88%)' \
+    "state: paused · source: status-log · ${PAUSE_LINE#paused: }"
+  [ "$(stale_wakes "$state" "$window")" -ge 1 ] \
+    || fail "$gate: an identical redeclaration was absorbed under the orphaned anchor instead of surfacing as a new decision gate: $(state_dump "$state" "$window")"
+  grep -F "declared pause" "$dir/watch.out" >/dev/null \
+    || fail "$gate: the redeclaration surfaced without saying it was a declared pause: $(cat "$dir/watch.out")"
+}
+
+# Gate 1: the declaration is gone. The crew replaced its pause line with ordinary
+# progress, so the anchor now describes a declaration that no longer exists and
+# must go with it. Isolated to this gate: .stale-<key> is seeded at the current
+# hash and the pane is idle, so the stale path takes the already-classified leg
+# and neither of the other two gates is reached.
+test_declaration_gone_gate_drops_the_orphaned_anchor() {
+  local dir state window task key h
+  dir=$(make_case orphan-declaration-gone); state="$dir/state"
+  window="test:fm-orphan-gone"; task=orphan-gone
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  : > "$dir/watch.out"
+  h=$(hash_text 'idle grok prompt')
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '%s' "$h" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_released_pause "$state" "$key"
+
+  # The crew's own next status line is what retires the declaration.
+  printf 'working: back on it\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  run_cleanup_round "$dir" "$window" 'idle grok prompt' \
+    'state: working · source: run-step · validating (running)'
+  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
+    "declaration-gone gate"
+  pass "the declaration-gone gate drops an orphaned pause anchor left by a release"
+}
+
+# Gate 2: the busy pane, stable hash. The declaration still stands, but the pane
+# is demonstrably working, which is the pre-existing rule for clearing stale pause
+# bookkeeping. Isolated to this gate: the declaration is intact so gate 1 cannot
+# fire, and the hash is stable so gate 3 is never reached.
+test_busy_pane_gate_drops_the_orphaned_anchor() {
+  local dir state window task key h busy
+  dir=$(make_case orphan-busy-pane); state="$dir/state"
+  window="test:fm-orphan-busy"; task=orphan-busy
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  : > "$dir/watch.out"
+  busy='working on it
+Ctrl+c:cancel'
+  h=$(hash_text "$busy")
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A completed turn inside the bound keeps the busy pane out of
+  # busy_turn_bound_check, so this case exercises the cleanup gate and not the
+  # crossed-turn-bound path.
+  : > "$state/$task.turn-ended"
+  declare_pause "$state" "$task" "$PAUSE_LINE"
+  seed_released_pause "$state" "$key"
+
+  run_cleanup_round "$dir" "$window" "$busy" \
+    "state: working · source: pane · harness busy"
+  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
+    "busy-pane gate"
+  pass "the busy-pane gate drops an orphaned pause anchor left by a release"
+}
+
+# Gate 3: the busy pane whose hash also changed, the sibling of gate 2 on the
+# other side of the hash branch. Isolated to this gate: the declaration is intact
+# so gate 1 cannot fire, and the pane REPAINTS on every capture - a busy harness
+# rendering a frame counter - so every poll takes the hash-changed branch and gate
+# 2, which lives only in the stable-hash branch, is never reached. Without the
+# repaint the hash settles after one poll and gate 2 cleans up instead, which
+# would leave this case green with gate 3 broken.
+test_hash_changed_gate_drops_the_orphaned_anchor() {
+  local dir state window task key
+  dir=$(make_case orphan-hash-changed); state="$dir/state"
+  window="test:fm-orphan-hash"; task=orphan-hash
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  : > "$dir/watch.out"
+  install_repainting_busy_tmux "$dir/fakebin"
+  printf '%s' "$(hash_text 'a completely different pane')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/$task.turn-ended"
+  declare_pause "$state" "$task" "$PAUSE_LINE"
+  seed_released_pause "$state" "$key"
+
+  export FM_FAKE_REPAINT_COUNTER="$dir/repaint"
+  : > "$FM_FAKE_REPAINT_COUNTER"
+  run_cleanup_round "$dir" "$window" 'unused - the repainting fake owns the pane' \
+    "state: working · source: pane · harness busy"
+  # The redeclaration has to be judged on a settled idle pane, so retire the
+  # repaint and let the fake fall back to the pane file the helpers write.
+  rm -f "$FM_FAKE_REPAINT_COUNTER"
+  unset FM_FAKE_REPAINT_COUNTER
+  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
+    "hash-changed gate"
+  pass "the hash-changed gate drops an orphaned pause anchor left by a release"
+}
+
 # --- symptom B --------------------------------------------------------------
 #
 # The wedge ladder is driven from the idle clock (.stale-since-<key>) and the
@@ -698,6 +942,9 @@ test_a_different_declared_pause_gets_its_own_sighting
 test_pause_absorb_releases_when_the_crew_resumes
 test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status
 test_a_released_pause_stays_on_the_long_cadence_when_unchanged
+test_declaration_gone_gate_drops_the_orphaned_anchor
+test_busy_pane_gate_drops_the_orphaned_anchor
+test_hash_changed_gate_drops_the_orphaned_anchor
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
 test_unreadable_state_read_is_not_a_lost_work_signal
