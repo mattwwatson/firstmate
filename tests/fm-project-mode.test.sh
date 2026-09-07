@@ -443,12 +443,84 @@ test_list_paths_refuses_extra_arguments() {
   pass "query shapes are mutually exclusive and refused loudly"
 }
 
+# A ship spawn that runs to completion, so the task record it writes can be read
+# back. Mirrors the fixture tests/fm-grok-harness.test.sh uses: a fake tmux that
+# accepts every verb, a real git worktree for the task branch, and a brief in
+# place. Echoes "<home>|<project>|<worktree>|<fakebin>|<grok-home>|<id>".
+make_spawn_case() {  # <name>
+  local name=$1 case_dir home proj wt fakebin grok_home id
+  case_dir="$TMP_ROOT/spawn-$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  grok_home="$case_dir/grok"
+  id="grants-$name-x1"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$grok_home"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$home|$proj|$wt|$fakebin|$grok_home|$id"
+}
+
+spawn_ship() {  # <home> <project> <worktree> <fakebin> <grok-home> <id> <flags...>
+  local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6
+  shift 6
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" grok "$@" 2>&1
+}
+
 test_spawn_records_grants_in_task_metadata() {
   # The split is worthless if it dies at the parser: the grants must reach the
-  # durable task record the supervising agent actually reads.
-  assert_grep 'grants=' "$ROOT/bin/fm-spawn.sh" "fm-spawn must record grants= in task metadata"
-  grep -q 'echo "yolo=' "$ROOT/bin/fm-spawn.sh" \
-    && fail "fm-spawn still writes the superseded single yolo= metadata field"
+  # durable task record the supervising agent actually reads. Asserted on what a
+  # real spawn RECORDS in state/<id>.meta - the persisted record every supervising
+  # consumer reads - so a refactor that keeps the behaviour keeps this passing.
+  local rec home proj wt fakebin grok_home id out status meta
+  rec=$(make_spawn_case granted)
+  IFS='|' read -r home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  out=$(spawn_ship "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id" \
+    --mode no-mistakes --grants findings,merge)
+  status=$?
+  expect_code 0 "$status" "a ship spawn carrying explicit grants should succeed: $out"
+  meta="$home/state/$id.meta"
+  assert_grep 'grants=findings,merge' "$meta" "the resolved grants did not reach the task record"
+  assert_grep 'mode=no-mistakes' "$meta" "the delivery mode did not reach the task record"
+  assert_no_grep 'yolo=' "$meta" "a spawn never given --yolo invented a yolo posture"
+
+  # This fork keeps BOTH fields: grants= is what decides authority and yolo= is
+  # carried beside it, so a spawn given both records both and neither supersedes
+  # the other in the record.
+  rec=$(make_spawn_case both)
+  IFS='|' read -r home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  out=$(spawn_ship "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id" \
+    --mode direct-PR --grants none --yolo on)
+  status=$?
+  expect_code 0 "$status" "a ship spawn carrying both fields should succeed: $out"
+  meta="$home/state/$id.meta"
+  assert_grep 'grants=none' "$meta" "grants= was dropped when yolo= was also passed"
+  assert_grep 'yolo=on' "$meta" "yolo= was dropped, but this fork records both fields"
   assert_grep 'grants' "$ROOT/bin/fm-fleet-snapshot.sh" "the fleet view must surface grants"
   pass "resolved grants reach task metadata and the fleet view"
 }

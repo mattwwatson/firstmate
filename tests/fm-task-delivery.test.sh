@@ -2,12 +2,15 @@
 # Behavior tests for the explicit per-task delivery contract (AGENTS.md section 7)
 # across bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-project-mode.sh.
 #
-# A ship task's delivery mode and yolo posture are firstmate's decision at intake,
-# so the tools refuse to guess: the spawn and a scout promotion require both flags,
-# validate them against a closed set, and the spawn additionally refuses to launch
-# when the brief it is about to hand the worker records a different mode. Scout
-# spawns carry no delivery posture at all. The registry keeps only the captain's
-# standing posture, for the mechanical consumers and for one advisory notice.
+# A ship task's delivery mode is firstmate's decision at intake, so the tools
+# refuse to guess it: the spawn and a scout promotion both require an explicit
+# mode, validate it against a closed set, and the spawn additionally refuses to
+# launch when the brief it is about to hand the worker records a different mode.
+# The authority half is this fork's --grants, deliberately OPTIONAL, so an omitted
+# list is accepted and records grants=none; --yolo is still accepted and recorded
+# beside it but is no longer required. Scout spawns carry no delivery posture at
+# all. The registry keeps only the captain's standing posture, for the mechanical
+# consumers and for one advisory notice.
 #
 # Every spawn case here stops before any endpoint exists: the delivery checks run
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
@@ -79,13 +82,12 @@ EOF
     assert_absent "$home/state/delivery-required-$n.meta" "$label: refused spawn wrote task metadata"
   done <<'ROWS'
 missing both flags||ship spawns require --mode
-missing --yolo|--mode no-mistakes|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
 unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
 unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
 conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
 ROWS
-  pass "fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created"
+  pass "fm-spawn: a ship spawn requires a valid explicit mode before anything is created"
 }
 
 # A scout has no merge to govern and a secondmate's posture is fixed, so the flags
@@ -217,16 +219,22 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_contains "$out" "promotion requires --mode" "promote refusal did not name the missing mode"
   assert_grep 'kind=scout' "$meta" "refused promotion still changed the task record"
 
+  # The authority half is optional by deliberate decision, so a promotion that
+  # names only the mode is accepted and records the least-authority default.
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "promotion without --yolo should exit non-zero"
-  assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing merge posture"
+  expect_code 0 "$status" "a promotion naming only the mode should succeed"
+  assert_grep 'kind=ship' "$meta" "a mode-only promotion did not restore ship teardown protection"
+  assert_grep 'grants=none' "$meta" "a mode-only promotion did not record the least-authority grants default"
+  assert_no_grep 'yolo=' "$meta" "a mode-only promotion invented a yolo posture it was never given"
 
+  write_scout_meta
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
 
+  write_scout_meta
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
@@ -235,7 +243,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
-  pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+  pass "fm-promote: promotion requires the mode, defaults the grants, and records the contract exactly once"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the

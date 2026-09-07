@@ -316,11 +316,108 @@ test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status() {
     || fail "the resumed run woke firstmate instead of returning to wedge tracking: $(cat "$out")"
   [ ! -e "$state/.paused-$key" ] \
     || fail "an already-surfaced declared pause outranked a working crew-state read and kept the pause cadence: $(state_dump "$state" "$window")"
-  [ ! -e "$state/.paused-resurfaced-$key" ] \
-    || fail "the pause instance anchor survived the release, so the next poll would absorb again: $(state_dump "$state" "$window")"
+  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$line" ] \
+    || fail "the release discarded the pause instance anchor, so this same pause reads as never shown: $(state_dump "$state" "$window")"
+  [ -e "$state/.paused-throttle-$key" ] \
+    || fail "the release discarded the re-surface throttle, the only bound on the long pause cadence: $(state_dump "$state" "$window")"
   [ -s "$state/.stale-since-$key" ] \
     || fail "the released pane did not resume wedge tracking, so a wedge from here would never escalate: $(state_dump "$state" "$window")"
   pass "an already-surfaced pause still releases on a working read when the crew appended no new status"
+}
+
+# The composition the marker split and the precedence fix make reachable
+# together, and the property that pins it: A DECLARED PAUSE THAT HAS NOT CHANGED
+# SURFACES ONCE AND THEN STAYS ON THE LONG CADENCE, WHETHER OR NOT THE CREW HAS
+# RESUMED SINCE. Releasing a pane is a statement about the CLASSIFICATION, so a
+# release that also drops .paused-throttle-<key> or .paused-resurfaced-<key>
+# resets the cadence clock and the already-shown record for a pause the captain
+# was already woken for, and the same declaration wakes them a second time the
+# moment crew state falls back to the log. Both halves are individually correct
+# and wrong together, which is why this needs its own cover.
+test_a_released_pause_stays_on_the_long_cadence_when_unchanged() {
+  local dir state fakebin out capture window key line h pid i
+  dir=$(make_case paused-release-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-release-cadence"
+  line='paused: awaiting the upstream release'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/release-cadence.meta"
+  declare_pause "$state" release-cadence "$line"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle grok prompt\n' > "$capture"
+  h=$(hash_text "$(cat "$capture")")
+
+  # One watcher process, two verdicts. The reader answers `working` while the
+  # run-step marker exists and falls back to the unchanged declaration once this
+  # test removes it, so the release and the poll after it land in the SAME
+  # watcher lifetime - the sequence a captain actually lives through, and not
+  # reproducible by seeding the post-release state by hand.
+  : > "$dir/run-step-live"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -e "${FM_FAKE_RUN_STEP_MARKER:?}" ]; then
+  printf 'state: working · source: run-step · validating (running)\n'
+else
+  printf 'state: paused · source: status-log · awaiting the upstream release\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  # Exactly what surface_nonterminal_stale leaves behind once this pause has had
+  # its one sighting, with the recheck stamp aged out of its window.
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '%s' "$h" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  printf '%s' "$line" > "$state/.paused-resurfaced-$key"
+  date +%s > "$state/.paused-throttle-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  backdate "$state/.paused-rechecked-$key" 600
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_RUN_STEP_MARKER="$dir/run-step-live" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+
+  i=0
+  while [ "$i" -lt 400 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    grep -F "provably working after a declared pause" "$state/.watch-triage.log" >/dev/null 2>&1 && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || {
+    wait "$pid" 2>/dev/null || true
+    fail "the watcher exited before it released the pause on the working read: $(cat "$out")"
+  }
+
+  # The run step ends. Nothing else changes: the same pause line is still the
+  # crew's last word, and the captain has already been woken for it once.
+  rm -f "$dir/run-step-live"
+  i=0
+  while [ "$i" -lt 400 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; break; }
+    grep -F "absorbed stale (paused" "$state/.watch-triage.log" >/dev/null 2>&1 && { reap "$pid"; break; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  [ ! -s "$out" ] \
+    || fail "an unchanged declared pause woke firstmate a second time after a release: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an unchanged declared pause queued a second wake after a release: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$line" ] \
+    || fail "the release discarded the pause instance anchor: $(state_dump "$state" "$window")"
+  [ -e "$state/.paused-throttle-$key" ] \
+    || fail "the release discarded the re-surface throttle, so the long cadence has no bound left: $(state_dump "$state" "$window")"
+  [ -e "$state/.paused-$key" ] \
+    || fail "the unchanged pause did not go back onto the bounded pause cadence: $(state_dump "$state" "$window")"
+  grep -F "absorbed stale (paused" "$state/.watch-triage.log" >/dev/null \
+    || fail "the poll after the release never classified the unchanged pause: $(state_dump "$state" "$window")"
+  pass "a released pause that has not changed stays on the long cadence instead of re-surfacing"
 }
 
 # --- symptom B --------------------------------------------------------------
@@ -600,6 +697,7 @@ test_declared_pause_with_live_agent_surfaces_once_across_repaints
 test_a_different_declared_pause_gets_its_own_sighting
 test_pause_absorb_releases_when_the_crew_resumes
 test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status
+test_a_released_pause_stays_on_the_long_cadence_when_unchanged
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
 test_unreadable_state_read_is_not_a_lost_work_signal

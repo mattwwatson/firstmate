@@ -612,15 +612,20 @@ pause_instance() {  # <task>
   return 0
 }
 
-# 0 iff this window's pause tracking is live AND its instance anchor holds the
-# very pause the crew is declaring now, i.e. firstmate has already been shown
-# THIS pause. The anchor records WHICH pause was surfaced, not when, so a
-# genuinely different declared pause is new information and does not inherit the
-# previous one's suppression.
+# 0 iff this window's instance anchor holds the very pause the crew is declaring
+# now, i.e. firstmate has already been woken for THIS pause. The anchor records
+# WHICH pause was surfaced, not when, so a genuinely different declared pause is
+# new information and does not inherit the previous one's suppression.
+# Deliberately NOT gated on the .paused-<key> classification flag: only a real
+# wake writes this anchor, so "already shown" stays true across a spell in which
+# authoritative crew state outranked the declaration and the flag was dropped.
+# The non-empty test is what makes an absent anchor fail rather than compare
+# equal to a task whose last status is not a declaration at all.
 pause_instance_already_surfaced() {  # <window-key> <task>
-  local key=$1 task=$2
-  [ -e "$STATE/.paused-$key" ] || return 1
-  [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$(pause_instance "$task")" ]
+  local key=$1 task=$2 anchor
+  anchor=$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)
+  [ -n "$anchor" ] || return 1
+  [ "$anchor" = "$(pause_instance "$task")" ]
 }
 
 # Drop every artifact of an in-flight wedge timer: the idle clock, the escalation
@@ -663,6 +668,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   # verdict (including the first probe of a stale hash, which keeps the first
   # escalation landing at exactly the threshold) escalates now; an UNCHANGED one
   # waits out the widening window.
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
   if [ "$gate" != on ]; then
     # The busy-pane completed-turn bound is its OWN evidence: the pane is busy and
     # no turn has completed inside BUSY_TURN_MAX_SECS. Re-gating that on a
@@ -686,17 +693,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # A declared external wait is not a wedge; hand it to the bounded pause cadence.
       handle_paused_stale "$win" "$task" "$(cat "$STATE/.stale-$key" 2>/dev/null || true)"
       return 0
+    fi
+    interval=$(wedge_escalate_interval "$n")
+    if [ "$class" = "$prev_class" ] && [ "$age" -lt "$interval" ]; then
+      triage_log "absorbed $label (unchanged $class verdict, quiet ${age}s, next escalation window ${interval}s): $win"
+      return 0
+    fi
   fi
-  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  interval=$(wedge_escalate_interval "$n")
-  if [ "$class" = "$prev_class" ] && [ "$age" -lt "$interval" ]; then
-    triage_log "absorbed $label (unchanged $class verdict, quiet ${age}s, next escalation window ${interval}s): $win"
-    return 0
-  fi
-  fi
-  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
   n=$((n + 1))
   echo "$n" > "$escalation_file"
   if [ "$class" = working ]; then
@@ -834,6 +837,27 @@ clear_pause_state() {  # <window-key>
   local key=$1
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
     "$STATE/.paused-resurfaced-$key" "$STATE/.paused-throttle-$key"
+}
+
+# Release a pane from the declared-pause cadence back to wedge tracking, for the
+# one case where the declaration is STILL the crew's last word but authoritative
+# crew state outranks it. Only the two CLASSIFICATION markers go: the
+# .paused-<key> flag, because no pause absorb is in flight any more, and the
+# .paused-rechecked-<key> window, because the read that released the pane is
+# fresher than any stamp it held.
+#
+# .paused-resurfaced-<key> and .paused-throttle-<key> are facts about the PAUSE,
+# not about the classification, and MUST survive. The anchor says firstmate has
+# already been woken for this exact declaration; the throttle says when this
+# window last re-surfaced, and it is the only bound on resurface_absorbed. A crew
+# resuming work neither un-shows a pause firstmate was already shown nor earns
+# the window an extra wake, so clearing either one lets the SAME unchanged pause
+# wake firstmate a second time the moment crew state falls back to the log -
+# which is why clear_pause_state, which drops all four, belongs only on the paths
+# where the declaration itself is gone.
+release_pause_classification() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -1659,7 +1683,9 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$key"
+                release_pause_classification "$key"
+                clear_write_tracking "$key"
+                clear_wedge_tracking "$key"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1676,7 +1702,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
+                working) release_pause_classification "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;

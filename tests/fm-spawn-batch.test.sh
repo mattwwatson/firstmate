@@ -121,12 +121,17 @@ test_batch_requires_the_shared_delivery_contract() {
   printf '%s\n' "$out" | grep -F 'batch:' >/dev/null \
     && fail "batch dispatched pairs despite an undecided delivery contract"
 
+  # The authority half is optional by deliberate decision, so a batch that names
+  # only the mode has a decided contract and IS dispatched; each pair then stops
+  # at its own missing brief rather than at the shared gate.
   out=$(run_spawn nope-batch-noyolo-z11=projects/none-a --mode direct-PR)
   status=$?
-  [ "$status" -ne 0 ] || fail "a ship batch without --yolo should exit non-zero"
+  [ "$status" -ne 0 ] || fail "a batch whose pairs have no brief should exit non-zero"
   printf '%s\n' "$out" | grep -F 'ship spawns require --yolo' >/dev/null \
-    || fail "batch refusal did not name the missing merge posture"
-  pass "batch dispatch requires the shared ship delivery contract before any pair runs"
+    && fail "a mode-only ship batch was refused for a flag that is no longer required"
+  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-noyolo-z11 (projects/none-a)' >/dev/null \
+    || fail "a mode-only ship batch was not dispatched"
+  pass "batch dispatch requires the shared ship delivery mode before any pair runs"
 }
 
 # A scout batch has no delivery contract to share, so the flags are refused rather

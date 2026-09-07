@@ -389,10 +389,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
   [ "$GRANTS_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded autonomy grants; --grants cannot override it" >&2; exit 1; }
 else
-  # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
-  # firstmate's per-task decision, so they are required and closed-set validated
-  # here rather than resolved from the project registry. Scouts deliver a report
-  # and record no delivery posture; secondmate spawns hardcode theirs.
+  # Delivery contract (AGENTS.md section 7). A ship task's mode is firstmate's
+  # per-task decision, so it is required and closed-set validated here rather
+  # than resolved from the project registry. The authority half is --grants, and
+  # the comment on its validation below owns what each of --grants and --yolo
+  # requires. Scouts deliver a report and record no delivery posture; secondmate
+  # spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2

@@ -299,7 +299,9 @@ A diagnostic request, report, recommendation, or implementation-ready finding is
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Resolve every ship task's concrete delivery mode and autonomy grants at intake.
-Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
+Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion.
+The mode is the value each command refuses to guess: `bin/fm-spawn.sh` and `bin/fm-promote.sh` both exit non-zero on a ship task with no explicit mode, and both validate it against the closed set.
+The autonomy grants are not enforced that way, so pass them deliberately: omitting the grants argument is SILENT and records `grants=none` for the task, which errs toward too little authority but never announces that it did so.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 An unregistered project or absent registry resolves to `no-mistakes` with no grants, and the registration gap goes to the captain.
