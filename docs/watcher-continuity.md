@@ -144,6 +144,14 @@ The consequence in this area: only a gate conditioned on the declaration having 
 A gate that can fire while a declaration still stands must not clear them, because the anchor and the throttle exist precisely to bound the re-surfacing of a declaration that stands; the most such a gate may drop is the transient pair, via `release_pause_classification`.
 So before changing any gate that touches these markers, including one this page has never named, decide which question it answers - has this declaration gone, or is an absorb in flight - and give it only the cleanup that question authorises.
 
+**Enumerate from the clear, not from the condition.**
+Both rules above govern what a site is entitled to remove, so applying either one means finding every site that can remove a durable marker, and searching for the marker names or for `pause_bookkeeping_present` finds only the conditional gates that test them.
+A leg whose authority to clear comes from a `case` arm on a `pause_state_class` verdict names no marker in its condition at all, so that search never reports it even though one of its arms reaches `clear_pause_tracking`.
+Enumerate from the other end instead: `clear_pause_state` is the only code that removes the durable pair, `clear_pause_tracking` is a wrapper around it, and every site these rules govern is a call to one of those two.
+List those calls first, then read each one for what it has actually established about the declaration by the time control reaches it.
+A verdict of `working` or `unreadable` is not the same fact as the declaration being gone, and neither is a condition several branches up that tested something else.
+Any new cleanup path comes under the same reading the moment it calls either function, whatever its own condition looks like.
+
 Two consequences worth stating, because each has been got wrong once:
 
 - Clearing the anchor on a release re-wakes firstmate for a pause it was already shown.
