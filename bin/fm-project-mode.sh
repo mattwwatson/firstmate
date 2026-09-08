@@ -112,7 +112,19 @@ RAW=0
 QUERY=
 # Whether --grant was supplied at all, tracked apart from its value: an empty
 # grant name is a caller mistake and must be refused, not read as "no query".
+# The closed set of grant names, stated once. Every caller that needs to know
+# whether a name is a grant asks through this file rather than repeating the list,
+# so adding a grant is one edit here and not a hunt through the callers.
+grant_name_is_known() {  # <name>
+  case "$1" in
+    findings|merge|merge-unobservable|local-merge) return 0 ;;
+  esac
+  return 1
+}
+
 QUERY_SET=0
+VALIDATE_GRANTS=
+VALIDATE_SET=0
 PERSONA_QUERY=0
 PATH_QUERY=0
 LIST_PATHS=0
@@ -121,6 +133,12 @@ while [ $# -gt 0 ]; do
     --raw)
       RAW=1
       shift
+      ;;
+    --valid-grants)
+      [ $# -ge 2 ] || usage_exit
+      VALIDATE_GRANTS=$2
+      VALIDATE_SET=1
+      shift 2
       ;;
     --grant)
       [ $# -ge 2 ] || usage_exit
@@ -151,6 +169,33 @@ done
 # Exactly one query shape: a plain/--grant/--persona/--path resolve needs a
 # name, and --list-paths refuses every other argument rather than guessing what
 # was meant.
+# --valid-grants answers only "is this a well-formed grants value", so it needs no
+# project and runs before the name requirement. It refuses loudly and names the
+# offending word: a caller that mistypes a grant must be stopped, never silently
+# resolved to the weakest permission, because that reads as a decision nobody made.
+if [ "$VALIDATE_SET" = 1 ]; then
+  [ -n "$VALIDATE_GRANTS" ] || { echo "error: --valid-grants requires a value; use \"none\" for no grants" >&2; exit 2; }
+  if [ "$VALIDATE_GRANTS" != none ]; then
+    # Word splitting drops empty fields, so a leading, trailing or doubled comma
+    # would pass as the surrounding names. Reject the shape before splitting, or
+    # a mistyped list is accepted as though it were the one that was meant.
+    case ",$VALIDATE_GRANTS," in
+      *,,*) echo "error: malformed grants list \"$VALIDATE_GRANTS\"; expected a comma list such as findings,merge with no empty entries, or the word none" >&2; exit 2 ;;
+    esac
+    _saved_ifs=$IFS
+    IFS=,
+    for _g in $VALIDATE_GRANTS; do
+      IFS=$_saved_ifs
+      [ -n "$_g" ] || { echo "error: empty grant in \"$VALIDATE_GRANTS\"; expected a comma list such as findings,merge or the word none" >&2; exit 2; }
+      grant_name_is_known "$_g" \
+        || { echo "error: unknown grant \"$_g\" in \"$VALIDATE_GRANTS\"; expected findings, merge, merge-unobservable, or local-merge, or the word none" >&2; exit 2; }
+      IFS=,
+    done
+    IFS=$_saved_ifs
+  fi
+  exit 0
+fi
+
 if [ "$LIST_PATHS" = 1 ]; then
   { [ -z "$NAME" ] && [ "$QUERY_SET" = 0 ] && [ "$PERSONA_QUERY" = 0 ] && [ "$PATH_QUERY" = 0 ]; } || usage_exit
 else
@@ -161,10 +206,8 @@ fi
 # An unknown grant name is a caller mistake, not a denial: refuse it loudly with
 # its own exit code so it can never be mistaken for a resolved "not granted".
 if [ "$QUERY_SET" = 1 ]; then
-  case "$QUERY" in
-    findings|merge|merge-unobservable|local-merge) ;;
-    *) echo "error: unknown grant \"$QUERY\"; expected findings, merge, merge-unobservable, or local-merge" >&2; exit 2 ;;
-  esac
+  grant_name_is_known "$QUERY" \
+    || { echo "error: unknown grant \"$QUERY\"; expected findings, merge, merge-unobservable, or local-merge" >&2; exit 2; }
 fi
 
 G_FINDINGS=off

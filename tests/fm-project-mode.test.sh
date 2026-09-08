@@ -315,6 +315,35 @@ test_second_field_can_never_be_read_as_the_old_boolean() {
   pass "the grants field can never be mistaken for the old on/off boolean"
 }
 
+# The grants closed set is this file's to own, so callers validate through it
+# rather than repeating the list. An unrecognised or malformed value must STOP the
+# caller: silently resolving it to the weakest permission records an authority
+# label nobody chose, and the fleet view then renders that label as the truth.
+test_valid_grants_accepts_the_closed_set_and_refuses_everything_else() {
+  local out rc
+  for good in none findings merge merge-unobservable local-merge findings,merge \
+    merge-unobservable,local-merge findings,merge,merge-unobservable,local-merge; do
+    "$ROOT/bin/fm-project-mode.sh" --valid-grants "$good" >/dev/null 2>&1 \
+      || fail "a valid grants value was refused: $good"
+  done
+  for bad in findigs merges yolo on off "findings,"; do
+    out=$("$ROOT/bin/fm-project-mode.sh" --valid-grants "$bad" 2>&1); rc=$?
+    [ "$rc" -eq 2 ] || fail "an invalid grants value did not refuse with exit 2: $bad (exit $rc)"
+    case "$out" in
+      *"$bad"*) ;;
+      *) fail "the refusal did not name the offending value: $bad -> $out" ;;
+    esac
+  done
+  # A malformed shape must not pass as the names around the empty entry.
+  for shape in ",merge" "findings,,merge"; do
+    "$ROOT/bin/fm-project-mode.sh" --valid-grants "$shape" >/dev/null 2>&1 \
+      && fail "a malformed grants list was accepted: $shape"
+  done
+  out=$("$ROOT/bin/fm-project-mode.sh" --valid-grants "" 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "an empty grants value did not refuse"
+  pass "fm-project-mode --valid-grants: the closed set passes, unknown names and malformed lists refuse loudly"
+}
+
 test_every_caller_reads_the_field_it_intends() {
   local file line window callers=0
   # Pin the caller inventory: each invocation in bin/ must either take only the
@@ -331,6 +360,10 @@ test_every_caller_reads_the_field_it_intends() {
         *'%% *'*) ;;                                            # mode only
         *'read -r MODE GRANTS'*) ;;                             # mode and grants
         *'--grant '*) ;;                                        # exit-code query, reads no field
+        # Reviewed and registered: bin/fm-spawn.sh and bin/fm-promote.sh validate a
+        # --grants value through this file so the closed set stays owned in one place.
+        # It is a pure validator - exit code only, no mode or grants field is read.
+        *'--valid-grants '*) ;;                                 # exit-code query, reads no field
         *'--persona'*) ;;                                       # the one-word persona query
         *'--path'*|*'--list-paths'*) ;;                         # path queries: no mode/grants field read
         *'pure-contract-unit'*) ;;                              # fm-test-run.sh changed-file family map: filename pattern, not a call
@@ -579,6 +612,7 @@ test_unknown_mode_drops_the_path_too
 test_duplicate_path_tokens_void_the_path
 test_list_paths_lists_only_usable_entries
 test_list_paths_refuses_extra_arguments
+test_valid_grants_accepts_the_closed_set_and_refuses_everything_else
 test_every_caller_reads_the_field_it_intends
 test_spawn_records_grants_in_task_metadata
 

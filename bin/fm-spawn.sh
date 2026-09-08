@@ -359,6 +359,13 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$GRANTS_SET" -eq 0 ] || [ -n "$GRANTS" ] || { echo "error: --grants requires a non-empty value" >&2; exit 1; }
+# Validated against the closed set bin/fm-project-mode.sh owns, rather than against
+# a copy of that list kept here. An unrecognised grant STOPS the spawn: silently
+# recording it would leave the task carrying a permission label nobody granted, and
+# the fleet view renders that label as the task's authority.
+[ "$GRANTS_SET" -eq 0 ] \
+  || "$FM_ROOT/bin/fm-project-mode.sh" --valid-grants "$GRANTS" \
+  || exit 1
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.

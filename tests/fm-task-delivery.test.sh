@@ -245,10 +245,36 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the mode, defaults the grants, and records the contract exactly once"
 }
 
+# A mistyped grant must STOP the command rather than be recorded. Silently taking
+# it would leave the task carrying an authority label nobody chose, and the fleet
+# view renders that label as the task's authority - a wrong answer stated
+# confidently, which is worse than a refusal.
+test_promote_refuses_an_unrecognised_grant() {
+  local home meta out status
+  home="$TMP_ROOT/promote-grants/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-g1.meta"
+  printf 'window=fm-promote-g1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-g1 --mode no-mistakes --grants findigs 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mistyped grant did not stop the promotion"
+  assert_contains "$out" "findigs" "the refusal did not name the offending grant"
+  assert_grep 'kind=scout' "$meta" "a refused promotion still flipped the task kind"
+  assert_no_grep 'grants=' "$meta" "a refused promotion recorded a grants value anyway"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-g1 --mode no-mistakes --grants findings,merge 2>&1)
+  status=$?
+  expect_code 0 "$status" "a valid grants list was refused"
+  assert_grep 'grants=findings,merge' "$meta" "a valid grants list was not recorded"
+  pass "fm-promote: an unrecognised grant stops the promotion and records nothing"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_an_unrecognised_grant
 echo "# all fm-task-delivery tests passed"

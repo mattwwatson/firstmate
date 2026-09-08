@@ -71,6 +71,13 @@ done
 [ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> [--grants <list|none>] [--yolo <on|off>]" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$GRANTS_SET" -eq 0 ] || [ -n "$GRANTS" ] || { echo "error: --grants requires a non-empty value" >&2; exit 1; }
+# Validated against the closed set bin/fm-project-mode.sh owns, rather than against
+# a copy of that list kept here. An unrecognised grant STOPS the promotion, for the
+# same reason it stops a spawn: a mistyped grant must never be recorded as though
+# it were the permission that was meant.
+[ "$GRANTS_SET" -eq 0 ] \
+  || "$FM_ROOT/bin/fm-project-mode.sh" --valid-grants "$GRANTS" \
+  || exit 1
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
