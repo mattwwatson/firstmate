@@ -147,10 +147,13 @@ So before changing any gate that touches these markers, including one this page 
 **Enumerate from the clear, not from the condition.**
 Both rules above govern what a site is entitled to remove, so applying either one means finding every site that can remove a durable marker, and searching for the marker names or for `pause_bookkeeping_present` finds only the conditional gates that test them.
 A leg whose authority to clear comes from a `case` arm on a `pause_state_class` verdict names no marker in its condition at all, so that search never reports it even though one of its arms reaches `clear_pause_tracking`.
-Enumerate from the other end instead: `clear_pause_state` is the only code that removes the durable pair, `clear_pause_tracking` is a wrapper around it, and every site these rules govern is a call to one of those two.
-List those calls first, then read each one for what it has actually established about the declaration by the time control reaches it.
+Enumerate from the other end instead, and do it across the repository rather than within one file, because the durable pair has more than one owner.
+In `bin/fm-watch.sh` it is removed by `clear_pause_state`, which `clear_pause_tracking` wraps, so every governed site in that file is a call to one of those two.
+`bin/fm-supervise-daemon.sh` then defines its OWN `clear_pause_tracking`, taking a window and a state directory, which is a separate function rather than a wrapper around the watcher's, and it removes the same two durable markers from its own `rm -f` list.
+So enumerate every removal of `.paused-resurfaced-<key>` and `.paused-throttle-<key>` wherever it lives, and never read a shared function name as evidence that two components share one implementation.
+Then read each site you find for what it has actually established about the declaration by the time control reaches it.
 A verdict of `working` or `unreadable` is not the same fact as the declaration being gone, and neither is a condition several branches up that tested something else.
-Any new cleanup path comes under the same reading the moment it calls either function, whatever its own condition looks like.
+Any new cleanup path comes under the same reading the moment it can remove a durable marker, whatever component it lives in and whatever its own condition looks like.
 
 Two consequences worth stating, because each has been got wrong once:
 
