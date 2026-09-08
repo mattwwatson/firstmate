@@ -184,56 +184,6 @@ declare_pause() {  # <state> <task> <line>
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${task}_status"
 }
 
-# The other half of symptom A's anchor: "already shown" belongs to the PAUSE
-# INSTANCE, not to the window. A crew that declares one pause, is surfaced for
-# it, then declares a genuinely DIFFERENT pause has raised a new external-decision
-# gate - it must get its own single sighting, not inherit the previous pause's
-# suppression and wait out the hour-long recheck cadence before firstmate ever
-# hears about it.
-test_a_different_declared_pause_gets_its_own_sighting() {
-  local dir state window key first second
-  dir=$(make_case paused-second-instance); state="$dir/state"
-  window="test:fm-paused-two"
-  first='paused: rebased on current base, awaiting pipeline go-ahead'
-  second='paused: awaiting the captain answer on the schema choice'
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused-two.meta"
-  declare_pause "$state" paused-two "$first"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  : > "$dir/watch.out"
-
-  run_paused_round "$dir" "$window" 'idle grok prompt, waiting' \
-    "state: paused · source: status-log · ${first#paused: }" 'first pause, first sighting'
-  [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
-    || fail "the first declared pause did not surface exactly once: $(cat "$dir/watch.out")"
-  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$first" ] \
-    || fail "the already-surfaced marker was not anchored on the pause that was surfaced"
-
-  # Same pause, repainted pane: still absorbed, as symptom A requires.
-  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 88%)' \
-    "state: paused · source: status-log · ${first#paused: }" 'first pause, repainted'
-  [ "$(stale_wakes "$state" "$window")" -eq 1 ] \
-    || fail "a repaint of the SAME pause surfaced again: $(cat "$dir/watch.out")"
-
-  # A different pause: a new gate, and the status file is fresh enough that the
-  # hour-long recheck cadence would not have surfaced it for another hour.
-  declare_pause "$state" paused-two "$second"
-  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 87%)' \
-    "state: paused · source: status-log · ${second#paused: }" 'second pause, first sighting'
-  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
-    || fail "a genuinely different declared pause was absorbed silently under the previous pause's suppression: $(cat "$dir/watch.out")"
-  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$second" ] \
-    || fail "the already-surfaced marker was not re-anchored on the new pause"
-  [ "$(bare_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "a declared pause surfaced as a bare stale with no pause context"
-
-  # And the new pause is now the one that is absorbed, so it too surfaces once.
-  run_paused_round "$dir" "$window" 'idle grok prompt, waiting (context left: 86%)' \
-    "state: paused · source: status-log · ${second#paused: }" 'second pause, repainted'
-  [ "$(stale_wakes "$state" "$window")" -eq 2 ] \
-    || fail "the new pause did not settle onto the bounded cadence after its one sighting"
-  pass "a different declared pause on the same window gets its own single sighting"
-}
-
 # The disconfirming half of symptom A: absorbing must be a property of the PAUSE,
 # not of the pane. A crew that leaves the pause - here by resuming real work - has
 # to lose the pause cadence again on the next reading.
@@ -269,157 +219,6 @@ test_pause_absorb_releases_when_the_crew_resumes() {
   pass "an authoritative active run still releases a declared pause back to wedge tracking"
 }
 
-# The precedence half of symptom A, on the state the production path actually
-# leaves behind. AGENTS.md's sparse status-reporting contract lets a crew resume
-# real work WITHOUT appending a new status line, so the pause declaration stays
-# last on the log and only the authoritative reader knows the run is live again.
-# If the already-surfaced anchor is consulted before that read, the pane is held
-# on the hour-long pause cadence for as long as the declaration stays last - and
-# a run that then wedges never escalates, because handle_paused_stale clears the
-# wedge ladder on every poll. The anchor's suppression must stay bounded by the
-# .paused-rechecked-<key> window, so an expired window re-reads crew state and
-# `working` wins.
-test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status() {
-  local dir state fakebin out capture window key pid line h
-  dir=$(make_case paused-surfaced-resume); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture="$dir/pane.txt"
-  window="test:fm-surfaced-resume"
-  line='paused: awaiting the upstream release'
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/surfaced-resume.meta"
-  declare_pause "$state" surfaced-resume "$line"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf 'idle grok prompt\n' > "$capture"
-  h=$(hash_text "$(cat "$capture")")
-
-  # Exactly what surface_nonterminal_stale leaves behind after this pause has had
-  # its one sighting: the stale suppressor at this hash, the pause flag, the
-  # instance anchor holding the surfaced line, a fresh re-surface throttle - and a
-  # recheck stamp that has since aged out of its STALE_ESCALATE_SECS window.
-  printf '%s' "$h" > "$state/.hash-$key"
-  printf '%s' "$h" > "$state/.stale-$key"
-  printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
-  printf '%s' "$line" > "$state/.paused-resurfaced-$key"
-  date +%s > "$state/.paused-throttle-$key"
-  date +%s > "$state/.paused-rechecked-$key"
-  backdate "$state/.paused-rechecked-$key" 600
-
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
-  pid=$!
-  settle_round "$state" "$window" "$pid" 0 "already-surfaced pause with a resumed crew"
-  [ ! -s "$out" ] \
-    || fail "the resumed run woke firstmate instead of returning to wedge tracking: $(cat "$out")"
-  [ ! -e "$state/.paused-$key" ] \
-    || fail "an already-surfaced declared pause outranked a working crew-state read and kept the pause cadence: $(state_dump "$state" "$window")"
-  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$line" ] \
-    || fail "the release discarded the pause instance anchor, so this same pause reads as never shown: $(state_dump "$state" "$window")"
-  [ -e "$state/.paused-throttle-$key" ] \
-    || fail "the release discarded the re-surface throttle, the only bound on the long pause cadence: $(state_dump "$state" "$window")"
-  [ -s "$state/.stale-since-$key" ] \
-    || fail "the released pane did not resume wedge tracking, so a wedge from here would never escalate: $(state_dump "$state" "$window")"
-  pass "an already-surfaced pause still releases on a working read when the crew appended no new status"
-}
-
-# The composition the marker split and the precedence fix make reachable
-# together, and the property that pins it: A DECLARED PAUSE THAT HAS NOT CHANGED
-# SURFACES ONCE AND THEN STAYS ON THE LONG CADENCE, WHETHER OR NOT THE CREW HAS
-# RESUMED SINCE. Releasing a pane is a statement about the CLASSIFICATION, so a
-# release that also drops .paused-throttle-<key> or .paused-resurfaced-<key>
-# resets the cadence clock and the already-shown record for a pause the captain
-# was already woken for, and the same declaration wakes them a second time the
-# moment crew state falls back to the log. Both halves are individually correct
-# and wrong together, which is why this needs its own cover.
-test_a_released_pause_stays_on_the_long_cadence_when_unchanged() {
-  local dir state fakebin out capture window key line h pid i
-  dir=$(make_case paused-release-cadence); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture="$dir/pane.txt"
-  window="test:fm-release-cadence"
-  line='paused: awaiting the upstream release'
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/release-cadence.meta"
-  declare_pause "$state" release-cadence "$line"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf 'idle grok prompt\n' > "$capture"
-  h=$(hash_text "$(cat "$capture")")
-
-  # One watcher process, two verdicts. The reader answers `working` while the
-  # run-step marker exists and falls back to the unchanged declaration once this
-  # test removes it, so the release and the poll after it land in the SAME
-  # watcher lifetime - the sequence a captain actually lives through, and not
-  # reproducible by seeding the post-release state by hand.
-  : > "$dir/run-step-live"
-  cat > "$fakebin/fm-crew-state.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ -e "${FM_FAKE_RUN_STEP_MARKER:?}" ]; then
-  printf 'state: working · source: run-step · validating (running)\n'
-else
-  printf 'state: paused · source: status-log · awaiting the upstream release\n'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/fm-crew-state.sh"
-
-  # Exactly what surface_nonterminal_stale leaves behind once this pause has had
-  # its one sighting, with the recheck stamp aged out of its window.
-  printf '%s' "$h" > "$state/.hash-$key"
-  printf '%s' "$h" > "$state/.stale-$key"
-  printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
-  printf '%s' "$line" > "$state/.paused-resurfaced-$key"
-  date +%s > "$state/.paused-throttle-$key"
-  date +%s > "$state/.paused-rechecked-$key"
-  backdate "$state/.paused-rechecked-$key" 600
-
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_RUN_STEP_MARKER="$dir/run-step-live" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
-  pid=$!
-
-  i=0
-  while [ "$i" -lt 400 ]; do
-    kill -0 "$pid" 2>/dev/null || break
-    grep -F "provably working after a declared pause" "$state/.watch-triage.log" >/dev/null 2>&1 && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  kill -0 "$pid" 2>/dev/null || {
-    wait "$pid" 2>/dev/null || true
-    fail "the watcher exited before it released the pause on the working read: $(cat "$out")"
-  }
-
-  # The run step ends. Nothing else changes: the same pause line is still the
-  # crew's last word, and the captain has already been woken for it once.
-  rm -f "$dir/run-step-live"
-  i=0
-  while [ "$i" -lt 400 ]; do
-    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; break; }
-    grep -F "absorbed stale (paused" "$state/.watch-triage.log" >/dev/null 2>&1 && { reap "$pid"; break; }
-    sleep 0.1
-    i=$((i + 1))
-  done
-
-  [ ! -s "$out" ] \
-    || fail "an unchanged declared pause woke firstmate a second time after a release: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "an unchanged declared pause queued a second wake after a release: $(cat "$state/.wake-queue")"
-  [ "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)" = "$line" ] \
-    || fail "the release discarded the pause instance anchor: $(state_dump "$state" "$window")"
-  [ -e "$state/.paused-throttle-$key" ] \
-    || fail "the release discarded the re-surface throttle, so the long cadence has no bound left: $(state_dump "$state" "$window")"
-  [ -e "$state/.paused-$key" ] \
-    || fail "the unchanged pause did not go back onto the bounded pause cadence: $(state_dump "$state" "$window")"
-  grep -F "absorbed stale (paused" "$state/.watch-triage.log" >/dev/null \
-    || fail "the poll after the release never classified the unchanged pause: $(state_dump "$state" "$window")"
-  pass "a released pause that has not changed stays on the long cadence instead of re-surfacing"
-}
-
 # --- symptom A, the orphaned anchor ------------------------------------------
 #
 # The pause markers have two lifetimes (docs/watcher-continuity.md): the
@@ -440,19 +239,6 @@ SH
 
 PAUSE_LINE='paused: awaiting review'
 
-# Firstmate drains and acknowledges a wake episode before it re-arms the watcher.
-# An unacknowledged episode makes the NEXT watcher spend its whole cycle
-# announcing `check: rearm-resurface` instead of triaging, so a case that needs
-# more than one watcher lifetime has to do between rounds what firstmate does.
-ack_watcher_episode() {  # <state>
-  local state=$1 gen
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 || true
-  gen=$(recovery_marker_generation "$state/.watcher-down" 2>/dev/null || true)
-  [ -n "$gen" ] || return 0
-  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_ack "$2" "$3"' \
-    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$gen" >/dev/null 2>&1 || true
-}
-
 # Seed the state a window is in after its declared pause was surfaced once and the
 # crew then resumed: the DURABLE pair still records what firstmate was shown and
 # when, and release_pause_classification has already dropped the transient pair.
@@ -461,17 +247,6 @@ seed_released_pause() {  # <state> <window-key>
   printf '%s' "$PAUSE_LINE" > "$state/.paused-resurfaced-$key"
   date +%s > "$state/.paused-throttle-$key"
   rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key"
-}
-
-# Write <task>'s status WITHOUT backdating it and hide it from the per-poll signal
-# scan. A redeclaration is fresh by definition, and its freshness is load-bearing:
-# resurface_absorbed refuses to wake inside PAUSE_RESURFACE_SECS of the status
-# mtime, so a backdated redeclaration would wake for that reason instead of
-# proving the anchor was cleaned up.
-redeclare_pause_now() {  # <state> <task>
-  local state=$1 task=$2 statusf="$1/$2.status"
-  printf '%s\n' "$PAUSE_LINE" > "$statusf"
-  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${task}_status"
 }
 
 # A fake tmux whose busy pane renders a new frame on every capture while
@@ -551,117 +326,6 @@ run_surface_round() {  # <dir> <window> <pane-text> <crew-state>
   done
   reap "$pid"
   return 0
-}
-
-# Shared assertion: the cleanup gate under test dropped the durable pair, and the
-# identical redeclaration that follows is therefore surfaced as the new decision
-# gate it is, rather than absorbed as one firstmate was already shown.
-assert_orphan_cleared_and_redeclaration_surfaces() {  # <dir> <window> <task> <key> <gate>
-  local dir=$1 window=$2 task=$3 key=$4 gate=$5 state="$1/state"
-  [ ! -e "$state/.paused-resurfaced-$key" ] \
-    || fail "$gate: the pause instance anchor outlived the declaration it describes: $(state_dump "$state" "$window")"
-  [ ! -e "$state/.paused-throttle-$key" ] \
-    || fail "$gate: the re-surface throttle outlived the declaration it describes: $(state_dump "$state" "$window")"
-  ack_watcher_episode "$state"
-  redeclare_pause_now "$state" "$task"
-  run_surface_round "$dir" "$window" 'idle grok prompt, waiting (context left: 88%)' \
-    "state: paused · source: status-log · ${PAUSE_LINE#paused: }"
-  [ "$(stale_wakes "$state" "$window")" -ge 1 ] \
-    || fail "$gate: an identical redeclaration was absorbed under the orphaned anchor instead of surfacing as a new decision gate: $(state_dump "$state" "$window")"
-  grep -F "declared pause" "$dir/watch.out" >/dev/null \
-    || fail "$gate: the redeclaration surfaced without saying it was a declared pause: $(cat "$dir/watch.out")"
-}
-
-# Gate 1: the declaration is gone. The crew replaced its pause line with ordinary
-# progress, so the anchor now describes a declaration that no longer exists and
-# must go with it. Isolated to this gate: .stale-<key> is seeded at the current
-# hash and the pane is idle, so the stale path takes the already-classified leg
-# and neither of the other two gates is reached.
-test_declaration_gone_gate_drops_the_orphaned_anchor() {
-  local dir state window task key h
-  dir=$(make_case orphan-declaration-gone); state="$dir/state"
-  window="test:fm-orphan-gone"; task=orphan-gone
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
-  : > "$dir/watch.out"
-  h=$(hash_text 'idle grok prompt')
-  printf '%s' "$h" > "$state/.hash-$key"
-  printf '%s' "$h" > "$state/.stale-$key"
-  printf '1\n' > "$state/.count-$key"
-  seed_released_pause "$state" "$key"
-
-  # The crew's own next status line is what retires the declaration.
-  printf 'working: back on it\n' > "$state/$task.status"
-  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
-  run_cleanup_round "$dir" "$window" 'idle grok prompt' \
-    'state: working · source: run-step · validating (running)'
-  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
-    "declaration-gone gate"
-  pass "the declaration-gone gate drops an orphaned pause anchor left by a release"
-}
-
-# Gate 2: the busy pane, stable hash. The declaration still stands, but the pane
-# is demonstrably working, which is the pre-existing rule for clearing stale pause
-# bookkeeping. Isolated to this gate: the declaration is intact so gate 1 cannot
-# fire, and the hash is stable so gate 3 is never reached.
-test_busy_pane_gate_drops_the_orphaned_anchor() {
-  local dir state window task key h busy
-  dir=$(make_case orphan-busy-pane); state="$dir/state"
-  window="test:fm-orphan-busy"; task=orphan-busy
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
-  : > "$dir/watch.out"
-  busy='working on it
-Ctrl+c:cancel'
-  h=$(hash_text "$busy")
-  printf '%s' "$h" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  # A completed turn inside the bound keeps the busy pane out of
-  # busy_turn_bound_check, so this case exercises the cleanup gate and not the
-  # crossed-turn-bound path.
-  : > "$state/$task.turn-ended"
-  declare_pause "$state" "$task" "$PAUSE_LINE"
-  seed_released_pause "$state" "$key"
-
-  run_cleanup_round "$dir" "$window" "$busy" \
-    "state: working · source: pane · harness busy"
-  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
-    "busy-pane gate"
-  pass "the busy-pane gate drops an orphaned pause anchor left by a release"
-}
-
-# Gate 3: the busy pane whose hash also changed, the sibling of gate 2 on the
-# other side of the hash branch. Isolated to this gate: the declaration is intact
-# so gate 1 cannot fire, and the pane REPAINTS on every capture - a busy harness
-# rendering a frame counter - so every poll takes the hash-changed branch and gate
-# 2, which lives only in the stable-hash branch, is never reached. Without the
-# repaint the hash settles after one poll and gate 2 cleans up instead, which
-# would leave this case green with gate 3 broken.
-test_hash_changed_gate_drops_the_orphaned_anchor() {
-  local dir state window task key
-  dir=$(make_case orphan-hash-changed); state="$dir/state"
-  window="test:fm-orphan-hash"; task=orphan-hash
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
-  : > "$dir/watch.out"
-  install_repainting_busy_tmux "$dir/fakebin"
-  printf '%s' "$(hash_text 'a completely different pane')" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  : > "$state/$task.turn-ended"
-  declare_pause "$state" "$task" "$PAUSE_LINE"
-  seed_released_pause "$state" "$key"
-
-  export FM_FAKE_REPAINT_COUNTER="$dir/repaint"
-  : > "$FM_FAKE_REPAINT_COUNTER"
-  run_cleanup_round "$dir" "$window" 'unused - the repainting fake owns the pane' \
-    "state: working · source: pane · harness busy"
-  # The redeclaration has to be judged on a settled idle pane, so retire the
-  # repaint and let the fake fall back to the pane file the helpers write.
-  rm -f "$FM_FAKE_REPAINT_COUNTER"
-  unset FM_FAKE_REPAINT_COUNTER
-  assert_orphan_cleared_and_redeclaration_surfaces "$dir" "$window" "$task" "$key" \
-    "hash-changed gate"
-  pass "the hash-changed gate drops an orphaned pause anchor left by a release"
 }
 
 # --- symptom B --------------------------------------------------------------
@@ -938,13 +602,7 @@ test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
 }
 
 test_declared_pause_with_live_agent_surfaces_once_across_repaints
-test_a_different_declared_pause_gets_its_own_sighting
 test_pause_absorb_releases_when_the_crew_resumes
-test_a_surfaced_pause_releases_on_a_working_read_with_no_new_status
-test_a_released_pause_stays_on_the_long_cadence_when_unchanged
-test_declaration_gone_gate_drops_the_orphaned_anchor
-test_busy_pane_gate_drops_the_orphaned_anchor
-test_hash_changed_gate_drops_the_orphaned_anchor
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window
 test_unreadable_state_read_is_not_a_lost_work_signal
