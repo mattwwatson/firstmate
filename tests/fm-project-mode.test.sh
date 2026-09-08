@@ -334,6 +334,13 @@ test_every_caller_reads_the_field_it_intends() {
         *'--persona'*) ;;                                       # the one-word persona query
         *'--path'*|*'--list-paths'*) ;;                         # path queries: no mode/grants field read
         *'pure-contract-unit'*) ;;                              # fm-test-run.sh changed-file family map: filename pattern, not a call
+        # bin/fm-spawn.sh's standing-posture notice, reviewed and registered here.
+        # It reads the MODE only: --raw returns the registry annotation verbatim, so a
+        # conditional policy stays visible instead of collapsing to its most rigorous
+        # leg, and `cut -d' ' -f1` takes word 1 and never the grants field. The --raw
+        # port is deliberate: the merged spawn compares a task's chosen mode against
+        # the standing posture, and without it that comparison silently degrades.
+        *'--raw '*'-f1'*) ;;                                    # mode only, from the raw annotation
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
     done < <(grep -n 'fm-project-mode\.sh' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
