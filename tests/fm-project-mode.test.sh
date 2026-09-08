@@ -525,20 +525,23 @@ EOF
   # The fleet view is the supervising agent's read of that record, so assert the
   # grants it actually renders for a task whose grants are known, from the
   # documented fm-fleet-snapshot.v1 JSON contract rather than the script's source.
-  if command -v jq >/dev/null 2>&1; then
-    rec=$(make_spawn_case rendered)
-    IFS='|' read -r home proj wt fakebin grok_home id <<EOF
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip: jq not found, the fleet view half of this case did not run"
+    pass "resolved grants reach task metadata"
+    return 0
+  fi
+  rec=$(make_spawn_case rendered)
+  IFS='|' read -r home proj wt fakebin grok_home id <<EOF
 $rec
 EOF
-    out=$(spawn_ship "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id" \
-      --mode no-mistakes --grants findings,local-merge)
-    status=$?
-    expect_code 0 "$status" "the spawn feeding the fleet view should succeed: $out"
-    rendered=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-fleet-snapshot.sh" --json \
-      | jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .grants')
-    [ "$rendered" = "findings,local-merge" ] \
-      || fail "the fleet view did not surface the task's resolved grants (got '$rendered')"
-  fi
+  out=$(spawn_ship "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id" \
+    --mode no-mistakes --grants findings,local-merge)
+  status=$?
+  expect_code 0 "$status" "the spawn feeding the fleet view should succeed: $out"
+  rendered=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-fleet-snapshot.sh" --json \
+    | jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .grants')
+  [ "$rendered" = "findings,local-merge" ] \
+    || fail "the fleet view did not surface the task's resolved grants (got '$rendered')"
   pass "resolved grants reach task metadata and the fleet view"
 }
 

@@ -137,6 +137,13 @@ The two lifetimes are deliberately decoupled.
 A cleanup gated on the flag therefore skips a window that was merely released, orphaning the anchor: the next declaration of the same text is compared against it, matches, and is absorbed as already-shown, so a genuinely new decision gate can stay invisible for a full `PAUSE_RESURFACE_SECS`.
 Ask `pause_bookkeeping_present` instead, which reads all four.
 
+**Sharing a predicate is not sharing a rule.**
+That answer says what bookkeeping exists; it does not say what a given gate is entitled to remove.
+Several gates here test the same marker for different reasons, so a change that is correct for one of them can be wrong for the others, and a gate's condition must be read for what it DECIDES rather than for what it tests.
+The consequence in this area: only a gate conditioned on the declaration having GONE may clear the durable markers.
+A gate that can fire while a declaration still stands must not clear them, because the anchor and the throttle exist precisely to bound the re-surfacing of a declaration that stands; the most such a gate may drop is the transient pair, via `release_pause_classification`.
+So before changing any gate that touches these markers, including one this page has never named, decide which question it answers - has this declaration gone, or is an absorb in flight - and give it only the cleanup that question authorises.
+
 Two consequences worth stating, because each has been got wrong once:
 
 - Clearing the anchor on a release re-wakes firstmate for a pause it was already shown.
