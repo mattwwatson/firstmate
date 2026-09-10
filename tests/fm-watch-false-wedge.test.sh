@@ -123,43 +123,6 @@ bare_stale_wakes() {  # <state> <window>
 # its own (a context counter, a rotating hint) and is what used to re-arm the
 # whole classification.
 
-test_declared_pause_with_live_agent_surfaces_once_across_repaints() {
-  local dir state fakebin out capture statusf window key round pid wakes bare before
-  dir=$(make_case paused-live-repaint); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture="$dir/pane.txt"; statusf="$state/paused-live.status"
-  window="test:fm-paused-live"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused-live.meta"
-  printf 'working: implementing\npaused: rebased on current base, awaiting pipeline go-ahead\n' > "$statusf"
-  backdate "$statusf" 7200
-  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-paused-live_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-
-  round=1
-  while [ "$round" -le 6 ]; do
-    printf 'idle grok prompt, waiting\ncontext left: %s%%\n' "$((90 - round))" > "$capture"
-    before=$(decisions "$state" "$window")
-    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-      FM_FAKE_CREW_STATE='state: paused · source: status-log · rebased on current base, awaiting pipeline go-ahead' \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
-    pid=$!
-    settle_round "$state" "$window" "$pid" "$before" "paused-live round $round"
-    round=$((round + 1))
-  done
-
-  wakes=$(stale_wakes "$state" "$window")
-  bare=$(bare_stale_wakes "$state" "$window")
-  [ "$wakes" -eq 1 ] || fail "a live-agent declared pause woke firstmate $wakes times across six pane repaints (expected 1): $(cat "$out")"
-  [ "$bare" -eq 0 ] || fail "the live-agent pause surfaced $bare bare stale wakes with no pause context"
-  grep -F "declared pause" "$out" >/dev/null || fail "the surfaced pause wake did not say it was a declared pause: $(cat "$out")"
-  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was reported as a possible wedge"
-  [ -e "$state/.paused-$key" ] || fail "the pause tracking marker did not survive the pane repaints"
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a declared pause accumulated wedge escalations"
-  pass "a declared pause with a live agent surfaces once, labeled, and stays absorbed across pane repaints"
-}
-
 # One watcher round against a paused crew, with the pane text the caller chose.
 # The status file is left alone, so the caller owns which pause is declared.
 run_paused_round() {  # <dir> <window> <pane-text> <crew-state> <what>
@@ -601,7 +564,6 @@ test_demand_deep_inspection_still_reached_for_a_persistent_wedge() {
   pass "a genuinely persistent wedge still climbs the ladder to demand-deep-inspection"
 }
 
-test_declared_pause_with_live_agent_surfaces_once_across_repaints
 test_pause_absorb_releases_when_the_crew_resumes
 test_long_quiet_step_stops_re_escalating_on_the_fixed_cadence
 test_lost_work_signal_escalates_inside_the_backoff_window

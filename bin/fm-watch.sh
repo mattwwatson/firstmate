@@ -916,7 +916,7 @@ pause_state_class() {  # <window> <task>
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declaration='' declared=1 throttled=1 reason
+  local win=$1 h=$2 key task last declaration='' declared=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
@@ -928,17 +928,8 @@ surface_nonterminal_stale() {  # <window> <hash>
       throttled=0
     fi
   fi
-  # PAYLOAD-only, and deliberately not the wake KEY. The key stays "$win", which is
-  # what the away-mode daemon reads: it resolves windows through window_to_task and
-  # never parses this field, so the label cannot reach that handoff. Computed once
-  # so the queued record and the printed wake carry the same text.
-  # tests/fm-watch-false-wedge.test.sh owns the cover.
-  reason="stale: $win"
-  if [ "$declared" -eq 0 ]; then
-    reason="stale: $win (declared pause, agent still live - surfaced once, then rechecked on the long pause cadence not as a wedge; confirm the wait is real)"
-  fi
   if [ "$throttled" -ne 0 ]; then
-    fm_wake_append stale "$win" "$reason" || exit 1
+    fm_wake_append stale "$win" "stale: $win" || exit 1
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
@@ -954,7 +945,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     triage_log "absorbed non-terminal stale (declared wait already re-surfaced this window): $win"
     return 0
   fi
-  wake "$reason"
+  wake "stale: $win"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
