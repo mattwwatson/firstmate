@@ -278,6 +278,91 @@ test_ahoy_user_role_injections_share_one_marker() {
   pass "ahoy: one canonical owner constructs typed operational input for every Firstmate-controlled user-role producer"
 }
 
+# The two pairing wrappers are only reachable because the harness reads their
+# frontmatter: the skill directory name is the slash command the captain types,
+# and user-invocable decides whether it is offered at all. A wrapper is also
+# useless if a skill or script it delegates to has moved. This parses the
+# frontmatter into a record and checks both, for every wrapper at once.
+board_wrapper_report() {
+  python3 - "$ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+problems = []
+
+
+def frontmatter(text):
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if match is None:
+        return None
+    record, pending = {}, None
+    for line in match.group(1).split("\n"):
+        if line.startswith("  ") and pending is not None:
+            if isinstance(pending, list):
+                pending.append(line.strip())
+            else:
+                key, _, value = line.strip().partition(":")
+                pending[key] = value.strip()
+            continue
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if value == ">-":
+            pending = []
+            record[key] = pending
+        elif value == "":
+            pending = {}
+            record[key] = pending
+        else:
+            record[key] = value
+            pending = None
+    for key, value in list(record.items()):
+        if isinstance(value, list):
+            record[key] = " ".join(value)
+    return record
+
+
+for name in ("bearings-board", "ahoy-board"):
+    skill = root / ".agents/skills" / name / "SKILL.md"
+    if not skill.is_file():
+        problems.append(f"{name}: SKILL.md is missing")
+        continue
+    text = skill.read_text(encoding="utf-8")
+    record = frontmatter(text)
+    if record is None:
+        problems.append(f"{name}: frontmatter does not parse")
+        continue
+    if record.get("name") != name:
+        problems.append(f"{name}: declares name '{record.get('name')}', so /{name} is not the command")
+    if record.get("user-invocable") != "true":
+        problems.append(f"{name}: is not user-invocable, so the captain cannot run /{name}")
+    if record.get("metadata", {}).get("internal") != "true":
+        problems.append(f"{name}: is not marked internal")
+    if not record.get("description"):
+        problems.append(f"{name}: has no description for the harness to show")
+    for target in re.findall(r"\(\.\./([a-z-]+)/SKILL\.md\)", text):
+        if not (root / ".agents/skills" / target / "SKILL.md").is_file():
+            problems.append(f"{name}: delegates to missing skill '{target}'")
+    for script in re.findall(r"`(bin/[a-z0-9-]+\.sh)`", text):
+        path = root / script
+        if not path.is_file():
+            problems.append(f"{name}: names missing script {script}")
+        elif not path.stat().st_mode & 0o111:
+            problems.append(f"{name}: names non-executable script {script}")
+
+print("\n".join(problems) if problems else "board wrappers ok")
+PY
+}
+
+test_board_wrappers_are_discoverable_captain_commands() {
+  local report
+  report=$(board_wrapper_report) || fail "board wrapper frontmatter check did not run"
+  assert_contains "$report" "board wrappers ok" \
+    "the board pairing wrappers are not captain-invocable as named"
+  pass "/bearings-board and /ahoy-board are discoverable and their delegated skills and scripts resolve"
+}
+
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
@@ -291,3 +376,4 @@ test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
 test_ahoy_scans_visible_history_for_open_decisions
 test_ahoy_user_role_injections_share_one_marker
+test_board_wrappers_are_discoverable_captain_commands

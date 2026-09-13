@@ -112,11 +112,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/ahoy-board/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/bearings/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings-board/SKILL.md",
       "audience": "agent-runtime"
     },
     {

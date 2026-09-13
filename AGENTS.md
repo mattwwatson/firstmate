@@ -494,6 +494,8 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 Load these only at their precise triggers; unless an entry says otherwise, they are not captain-invocable.
 
+- `ahoy-board` - load when the captain invokes `/ahoy-board`, which runs the ahoy recap and then rebuilds the board from a snapshot the board step gathers itself; captain-invocable.
+- `bearings-board` - load when the captain invokes `/bearings-board`, which runs bearings and then rebuilds the board from the snapshot bearings just gathered; captain-invocable.
 - `board` - load before rebuilding the captain's fleet board: work becomes ready for the captain, work stops being ready, work is dispatched, the queue changes, a new decision for the captain surfaces, or a stretch of consecutive review-gate decisions ends; also captain-invocable as `/board`.
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `FORGE_CREDENTIAL:`, `TANGLE:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
