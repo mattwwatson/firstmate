@@ -366,6 +366,46 @@ run_bootstrap() {  # <case-dir>
 
 # --- dispatch ---------------------------------------------------------------
 
+# The row helpers pass --file only for the markdown backend, so that a probe
+# lands on the backlog belonging to the home that owns the task rather than on
+# whatever the working directory implies. Both read the backend through
+# fm_tasks_axi_backend, and when that helper is absent the check does not fail
+# loudly: under set -eu an undefined function in a command substitution yields an
+# empty string, the markdown comparison is simply false, and both helpers take
+# the non-markdown branch and silently drop --file. This asserts the helpers'
+# own argv directly, because that dropped flag is the whole defect and no
+# script's observable result distinguishes it from a correct read.
+test_row_helpers_address_the_markdown_backlog_by_file() {
+  local case_dir data resolved argv
+  case_dir=$(make_home row-addressing)
+  data="$(home_of "$case_dir")/data"
+  # The helpers address the resolved data directory, so the expectation is the
+  # resolved path, not the one the fixture happened to build.
+  resolved=$(cd "$data" && pwd -P)
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$data/backlog.md"
+  argv="$case_dir/argv.log"; : > "$argv"
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$argv"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  PATH="$case_dir/fakebin:$PATH" bash -c '
+    . "$1/bin/fm-tasks-axi-lib.sh"
+    . "$1/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_row_show "$2" row-x1 >/dev/null 2>&1
+    fm_backlog_row_list "$2" >/dev/null 2>&1
+  ' _ "$ROOT" "$data"
+
+  grep -q -- "^show row-x1 --file $resolved/backlog.md\$" "$argv" \
+    || fail "row show did not address this home's backlog by file: $(cat "$argv")"
+  grep -q -- "^list --file $resolved/backlog.md\$" "$argv" \
+    || fail "row list did not address this home's backlog by file: $(cat "$argv")"
+  pass "the row helpers address a markdown-backed home's own backlog by file"
+}
+
 test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   local case_dir id out
   id=atomic-dispatch-b1
@@ -2222,6 +2262,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_row_helpers_address_the_markdown_backlog_by_file
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources

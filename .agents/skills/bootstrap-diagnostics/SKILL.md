@@ -62,13 +62,15 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Resume the emitted supervision protocol after finishing the session-start wake handling.
 - Any other `PR_CHECK_MIGRATION:` refusal means migration did not complete safely, whether because watcher exclusion, a private path, a diagnostic, quarantine validation, or marker publication could not be proved.
   Keep each affected poll unavailable, inspect the named private state path, and do not bypass the migration or execute a quarantined artifact; a completed safe-scan marker allows unrelated authenticated polls to continue while private repair remains pending.
-- `BOOTSTRAP_INFO: closed the backlog item for <id> after interrupted cleanup; its endpoint or local copy may remain and should be reconciled` - replay closed the item, but the durable close says physical cleanup was interrupted.
+- `BOOTSTRAP_INFO: closed the backlog item for <id> after interrupted cleanup; its endpoint or local copy may remain and should be reconciled` - replay closed the item, but the durable transition says physical cleanup was interrupted.
   Verify process reaping, the local-copy return, and endpoint closure, then reconcile any surviving resource.
-- `BACKLOG_RECONCILE: <id>: recorded backlog close could not be replayed: <reason>` - this session start found a pending-close record but could not land it.
-  A valid teardown record proves the close was authorized and recorded, but physical cleanup may be partial: verify process reaping, the local-copy return, and endpoint closure before assuming those resources are gone.
+- `BOOTSTRAP_INFO: kept the captain call for <id> open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled` - replay retained the captain-held item, but physical cleanup was interrupted.
+  Verify process reaping, the local-copy return, and endpoint closure without closing or lifting the captain's call, then reconcile any surviving resource.
+- `BACKLOG_RECONCILE: <id>: recorded backlog close could not be replayed: <reason>` - this session start found a pending-close record carrying a close or retention transition but could not land it.
+  A valid teardown record proves the transition was authorized and recorded, but physical cleanup may be partial: verify process reaping, the local-copy return, and endpoint closure before assuming those resources are gone.
   A validation error means the record cannot be trusted, so do not assume cleanup completed or follow any path or argument stored in it.
-  Read the named reason, inspect the marker as inert data when validation failed, fix the record or backlog-file problem, and rerun session start so a valid recorded close replays.
-  Never hand-close the item by deleting `state/<id>.backlog-close` - that can discard a completion link the cleanup captured, and the surviving marker prevents the record sweep from starting the item meanwhile.
+  Read the named reason, inspect the marker as inert data when validation failed, fix the record or backlog-file problem, and rerun session start so the valid recorded transition replays.
+  Never delete `state/<id>.backlog-close` by hand - that can discard a completion link or captain-call retention the cleanup captured, and the surviving marker prevents the record sweep from starting the item meanwhile.
 - `BACKLOG_RECONCILE: <id>: worker record exists but its backlog item could not be read: <reason>` - this home could not determine whether the item matches its worker record.
   Resolve the named backlog read problem and rerun session start; never guess by starting or closing an unreadable item.
 - `BACKLOG_RECONCILE: <id>: worker record exists but its backlog item could not be moved to In flight: <reason>` - this home owns a worker whose backlog item is still queued, and the reconciliation could not correct it.
