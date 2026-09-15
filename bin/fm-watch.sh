@@ -1669,7 +1669,11 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_tracking "$key"
+                # clear_pause_state, NOT clear_pause_tracking: the next line
+                # checks the wedge timer, and the wider helper deletes the very
+                # file it reads, so the timer restarts every poll instead of
+                # accumulating. Upstream's own line, and it must stay that way.
+                working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
