@@ -1523,6 +1523,18 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
+# KNOWN FAILING, deliberately left failing and deliberately not disabled.
+# It fails with "repeat authoritative working recheck reset the wedge timer".
+#
+# This fork took upstream's pause design (3532) without 3842, which is what
+# bounds the re-surface identity that keeps a rechecked pause from resetting the
+# timer. 3842 in turn needs 3508, and the captain ruled on 15/09/2026 that both
+# arrive together in the later rebuild against upstream's main rather than being
+# cherry-picked here. Until that rebuild this case is expected to fail.
+#
+# This suite has no known-failure or expected-failure marker, so there is nothing
+# to mark it with; fail() exits, so this case also stops the 18 cases after it
+# from running. Do not "fix" it by weakening the assertion, and do not skip it.
 test_paused_authoritative_working_preserves_wedge_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
