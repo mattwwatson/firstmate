@@ -37,6 +37,7 @@ set -u
 . "$ROOT/bin/fm-classify-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-false-wedge-tests)
 
@@ -70,11 +71,46 @@ decisions() {  # <state> <window>
 # the previous round's state, and one that keeps polling after its decision gives
 # later polls a chance to churn the markers under the assertions. A round that
 # produces neither outcome inside the bound is a failure, never a silent no-op.
+# Acknowledge the wake this round left on the durable queue, exactly as firstmate
+# does at the start of a handling turn. Byte-identical to the helper in
+# tests/fm-watch-triage.test.sh, which is upstream's file and upstream's helper.
+#
+# It is needed here because every round in this file starts a watcher and then
+# stops it. A watcher that starts while wakes are still queued treats that as
+# work missed during downtime and announces `check: rearm-resurface` before
+# anything else - correctly - and this file's one-decision-per-round design then
+# counts that announcement as the round's decision, so the wedge behaviour under
+# test never gets its turn. Draining between rounds restores the premise these
+# covers were written under: a fresh round, nothing outstanding.
+# Draining is the default because it restores the premise every round is written
+# under. It is switched OFF for the one cover that counts rows in the durable
+# queue itself (stale_wakes), because acknowledging removes the very evidence
+# that cover measures - the fixture may be repaired, but no cover's assertion
+# may be changed to suit it.
+ACK_BETWEEN_ROUNDS=1
+
+ack_stopped_cycle() {  # <state>
+  local state=$1 err sequence generation
+  err="$state/.test-cycle-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  rm -f "$err"
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation"
+}
+
+round_ack() {  # <state>
+  [ "$ACK_BETWEEN_ROUNDS" = 1 ] || return 0
+  ack_stopped_cycle "$1" || true
+}
+
 settle_round() {  # <state> <window> <pid> <decisions-before> <what>
   local state=$1 window=$2 pid=$3 before=$4 what=$5 i=0
   while [ "$i" -lt 400 ]; do
-    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
-    [ "$(decisions "$state" "$window")" -gt "$before" ] && { reap "$pid"; return 0; }
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; round_ack "$state"; return 0; }
+    [ "$(decisions "$state" "$window")" -gt "$before" ] && { reap "$pid"; round_ack "$state"; return 0; }
     sleep 0.1
     i=$((i + 1))
   done
@@ -448,6 +484,10 @@ test_unreadable_state_read_is_not_a_lost_work_signal() {
 # its own terms: it names the reader and claims neither a wedge nor a stop.
 test_permanently_failing_reader_still_surfaces_on_a_bounded_cadence() {
   local dir state window key broken
+  # This cover counts rows in the durable wake queue across rounds, so the
+  # between-round acknowledgement that the other covers need would delete what it
+  # measures. It runs on the original premise instead.
+  ACK_BETWEEN_ROUNDS=0
   dir=$(make_case unreadable-forever); state="$dir/state"
   window="test:fm-noreader"
   broken='fm-crew-state.sh: cannot resolve the task'
@@ -508,6 +548,7 @@ test_permanently_failing_reader_still_surfaces_on_a_bounded_cadence() {
   run_wedge_round "$dir" "$window" 660 300 'state: working · source: run-step · validating (running)' 'reader recovers'
   [ ! -e "$state/.wedge-unreadable-$key" ] && [ ! -e "$state/.wedge-unreadable-surfaced-$key" ] \
     || fail "a readable verdict left the unreadable bookkeeping behind: $(state_dump "$state" "$window")"
+  ACK_BETWEEN_ROUNDS=1
   pass "a permanently failing crew-state reader surfaces, then backs off, never as a wedge or a stop"
 }
 
